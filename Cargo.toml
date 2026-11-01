@@ -1,0 +1,47 @@
+[package]
+name = "lapis"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
+eframe = { version = "0.37", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "x11",
+    "wayland",
+    "links",
+    "clipboard",
+] }
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui_commonmark = "0.26"
+egui_commonmark_backend = "0.26"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+lopdf = "0.34"
+rfd = "0.17.2"
+arboard = { version = "3", features = ["wayland-data-control"] }
+cpal = "0.18"
+hound = "3.5"
+rodio = "0.23"
+parakeet-rs = "0.4"
+flate2 = "1.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+egui_extras = { version = "0.37", features = ["all_loaders", "image", "file"] }
+spellbook = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[package.metadata.packager]
+product_name = "Lapis"
+identifier = "com.lapis.studysuite"
+description = "Advanced PDF study suite"
+formats = ["nsis"]
+
+[patch.crates-io]
+winit = { path = "patches/winit" }
