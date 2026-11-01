@@ -56,7 +56,7 @@ Lapis is distributed as a native application. Pre-built packages are available f
 The installation script can download and install the latest release into `~/.local/bin`, install the application icon, register a `.desktop` entry, and optionally download the Parakeet transcription model.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<YOUR-USERNAME>/lapis/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/EnricoDiMaria/lapis/main/install.sh | bash
 ```
 
 If Lapis is already installed, the script provides an interactive management menu for updating the application, installing or repairing the transcription model, reinstalling desktop integration, and uninstalling Lapis.
@@ -65,13 +65,13 @@ You can also invoke individual actions:
 
 ```bash
 # Update Lapis
-curl -fsSL https://raw.githubusercontent.com/<YOUR-USERNAME>/lapis/main/install.sh | bash -s -- update
+curl -fsSL https://raw.githubusercontent.com/EnricoDiMaria/lapis/main/install.sh | bash -s -- update
 
 # Download or repair the Parakeet model
-curl -fsSL https://raw.githubusercontent.com/<YOUR-USERNAME>/lapis/main/install.sh | bash -s -- model
+curl -fsSL https://raw.githubusercontent.com/EnricoDiMaria/lapis/main/install.sh | bash -s -- model
 
 # Uninstall Lapis
-curl -fsSL https://raw.githubusercontent.com/<YOUR-USERNAME>/lapis/main/install.sh | bash -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/EnricoDiMaria/lapis/main/install.sh | bash -s -- uninstall
 ```
 
 ### 2. Local / offline installation
@@ -172,34 +172,6 @@ BASE_URL="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/mai
 curl -fL "$BASE_URL/vocab.txt" -o "$MODEL_DIR/vocab.txt"
 curl -fL "$BASE_URL/encoder-model.int8.onnx" -o "$MODEL_DIR/encoder-model.int8.onnx"
 curl -fL "$BASE_URL/decoder_joint-model.int8.onnx" -o "$MODEL_DIR/decoder_joint-model.int8.onnx"
-```
-
-### macOS
-
-```bash
-MODEL_DIR="$HOME/Library/Application Support/lapis/models/parakeet-tdt-0.6b-v3-int8"
-
-mkdir -p "$MODEL_DIR"
-
-BASE_URL="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
-
-curl -fL "$BASE_URL/vocab.txt" -o "$MODEL_DIR/vocab.txt"
-curl -fL "$BASE_URL/encoder-model.int8.onnx" -o "$MODEL_DIR/encoder-model.int8.onnx"
-curl -fL "$BASE_URL/decoder_joint-model.int8.onnx" -o "$MODEL_DIR/decoder_joint-model.int8.onnx"
-```
-
-### Windows — PowerShell
-
-```powershell
-$ModelDir = "$env:APPDATA\lapis\models\parakeet-tdt-0.6b-v3-int8"
-
-New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
-
-$BaseUrl = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
-
-curl.exe -fL "$BaseUrl/vocab.txt" -o "$ModelDir\vocab.txt"
-curl.exe -fL "$BaseUrl/encoder-model.int8.onnx" -o "$ModelDir\encoder-model.int8.onnx"
-curl.exe -fL "$BaseUrl/decoder_joint-model.int8.onnx" -o "$ModelDir\decoder_joint-model.int8.onnx"
 ```
 
 ## Optional environment variables
