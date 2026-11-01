@@ -1,4 +1,4 @@
-#  Lapis
+# Lapis
 
 **Advanced PDF Study & Lecture Workspace**
 
@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/Built_with-Rust-dca282.svg)](https://www.rust-lang.org/)
 [![GUI](https://img.shields.io/badge/GUI-egui-blue.svg)](https://github.com/emilk/egui)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)](../../releases/latest)
+[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](../../releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -876,6 +876,10 @@ A typical Lapis workflow might look like this:
 
 The result is a single study document combining the original lecture material, your annotations, your own explanations, and the corresponding audio context.
 
+---
+## Roadmap
+
+* **Windows Native Build & MSI Installer**: Finalizing full Windows compatibility and providing an automated graphical setup installer (`.exe` / `.msi`) with Start Menu and Desktop shortcut integration.
 ---
 
 # Data & Privacy
