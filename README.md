@@ -838,7 +838,7 @@ The result is a single study document combining the original lecture material, y
 
 ---
 ## Roadmap
-
+* **Screenshots in README**
 * **Windows Native Build & MSI Installer**: Finalizing full Windows compatibility and providing an automated graphical setup installer (`.exe` / `.msi`) with Start Menu and Desktop shortcut integration.
 ---
 
