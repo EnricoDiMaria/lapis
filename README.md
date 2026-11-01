@@ -88,18 +88,6 @@ chmod +x install.sh
 ./install.sh /path/to/lapis-linux-x86_64.tar.gz
 ```
 
-## Windows
-
-1. Open the [Releases](../../releases/latest) page.
-2. Download `Lapis-setup-x86_64.exe` to use the installer.
-3. Alternatively, download `lapis-windows-x86_64.zip`, extract it, and run `lapis.exe`.
-
-The installer creates the application shortcuts and integrates Lapis into the Windows Start Menu.
-
-## macOS
-
-Download `lapis-macos-aarch64.tar.gz` from [Releases](../../releases/latest), extract the archive, and launch the application.
-
 ## Build from source
 
 Install the [Rust toolchain](https://rustup.rs/), including `cargo` and `rustc`.
