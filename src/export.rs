@@ -15,6 +15,35 @@ pub const CANVAS_W: f64 = 960.0;
 pub const CANVAS_H: f64 = 540.0;
 const MARGIN: f64 = 18.0;
 
+#[derive(Clone, Copy)]
+struct Palette {
+    page_bg: (f64, f64, f64),
+    panel_bg: Option<(f64, f64, f64)>, // None = stesso colore della pagina
+    divider: (f64, f64, f64),
+    text: (f64, f64, f64),
+    muted: (f64, f64, f64),
+    code_bg: (f64, f64, f64),
+}
+
+const LIGHT: Palette = Palette {
+    page_bg: (1.0, 1.0, 1.0), panel_bg: None,
+    divider: (0.88, 0.89, 0.91), text: (0.12, 0.13, 0.16),
+    muted: (0.48, 0.50, 0.56), code_bg: (0.95, 0.955, 0.965),
+};
+const DARK: Palette = Palette {
+    page_bg: (0.075, 0.082, 0.110), panel_bg: Some((0.105, 0.114, 0.153)),
+    divider: (0.22, 0.25, 0.35), text: (0.86, 0.89, 0.95),
+    muted: (0.60, 0.64, 0.74), code_bg: (0.16, 0.19, 0.28),
+};
+
+fn fill_rect(ops: &mut Vec<Operation>, x: f64, y: f64, w: f64, h: f64, c: (f64, f64, f64)) {
+    ops.push(Operation::new("q", vec![]));
+    ops.push(Operation::new("rg", vec![c.0.into(), c.1.into(), c.2.into()]));
+    ops.push(Operation::new("re", vec![x.into(), y.into(), w.into(), h.into()]));
+    ops.push(Operation::new("f", vec![]));
+    ops.push(Operation::new("Q", vec![]));
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 struct SpanStyle {
     bold: bool,
@@ -91,6 +120,7 @@ pub fn export_slides_with_notes(
         let mu_page = mu_doc.load_page((p_num - 1) as i32)?;
         let raw_note = notes.get(&p_num).map(|s| s.as_str()).unwrap_or("").trim();
         let has_note = !raw_note.is_empty();
+        let pal = if has_note { LIGHT } else { DARK };
         let page_anns = annotations
             .get(&p_num)
             .map(|v| v.as_slice())
@@ -101,17 +131,15 @@ pub fn export_slides_with_notes(
         let (img_id, pix_w, pix_h) = render_slide_xobject(&mut pdf, &mu_page, 2.0)?;
 
         if !has_note {
-            // Full-width centered slide when there are no notes on this page
-            let avail_w = CANVAS_W - MARGIN * 2.0;
-            let avail_h = CANVAS_H - MARGIN * 2.0;
+            let avail_w = CANVAS_W - (MARGIN * 2.0); // Oppure CANVAS_W puro se vuoi zero margini
+            let avail_h = CANVAS_H - (MARGIN * 2.0); // Oppure CANVAS_H puro
             let (sx, sy, sw, sh) =
                 fit_rect_in_box(0.0, 0.0, CANVAS_W, CANVAS_H, avail_w, avail_h, pix_w, pix_h);
 
             let mut ops = Vec::new();
-            draw_background(&mut ops, has_note, split_x);
+            draw_background(&mut ops, false, split_x, &pal);
             draw_slide_xobject(&mut ops, sx, sy, sw, sh);
             append_selectable_pdf_text_ops(&mut ops, &mu_page, sx, sy, sw, sh);
-
             draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh);
 
             let page_id = add_export_page(
@@ -141,8 +169,14 @@ pub fn export_slides_with_notes(
 
             for (part_idx, chunk) in note_chunks.into_iter().enumerate() {
                 let mut ops = Vec::new();
-                draw_background(&mut ops, true, split_x);
+                draw_background(&mut ops, true, split_x, &pal);
                 draw_slide_xobject(&mut ops, sx, sy, sw, sh);
+                ops.push(Operation::new("q", vec![]));
+                ops.push(Operation::new("RG", vec![pal.divider.0.into(), pal.divider.1.into(), pal.divider.2.into()]));
+                ops.push(Operation::new("w", vec![0.6.into()]));
+                ops.push(Operation::new("re", vec![sx.into(), sy.into(), sw.into(), sh.into()]));
+                ops.push(Operation::new("S", vec![]));
+                ops.push(Operation::new("Q", vec![]));
                 append_selectable_pdf_text_ops(&mut ops, &mu_page, sx, sy, sw, sh);
                 draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh);
 
@@ -164,13 +198,9 @@ pub fn export_slides_with_notes(
                     &header_str,
                     text_x,
                     header_y,
-                    9.5 * font_scale.clamp(0.85, 1.2),
-                    (0.49, 0.61, 1.0),
-                    SpanStyle {
-                        bold: true,
-                        italic: false,
-                        code: false,
-                    },
+                    8.5 * font_scale.clamp(0.85, 1.2),
+                    pal.muted,
+                    SpanStyle::default(),
                     false,
                 );
 
@@ -179,9 +209,9 @@ pub fn export_slides_with_notes(
                 ops.push(Operation::new("q", vec![]));
                 ops.push(Operation::new(
                     "RG",
-                    vec![0.22.into(), 0.25.into(), 0.34.into()],
+                    vec![pal.divider.0.into(), pal.divider.1.into(), pal.divider.2.into()],
                 ));
-                ops.push(Operation::new("w", vec![0.8.into()]));
+                ops.push(Operation::new("w", vec![0.5.into()]));
                 ops.push(Operation::new("m", vec![text_x.into(), div_y.into()]));
                 ops.push(Operation::new(
                     "l",
@@ -194,7 +224,7 @@ pub fn export_slides_with_notes(
                 let mut cur_y = div_y - 14.0;
                 for line in chunk {
                     cur_y -= line.font_size;
-                    render_layout_line(&mut ops, &line, text_x, cur_y, avail_text_w);
+                    render_layout_line(&mut ops, &line, text_x, cur_y, avail_text_w, &pal);
                     cur_y -= line.height - line.font_size;
                 }
 
@@ -322,12 +352,11 @@ fn fit_rect_in_box(
     (sx, sy, w, h)
 }
 
-fn draw_background(ops: &mut Vec<Operation>, split: bool, split_x: f64) {
-    // Dark slate background matching Lapis theme
+fn draw_background(ops: &mut Vec<Operation>, split: bool, split_x: f64, pal: &Palette) {
     ops.push(Operation::new("q", vec![]));
     ops.push(Operation::new(
         "rg",
-        vec![0.075.into(), 0.082.into(), 0.110.into()],
+        vec![pal.page_bg.0.into(), pal.page_bg.1.into(), pal.page_bg.2.into()],
     ));
     ops.push(Operation::new(
         "re",
@@ -336,30 +365,31 @@ fn draw_background(ops: &mut Vec<Operation>, split: bool, split_x: f64) {
     ops.push(Operation::new("f", vec![]));
 
     if split {
-        // Slightly elevated dark panel on the right for notes
-        ops.push(Operation::new(
-            "rg",
-            vec![0.105.into(), 0.114.into(), 0.153.into()],
-        ));
-        ops.push(Operation::new(
-            "re",
-            vec![
-                split_x.into(),
-                0.into(),
-                (CANVAS_W - split_x).into(),
-                CANVAS_H.into(),
-            ],
-        ));
-        ops.push(Operation::new("f", vec![]));
+        if let Some(pbg) = pal.panel_bg {
+            ops.push(Operation::new(
+                "rg",
+                vec![pbg.0.into(), pbg.1.into(), pbg.2.into()],
+            ));
+            ops.push(Operation::new(
+                "re",
+                vec![
+                    split_x.into(),
+                    0.into(),
+                    (CANVAS_W - split_x).into(),
+                    CANVAS_H.into(),
+                ],
+            ));
+            ops.push(Operation::new("f", vec![]));
+        }
 
         // Vertical separator line at `split_x`
         ops.push(Operation::new(
             "RG",
-            vec![0.22.into(), 0.25.into(), 0.35.into()],
+            vec![pal.divider.0.into(), pal.divider.1.into(), pal.divider.2.into()],
         ));
-        ops.push(Operation::new("w", vec![1.0.into()]));
-        ops.push(Operation::new("m", vec![split_x.into(), 0.into()]));
-        ops.push(Operation::new("l", vec![split_x.into(), CANVAS_H.into()]));
+        ops.push(Operation::new("w", vec![0.6.into()]));
+        ops.push(Operation::new("m", vec![split_x.into(), 24.0.into()]));
+        ops.push(Operation::new("l", vec![split_x.into(), (CANVAS_H - 24.0).into()]));
         ops.push(Operation::new("S", vec![]));
     }
     ops.push(Operation::new("Q", vec![]));
@@ -1230,177 +1260,43 @@ fn paginate_note_lines(lines: &[LayoutLine], max_col_h: f64) -> Vec<Vec<LayoutLi
     pages
 }
 
-fn render_layout_line(
-    ops: &mut Vec<Operation>,
-    line: &LayoutLine,
-    text_x: f64,
-    y: f64,
-    avail_w: f64,
-) {
+fn render_layout_line(ops: &mut Vec<Operation>, line: &LayoutLine, text_x: f64, y: f64, avail_w: f64, pal: &Palette) {
     let sz = line.font_size;
     let char_w = sz * 0.60;
-
     match &line.kind {
         NoteLineKind::Blank => {}
-        NoteLineKind::Rule => {
-            ops.push(Operation::new("q", vec![]));
-            ops.push(Operation::new(
-                "RG",
-                vec![0.26.into(), 0.30.into(), 0.42.into()],
-            ));
-            ops.push(Operation::new("w", vec![0.8.into()]));
-            ops.push(Operation::new(
-                "m",
-                vec![text_x.into(), (y + sz * 0.4).into()],
-            ));
-            ops.push(Operation::new(
-                "l",
-                vec![(text_x + avail_w).into(), (y + sz * 0.4).into()],
-            ));
-            ops.push(Operation::new("S", vec![]));
-            ops.push(Operation::new("Q", vec![]));
-        }
-        NoteLineKind::Heading(lvl, spans) => {
-            let col = match lvl {
-                1 => (0.49, 0.61, 1.0),
-                2 => (0.58, 0.76, 0.98),
-                _ => (0.72, 0.82, 0.98),
-            };
+        NoteLineKind::Rule => fill_rect(ops, text_x, y + sz * 0.4, avail_w, 0.6, pal.divider),
+        NoteLineKind::Heading(_, spans) => {
             let mut cx = text_x;
             for sp in spans {
-                let mut st = sp.style;
-                st.bold = true;
-                cx = push_styled_span(ops, &sp.text, cx, y, sz, col, st, true);
+                let mut st = sp.style; st.bold = true;
+                cx = push_styled_span(ops, &sp.text, cx, y, sz, pal.text, st, true);
             }
         }
         NoteLineKind::Bullet(indent, spans) => {
-            let indent_pt = (*indent as f64) * 12.0;
-            let bullet_x = text_x + indent_pt + 4.0;
-
-            // Draw crisp bullet circle
-            ops.push(Operation::new("q", vec![]));
-            ops.push(Operation::new(
-                "rg",
-                vec![0.49.into(), 0.61.into(), 1.0.into()],
-            ));
-            ops.push(Operation::new(
-                "re",
-                vec![
-                    bullet_x.into(),
-                    (y + sz * 0.25).into(),
-                    3.2.into(),
-                    3.2.into(),
-                ],
-            ));
-            ops.push(Operation::new("f", vec![]));
-            ops.push(Operation::new("Q", vec![]));
-
-            let mut cx = text_x + indent_pt + 13.0;
-            for sp in spans {
-                let col = if sp.style.code {
-                    (0.68, 0.82, 1.0)
-                } else if sp.style.bold {
-                    (0.49, 0.61, 1.0)
-                } else {
-                    (0.86, 0.89, 0.95)
-                };
-                cx = push_styled_span(ops, &sp.text, cx, y, sz, col, sp.style, true);
-            }
+            let ind = *indent as f64 * 12.0;
+            fill_rect(ops, text_x + ind + 4.0, y + sz * 0.28, 2.6, 2.6, pal.muted);
+            let mut cx = text_x + ind + 13.0;
+            for sp in spans { cx = push_styled_span(ops, &sp.text, cx, y, sz, pal.text, sp.style, true); }
         }
         NoteLineKind::Quote(spans) => {
-            // Vertical accent bar on the left of blockquotes (also used for $$display math$$!)
-            ops.push(Operation::new("q", vec![]));
-            ops.push(Operation::new(
-                "rg",
-                vec![0.49.into(), 0.61.into(), 1.0.into()],
-            ));
-            ops.push(Operation::new(
-                "re",
-                vec![
-                    text_x.into(),
-                    (y - 2.0).into(),
-                    2.6.into(),
-                    (sz * 1.15).into(),
-                ],
-            ));
-            ops.push(Operation::new("f", vec![]));
-            ops.push(Operation::new("Q", vec![]));
-
-            let mut cx = text_x + 10.0;
-            for sp in spans {
-                let col = if sp.style.code || sp.style.bold {
-                    (0.68, 0.82, 1.0)
-                } else {
-                    (0.74, 0.78, 0.88)
-                };
-                cx = push_styled_span(ops, &sp.text, cx, y, sz, col, sp.style, true);
-            }
+            fill_rect(ops, text_x, y - 2.0, 1.2, sz * 1.15, pal.divider);
+            let mut cx = text_x + 9.0;
+            for sp in spans { cx = push_styled_span(ops, &sp.text, cx, y, sz, pal.muted, sp.style, true); }
         }
-        NoteLineKind::CodeLine(code_str) => {
-            // Code block pill background
-            ops.push(Operation::new("q", vec![]));
-            ops.push(Operation::new(
-                "rg",
-                vec![0.16.into(), 0.19.into(), 0.28.into()],
-            ));
-            ops.push(Operation::new(
-                "re",
-                vec![
-                    text_x.into(),
-                    (y - 3.0).into(),
-                    avail_w.into(),
-                    (sz * 1.32).into(),
-                ],
-            ));
-            ops.push(Operation::new("f", vec![]));
-            ops.push(Operation::new("Q", vec![]));
-
-            let _ = push_styled_span(
-                ops,
-                code_str,
-                text_x + 6.0,
-                y,
-                sz,
-                (0.76, 0.86, 1.0),
-                SpanStyle {
-                    bold: false,
-                    italic: false,
-                    code: true,
-                },
-                true,
-            );
+        NoteLineKind::CodeLine(code) => {
+            fill_rect(ops, text_x, y - 3.0, avail_w, sz * 1.32, pal.code_bg);
+            push_styled_span(ops, code, text_x + 6.0, y, sz, pal.text,
+                SpanStyle { code: true, ..Default::default() }, true);
         }
         NoteLineKind::Paragraph(spans) => {
             let mut cx = text_x;
             for sp in spans {
                 if sp.style.code {
-                    let span_w = (sp.text.chars().count() as f64) * char_w + 4.0;
-                    ops.push(Operation::new("q", vec![]));
-                    ops.push(Operation::new(
-                        "rg",
-                        vec![0.18.into(), 0.21.into(), 0.32.into()],
-                    ));
-                    ops.push(Operation::new(
-                        "re",
-                        vec![
-                            (cx - 1.5).into(),
-                            (y - 2.0).into(),
-                            span_w.into(),
-                            (sz * 1.15).into(),
-                        ],
-                    ));
-                    ops.push(Operation::new("f", vec![]));
-                    ops.push(Operation::new("Q", vec![]));
+                    let w = sp.text.chars().count() as f64 * char_w + 4.0;
+                    fill_rect(ops, cx - 1.5, y - 2.0, w, sz * 1.15, pal.code_bg);
                 }
-
-                let col = if sp.style.code {
-                    (0.72, 0.84, 1.0)
-                } else if sp.style.bold {
-                    (0.49, 0.61, 1.0)
-                } else {
-                    (0.86, 0.89, 0.95)
-                };
-                cx = push_styled_span(ops, &sp.text, cx, y, sz, col, sp.style, true);
+                cx = push_styled_span(ops, &sp.text, cx, y, sz, pal.text, sp.style, true);
             }
         }
     }

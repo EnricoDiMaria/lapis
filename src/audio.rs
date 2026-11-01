@@ -34,17 +34,41 @@ pub struct VoiceMemoEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct LectureSlot {
+    pub id: usize,
+    pub title: String,
+    pub wav: Option<String>,
+    pub duration_ms: u64,
+    pub page_range: Option<(u32, u32)>,
+    pub timeline: Vec<(u64, u32)>,
+    pub timeline_is_live: bool,
+    pub segments: Vec<TranscriptSegment>,
+    pub waveform_peaks: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AudioDocIndex {
+    pub lecture_title: String,
     pub lecture_wav: Option<String>,
     pub lecture_duration_ms: u64,
-    /// Slide markers `(timestamp_ms, page_num)`, recorded live/pinned or aligned from the transcript
+    pub page_range: Option<(u32, u32)>,
     pub timeline: Vec<(u64, u32)>,
-    /// True when `timeline` comes from live recording or manual pins and must be trusted over text alignment
     pub timeline_is_live: bool,
     pub segments: Vec<TranscriptSegment>,
     pub page_memos: HashMap<u32, Vec<VoiceMemoEntry>>,
     pub waveform_peaks: Vec<f32>,
     pub source_path: Option<PathBuf>,
+    pub other_lectures: Vec<LectureSlot>,
+    #[serde(default)]
+    pub lecture_id: usize,
+
+    #[serde(default = "default_next_lecture_id")]
+    pub next_lecture_id: usize,
+}
+
+fn default_next_lecture_id() -> usize {
+    2
 }
 
 impl AudioDocIndex {
@@ -70,26 +94,42 @@ impl AudioDocIndex {
         if pdf_path.as_os_str().is_empty() {
             return Self::default();
         }
-        let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
+
+        let index_path = Self::media_dir_for_pdf(pdf_path)
+            .join("audio_index.json");
+
         if let Ok(content) = fs::read_to_string(index_path) {
-            if let Ok(idx) = serde_json::from_str::<Self>(&content) {
+            if let Ok(mut idx) = serde_json::from_str::<Self>(&content) {
+                idx.ensure_lecture_ids();
                 return idx;
             }
         }
-        Self::default()
+
+        let mut idx = Self::default();
+        idx.ensure_lecture_ids();
+        idx
     }
 
     pub fn save(&self, pdf_path: &Path) {
         if pdf_path.as_os_str().is_empty() {
             return;
         }
-        let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
+
+        let index_path = Self::media_dir_for_pdf(pdf_path)
+            .join("audio_index.json");
+
         let mut to_save = self.clone();
+
+        to_save.ensure_lecture_ids();
+
         to_save.source_path = Some(
-            fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()),
+            fs::canonicalize(pdf_path)
+                .unwrap_or_else(|_| pdf_path.to_path_buf()),
         );
+
         if let Ok(json) = serde_json::to_string_pretty(&to_save) {
             let tmp = index_path.with_extension("json.tmp");
+
             if fs::write(&tmp, json).is_ok() {
                 let _ = fs::rename(&tmp, &index_path);
             }
@@ -123,29 +163,119 @@ impl AudioDocIndex {
         Some(idx.saturating_sub(1))
     }
 
-    /// Applies a (possibly partial) transcript: with live/pinned markers the page of each
-    /// segment comes from the timeline, otherwise segments are aligned to `slide_texts`.
-    pub fn apply_transcript(
-        &mut self,
-        raw_segments: Vec<(u64, u64, String)>,
-        slide_texts: &[String],
-    ) {
-        if self.timeline_is_live && !self.timeline.is_empty() {
-            let segments: Vec<TranscriptSegment> = raw_segments
-                .into_iter()
-                .map(|(start_ms, end_ms, text)| TranscriptSegment {
-                    start_ms,
-                    end_ms,
-                    page: self.page_at_time(start_ms).unwrap_or(1),
-                    text,
-                })
-                .collect();
-            self.segments = segments;
+    /// Pagine dei segmenti dai pin/marker già presenti (nessun testo coinvolto).
+    pub fn assign_pages_from_timeline(&mut self) {
+        let tl = &self.timeline;
+        for s in &mut self.segments {
+            let idx = tl.partition_point(|&(ts, _)| ts <= s.start_ms);
+            s.page = if tl.is_empty() { 0 } else { tl[idx.saturating_sub(1)].1 };
+        }
+    }
+
+    /// Allinea i segmenti già trascritti alle slide `range` (1-based, inclusivo).
+    pub fn align_to_slides(&mut self, slide_texts: &[String], range: (u32, u32)) {
+        let (lo, hi) = (range.0.max(1), range.1.min(slide_texts.len() as u32));
+        if hi < lo || self.segments.is_empty() { return; }
+        let raw: Vec<_> = self.segments.iter().map(|s| (s.start_ms, s.end_ms, s.text.clone())).collect();
+        let total = (self.lecture_duration_ms > 0).then_some(self.lecture_duration_ms);
+        let (mut segs, mut tl) = align_segments_to_slides(raw, &slide_texts[(lo - 1) as usize..hi as usize], total);
+        let off = lo - 1;
+        for s in &mut segs { s.page += off; }
+        for (_, p) in &mut tl { *p += off; }
+        self.segments = segs;
+        self.timeline = tl;
+        self.timeline_is_live = false;
+        self.page_range = Some((lo, hi));
+    }
+
+    fn take_active(&mut self) -> LectureSlot {
+        LectureSlot {
+            id: std::mem::replace(&mut self.lecture_id, 0),
+            title: std::mem::take(&mut self.lecture_title),
+            wav: self.lecture_wav.take(),
+            duration_ms: std::mem::take(&mut self.lecture_duration_ms),
+            page_range: self.page_range.take(),
+            timeline: std::mem::take(&mut self.timeline),
+            timeline_is_live: std::mem::take(&mut self.timeline_is_live),
+            segments: std::mem::take(&mut self.segments),
+            waveform_peaks: std::mem::take(&mut self.waveform_peaks),
+        }
+    }
+
+    fn put_active(&mut self, s: LectureSlot) {
+        self.lecture_id = s.id;
+        self.lecture_title = s.title;
+        self.lecture_wav = s.wav;
+        self.lecture_duration_ms = s.duration_ms;
+        self.page_range = s.page_range;
+        self.timeline = s.timeline;
+        self.timeline_is_live = s.timeline_is_live;
+        self.segments = s.segments;
+        self.waveform_peaks = s.waveform_peaks;
+    }
+    pub fn switch_to_other(&mut self, i: usize) {
+        self.ensure_lecture_ids();
+
+        if i >= self.other_lectures.len() {
+            return;
+        }
+
+        let incoming = std::mem::take(&mut self.other_lectures[i]);
+
+        let outgoing = self.take_active();
+
+        self.put_active(incoming);
+
+        self.other_lectures[i] = outgoing;
+    }
+    pub fn start_new_lecture(&mut self) {
+        self.ensure_lecture_ids();
+
+        let cur = self.take_active();
+
+        if cur.wav.is_some() || !cur.segments.is_empty() {
+            self.other_lectures.push(cur);
+        }
+
+        self.lecture_id = self.allocate_lecture_id();
+    }
+    pub fn remove_active_lecture(&mut self) {
+        self.ensure_lecture_ids();
+
+        let _ = self.take_active();
+
+        if let Some(next) = self.other_lectures.pop() {
+            self.put_active(next);
         } else {
-            let total = (self.lecture_duration_ms > 0).then_some(self.lecture_duration_ms);
-            let (segments, timeline) = align_segments_to_slides(raw_segments, slide_texts, total);
-            self.segments = segments;
-            self.timeline = timeline;
+            self.lecture_id = self.allocate_lecture_id();
+        }
+    }
+    pub fn fresh_wav_name(&self) -> String {
+        let used: HashSet<&str> = self.lecture_wav.iter().map(String::as_str)
+            .chain(self.other_lectures.iter().filter_map(|l| l.wav.as_deref())).collect();
+        if !used.contains("lecture.wav") { return "lecture.wav".into(); }
+        (2..).map(|n| format!("lecture_{n}.wav")).find(|n| !used.contains(n.as_str())).unwrap()
+    }
+    pub fn active_covers(&self, page: u32) -> bool {
+        self.lecture_wav.is_some() && self.page_range.map_or(true, |(a, b)| (a..=b).contains(&page))
+    }
+    pub fn other_covering(&self, page: u32) -> Option<usize> {
+        if self.active_covers(page) { return None; }
+        self.other_lectures.iter().position(|l|
+            l.wav.is_some() && l.page_range.map_or(false, |(a, b)| (a..=b).contains(&page)))
+    }
+    /// Applica `f` a tutte le pagine di tutte le lezioni (inserimento/eliminazione/riordino pagine).
+    pub fn for_each_page_mut(&mut self, mut f: impl FnMut(&mut u32)) {
+        fn fix(r: &mut Option<(u32, u32)>, f: &mut impl FnMut(&mut u32)) {
+            if let Some((a, b)) = r { f(a); f(b); if *a > *b { std::mem::swap(a, b); } }
+        }
+        for (_, p) in &mut self.timeline { f(p); }
+        for s in &mut self.segments { f(&mut s.page); }
+        fix(&mut self.page_range, &mut f);
+        for l in &mut self.other_lectures {
+            for (_, p) in &mut l.timeline { f(p); }
+            for s in &mut l.segments { f(&mut s.page); }
+            fix(&mut l.page_range, &mut f);
         }
     }
 
@@ -175,6 +305,42 @@ impl AudioDocIndex {
             seg.end_ms = (seg.end_ms - start_ms).min(new_dur);
             true
         });
+    }
+    pub fn ensure_lecture_ids(&mut self) {
+        if self.lecture_id == 0 {
+            self.lecture_id = 1;
+        }
+
+        let mut used = HashSet::new();
+        used.insert(self.lecture_id);
+
+        for lecture in &self.other_lectures {
+            if lecture.id != 0 {
+                used.insert(lecture.id);
+            }
+        }
+
+        let mut candidate = 2usize;
+
+        for lecture in &mut self.other_lectures {
+            if lecture.id == 0 {
+                while used.contains(&candidate) {
+                    candidate += 1;
+                }
+
+                lecture.id = candidate;
+                used.insert(candidate);
+                candidate += 1;
+            }
+        }
+
+        self.next_lecture_id = used.iter().copied().max().unwrap_or(1) + 1;
+    }
+
+    fn allocate_lecture_id(&mut self) -> usize {
+        let id = self.next_lecture_id.max(2);
+        self.next_lecture_id = id + 1;
+        id
     }
 }
 
@@ -718,10 +884,14 @@ pub enum AsrJobResult {
     /// Aligned transcript so far; `finished` marks the last message of a job.
     Lecture {
         segments: Vec<TranscriptSegment>,
-        timeline: Vec<(u64, u32)>,
         done_ms: u64,
         total_ms: u64,
         finished: bool,
+    },
+    Aligned {
+        segments: Vec<TranscriptSegment>,
+        timeline: Vec<(u64, u32)>,
+        range: (u32, u32),
     },
     Memo {
         page: u32,
@@ -1093,45 +1263,15 @@ fn transcribe_chunks(
 
 /// Transcribes the lecture and aligns it to slides, emitting partial results after each chunk.
 /// `live_timeline`: recorded/pinned slide markers to trust instead of text alignment.
-pub fn transcribe_lecture(
-    model_dir: &Path,
-    wav_path: &Path,
-    slide_texts: &[String],
-    live_timeline: Option<Vec<(u64, u32)>>,
-    cancel: &AtomicBool,
-    emit: &mut dyn FnMut(AsrJobResult),
-) {
-    let mut index = AudioDocIndex {
-        lecture_duration_ms: wav_duration_ms(wav_path).unwrap_or(0),
-        timeline_is_live: live_timeline.is_some(),
-        timeline: live_timeline.unwrap_or_default(),
-        ..Default::default()
+pub fn transcribe_lecture(model_dir: &Path, wav_path: &Path, cancel: &AtomicBool, emit: &mut dyn FnMut(AsrJobResult)) {
+    let to_segs = |v: &[(u64, u64, String)]| -> Vec<TranscriptSegment> {
+        v.iter().map(|(a, b, t)| TranscriptSegment { start_ms: *a, end_ms: *b, page: 0, text: t.clone() }).collect()
     };
-
-    let res = transcribe_chunks(
-        model_dir,
-        wav_path,
-        cancel,
-        &mut |segs, done_ms, total_ms| {
-            index.apply_transcript(segs.to_vec(), slide_texts);
-            emit(AsrJobResult::Lecture {
-                segments: index.segments.clone(),
-                timeline: index.timeline.clone(),
-                done_ms,
-                total_ms,
-                finished: false,
-            });
-        },
-    );
-
+    let res = transcribe_chunks(model_dir, wav_path, cancel, &mut |segs, done_ms, total_ms| {
+        emit(AsrJobResult::Lecture { segments: to_segs(segs), done_ms, total_ms, finished: false });
+    });
     emit(match res {
-        Ok((_, total_ms)) => AsrJobResult::Lecture {
-            segments: index.segments,
-            timeline: index.timeline,
-            done_ms: total_ms,
-            total_ms,
-            finished: true,
-        },
+        Ok((segs, total_ms)) => AsrJobResult::Lecture { segments: to_segs(&segs), done_ms: total_ms, total_ms, finished: true },
         Err(e) => e.into_job(),
     });
 }
@@ -1204,25 +1344,51 @@ const STOPWORDS: &[&str] = &[
     "cioe", "ecco", "dunque", "però", "pero", "molto", "tutti", "tutto", "tutta", "ogni", "nella",
     "nelle", "sulla", "sulle", "dalla", "alla", "alle", "that", "this", "with", "from", "have",
     "will", "what", "there", "their", "which", "about",
+    "che", "per", "con", "non", "una", "gli", "the", "and", "for",
 ];
+
+fn fold(c: char) -> char {
+    match c {
+        'à'|'á'|'â'|'ä' => 'a', 'è'|'é'|'ê'|'ë' => 'e', 'ì'|'í'|'î'|'ï' => 'i',
+        'ò'|'ó'|'ô'|'ö' => 'o', 'ù'|'ú'|'û'|'ü' => 'u', c => c,
+    }
+}
 
 /// Words reduced to a 6-char stem so inflections match ("algoritmo"/"algoritmi").
 fn extract_stems(text: &str) -> HashSet<String> {
     let cleaned: String = text
         .to_lowercase()
         .chars()
+        .map(fold)
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
         .collect();
 
     cleaned
         .split_whitespace()
-        .filter(|w| w.chars().count() >= 4 && !STOPWORDS.contains(w))
+        .filter(|w| {
+            let n = w.chars().count();
+            (n >= 4 || (n >= 3 && w.chars().all(|c| c.is_ascii_alphanumeric())) || (n >= 2 && w.chars().any(|c| c.is_ascii_digit())))
+                && !STOPWORDS.contains(w)
+        })
         .map(|w| w.chars().take(6).collect::<String>())
         .collect()
 }
 
 /// Weight of text similarity against the time prior and jump penalties.
-const SIM_WEIGHT: f32 = 1.0;
+const SIM_WEIGHT: f32 = 1.75;
+
+fn despike(pages: &mut [u32], min_run: usize) {
+    let mut i = 0;
+    while i < pages.len() {
+        let mut j = i;
+        while j < pages.len() && pages[j] == pages[i] { j += 1; }
+        if j - i < min_run && i > 0 && j < pages.len() && pages[i - 1] == pages[j] {
+            let v = pages[i - 1];
+            for x in &mut pages[i..j] { *x = v; }
+        }
+        i = j;
+    }
+}
 
 /// Viterbi alignment of transcript segments to slides using IDF-weighted stem overlap.
 /// `total_ms` (full audio length) anchors the time prior when the transcript is partial.
@@ -1274,29 +1440,42 @@ pub fn align_segments_to_slides(
         .unwrap_or(1)
         .max(1) as f32;
 
+    let mut raw_sim = vec![0.0f32; k_segs * n_slides];
+    for (k, (_, _, text)) in raw_segments.iter().enumerate() {
+        let feats = extract_stems(text);
+        let norm = (feats.len() as f32).sqrt().max(1.0);
+        for t in &feats {
+            if let Some(list) = inv.get(t.as_str()) {
+                let w = idf.get(t.as_str()).copied().unwrap_or(0.0);
+                for &p in list { raw_sim[k * n_slides + p] += w / norm; }
+            }
+        }
+    }
+    const W: isize = 3;
+    let mut sim = vec![0.0f32; k_segs * n_slides];
+    for k in 0..k_segs {
+        let mut wsum = 0.0;
+        for d in -W..=W {
+            let j = k as isize + d;
+            if j < 0 || j >= k_segs as isize { continue; }
+            let w = 1.0 - (d.abs() as f32) / (W as f32 + 1.0);
+            wsum += w;
+            for p in 0..n_slides { sim[k * n_slides + p] += w * raw_sim[j as usize * n_slides + p]; }
+        }
+        for p in 0..n_slides { sim[k * n_slides + p] /= wsum; }
+    }
+
     let mut prev = vec![0.0f32; n_slides];
     let mut cur = vec![f32::NEG_INFINITY; n_slides];
     let mut back = vec![0usize; k_segs * n_slides];
 
-    for (k, (t0, _t1, text)) in raw_segments.iter().enumerate() {
-        let seg_feats = extract_stems(text);
+    for (k, (t0, _t1, _text)) in raw_segments.iter().enumerate() {
         let time_frac = (*t0 as f32) / last_t;
 
-        let mut sims = vec![0.0f32; n_slides];
-        for t in &seg_feats {
-            if let Some(list) = inv.get(t.as_str()) {
-                let w = idf.get(t.as_str()).copied().unwrap_or(0.0);
-                for &p in list {
-                    sims[p] += w;
-                }
-            }
-        }
-        let norm = (seg_feats.len() as f32).sqrt().max(1.0);
-
         for p in 0..n_slides {
-            let sim = SIM_WEIGHT * sims[p] / norm;
+            let sim_kp = SIM_WEIGHT * sim[k * n_slides + p];
             let slide_frac = (p as f32) / ((n_slides.max(2) - 1) as f32);
-            let emission = sim - (time_frac - slide_frac).abs() * 0.35;
+            let emission = sim_kp - (time_frac - slide_frac).abs() * 0.35;
 
             if k == 0 {
                 cur[p] = emission - (p as f32) * 0.4;
@@ -1330,6 +1509,7 @@ pub fn align_segments_to_slides(
         assigned_pages[k] = (cur_p + 1) as u32;
         cur_p = back[k * n_slides + cur_p];
     }
+    despike(&mut assigned_pages, 3);
 
     let mut segments = Vec::with_capacity(k_segs);
     let mut timeline = Vec::new();

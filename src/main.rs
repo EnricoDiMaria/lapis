@@ -316,6 +316,13 @@ fn scan_storage(
                         .map(|m| m.len())
                         .unwrap_or(0);
                 }
+                for l in &ix.other_lectures {
+                    if let Some(w) = &l.wav {
+                        r.lecture_size += std::fs::metadata(resolve_media_file(&dir, w))
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                    }
+                }
                 for m in ix.page_memos.values().flatten() {
                     r.memo_count += 1;
                     r.memos_size += std::fs::metadata(resolve_media_file(&dir, &m.filename))
@@ -392,8 +399,16 @@ fn storage_delete_lecture(en: &StorageEntry) -> std::io::Result<()> {
     if let Some(w) = idx.lecture_wav.take() {
         remove_media_file(dir, &w)?;
     }
+    for l in &idx.other_lectures {
+        if let Some(w) = &l.wav {
+            remove_media_file(dir, w)?;
+        }
+    }
+    idx.other_lectures.clear();
     remove_media_file(dir, "lecture_raw.wav")?;
+    idx.lecture_title.clear();
     idx.lecture_duration_ms = 0;
+    idx.page_range = None;
     idx.timeline.clear();
     idx.timeline_is_live = false;
     idx.segments.clear();
@@ -1077,8 +1092,12 @@ fn extract_slide_texts(
                 }
             }
             if let Some(user_note) = notes_map.get(&((p_idx + 1) as u32)) {
-                combined.push(' ');
-                combined.push_str(user_note);
+                for line in user_note.lines() {
+                    let t = line.trim_start();
+                    if t.starts_with("- **[") || t.contains("Lecture Transcript") { continue; }
+                    combined.push(' ');
+                    combined.push_str(line);
+                }
             }
             slide_texts.push(combined);
         }
@@ -1255,6 +1274,9 @@ struct Lapis {
     confirm_remove_lecture: bool,
     transcript_all: bool,
     transcript_last_seg: Option<usize>,
+    show_align_panel: bool,
+    align_from: u32,
+    align_to: u32,
     note_page: u32,
     lock_note_page: bool,
     show_audio_trimmer: bool,
@@ -1428,6 +1450,9 @@ impl Lapis {
             confirm_remove_lecture: false,
             transcript_all: false,
             transcript_last_seg: None,
+            show_align_panel: false,
+            align_from: 1,
+            align_to: 1,
             note_page: 1,
             lock_note_page: true,
             show_audio_trimmer: false,
@@ -1542,6 +1567,14 @@ impl Lapis {
         }
 
         self.current_page = page;
+        if !self.audio_engine.is_recording() && !self.audio_engine.is_playing() && !self.is_transcribing {
+            if let Some(i) = self.audio_index.other_covering(page) {
+                self.audio_engine.stop_and_release();
+                self.audio_index.switch_to_other(i);
+                self.transcript_last_seg = None;
+                self.audio_index.save(&self.pdf_path);
+            }
+        }
         self.target_page = page;
         if !self.lock_note_page {
             self.note_page = page;
@@ -6548,11 +6581,13 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
     fn toggle_lecture_recording(&mut self, media_dir: &Path) {
         self.confirm_remove_lecture = false;
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
-            let final_wav = media_dir.join("lecture.wav");
+            let name = self.audio_index.lecture_wav.clone().unwrap_or_else(|| self.audio_index.fresh_wav_name());
+            let final_wav = media_dir.join(&name);
             if let Some((_, dur)) = self.audio_engine.stop_recording(&final_wav) {
-                self.audio_index.lecture_wav = Some("lecture.wav".to_string());
+                self.audio_index.lecture_wav = Some(name);
                 self.audio_index.lecture_duration_ms = dur;
                 self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&final_wav, 240);
+                self.audio_index.page_range = self.audio_index.timeline.iter().map(|t| t.1).min().zip(self.audio_index.timeline.iter().map(|t| t.1).max());
                 self.audio_index.save(&self.pdf_path);
                 self.preload_asr_model();
                 self.audio_toast("󰄬 Lecture recording saved");
@@ -6588,13 +6623,14 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
 
     fn finish_import_lecture_media(&mut self, src_path: PathBuf, media_dir: &Path) {
         self.confirm_remove_lecture = false;
-        let out_wav = media_dir.join("lecture.wav");
+        let name = self.audio_index.lecture_wav.clone().unwrap_or_else(|| self.audio_index.fresh_wav_name());
+        let out_wav = media_dir.join(&name);
         self.audio_engine.stop_and_release();
         match audio::convert_media_to_16k_wav(&src_path, &out_wav) {
             Ok(dur) => {
                 // A new track invalidates the old transcript and markers
                 let idx = &mut self.audio_index;
-                idx.lecture_wav = Some("lecture.wav".to_string());
+                idx.lecture_wav = Some(name);
                 idx.lecture_duration_ms = dur;
                 idx.waveform_peaks = audio::compute_waveform_peaks(&out_wav, 240);
                 idx.segments.clear();
@@ -7424,6 +7460,10 @@ fn render_audio_body(&mut self, ui: &mut egui::Ui, media_dir: &Path) {
             let is_rec = self.audio_engine.rec_target == Some(RecordingTarget::Lecture);
             let busy = self.is_transcribing;
 
+            if self.audio_index.lecture_wav.is_some() || !self.audio_index.other_lectures.is_empty() {
+                self.render_lecture_picker(ui);
+            }
+
             if let Some(wav_path) = wav_path.clone() {
                 let is_playing = self.audio_engine.is_playing();
                 let mut pos_ms = self.audio_engine.current_pos_ms();
@@ -7760,12 +7800,7 @@ fn render_audio_body(&mut self, ui: &mut egui::Ui, media_dir: &Path) {
                             let remove_result = std::fs::remove_file(&wav_path);
                             if remove_result.is_ok() || !wav_path.exists() {
                                 let _ = std::fs::remove_file(media_dir.join("lecture_raw.wav"));
-                                self.audio_index.lecture_wav = None;
-                                self.audio_index.lecture_duration_ms = 0;
-                                self.audio_index.waveform_peaks.clear();
-                                self.audio_index.timeline.clear();
-                                self.audio_index.timeline_is_live = false;
-                                self.audio_index.segments.clear();
+                                self.audio_index.remove_active_lecture();
                                 self.audio_index.save(&self.pdf_path);
                                 self.show_audio_trimmer = false;
                                 self.trim_memo_target = None;
@@ -7851,6 +7886,18 @@ fn render_audio_body(&mut self, ui: &mut egui::Ui, media_dir: &Path) {
                             .clicked()
                         {
                             self.start_lecture_transcription(wav_path.clone(), ui.ctx());
+                        }
+                        let has_tx = !self.audio_index.segments.is_empty();
+                        let al_label = if compact_controls { "󰌷" } else { "󰌷 Align" };
+                        if ui.add_enabled(has_tx && !self.audio_engine.is_recording(),
+                                egui::Button::new(al_label).corner_radius(egui::CornerRadius::same(6)))
+                            .on_hover_text("Map the transcript to a range of slides")
+                            .clicked()
+                        {
+                            let (a, b) = self.audio_index.page_range.unwrap_or((1, self.total_pages.max(1)));
+                            self.align_from = a;
+                            self.align_to = b;
+                            self.show_align_panel = !self.show_align_panel;
                         }
                     }
                 });
@@ -7947,6 +7994,9 @@ fn render_audio_body(&mut self, ui: &mut egui::Ui, media_dir: &Path) {
 
             if self.show_audio_trimmer {
                 self.render_audio_trimmer(ui, media_dir);
+            }
+            if self.show_align_panel {
+                self.render_align_panel(ui);
             }
 
             // 3. Transcript section with interactive cards.
@@ -8922,6 +8972,144 @@ fn audio_fab_button(
         None
     }
 
+    fn render_lecture_picker(&mut self, ui: &mut egui::Ui) {
+        self.audio_index.ensure_lecture_ids();
+
+        let ix = &self.audio_index;
+
+        let mut entries: Vec<(
+            Option<usize>,
+            String,
+            Option<(u32, u32)>
+        )> = Vec::new();
+
+        let active_title = if ix.lecture_title.trim().is_empty() {
+            format!("Lecture {}", ix.lecture_id)
+        } else {
+            format!("Lecture {} — {}", ix.lecture_id, ix.lecture_title)
+        };
+
+        entries.push((
+            None,
+            active_title,
+            ix.page_range,
+        ));
+
+        for (i, lecture) in ix.other_lectures.iter().enumerate() {
+            let title = if lecture.title.trim().is_empty() {
+                format!("Lecture {}", lecture.id)
+            } else {
+                format!("Lecture {} — {}", lecture.id, lecture.title)
+            };
+
+            entries.push((
+                Some(i),
+                title,
+                lecture.page_range,
+            ));
+        }
+
+        let current_text = entries
+            .iter()
+            .find(|entry| entry.0.is_none())
+            .map(|entry| {
+                match entry.2 {
+                    Some((a, b)) => {
+                        format!("{}  (p.{}–{})", entry.1, a, b)
+                    }
+                    None => entry.1.clone(),
+                }
+            })
+            .unwrap_or_default();
+
+        let mut switch_to: Option<usize> = None;
+        let mut new_lec = false;
+
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("lecture_picker")
+                .selected_text(current_text)
+                .show_ui(ui, |ui| {
+                    for (slot, title, range) in &entries {
+                        let display_str = match range {
+                            Some((a, b)) => {
+                                format!("{}  (p.{}–{})", title, a, b)
+                            }
+                            None => title.clone(),
+                        };
+
+                        let selected = slot.is_none();
+
+                        if ui.selectable_label(selected, display_str).clicked() {
+                            if let Some(i) = slot {
+                                switch_to = Some(*i);
+                            }
+                        }
+                    }
+                });
+
+            if ui.small_button("󰐕")
+                .on_hover_text("Add another lecture")
+                .clicked()
+            {
+                new_lec = true;
+            }
+        });
+
+        if switch_to.is_some() || new_lec {
+            self.audio_engine.stop_and_release();
+
+            match switch_to {
+                Some(i) => {
+                    self.audio_index.switch_to_other(i);
+                }
+                None => {
+                    self.audio_index.start_new_lecture();
+                }
+            }
+
+            self.transcript_last_seg = None;
+            self.show_audio_trimmer = false;
+
+            self.audio_index.save(&self.pdf_path);
+        }
+    }
+
+    fn render_align_panel(&mut self, ui: &mut egui::Ui) {
+        let total = self.total_pages.max(1);
+        let (mut run, mut close, mut use_pins) = (false, false, false);
+        egui::Frame::NONE
+            .fill(rgb(self.theme.bg_canvas))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(8, 8))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("󰌷 Align transcript to slides").strong().size(11.5));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("From");
+                    ui.add(egui::DragValue::new(&mut self.align_from).range(1..=total));
+                    ui.label("to");
+                    ui.add(egui::DragValue::new(&mut self.align_to).range(1..=total));
+                    if ui.small_button("Current → from").clicked() { self.align_from = self.current_page; }
+                    if ui.small_button("Current → to").clicked() { self.align_to = self.current_page; }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Align").clicked() { run = true; }
+                    if !self.audio_index.timeline.is_empty() && ui.button("Use pins").on_hover_text("Assign segment pages from existing pins").clicked() { use_pins = true; }
+                    if ui.button("Close").clicked() { close = true; }
+                });
+            });
+        if self.align_from > self.align_to { self.align_to = self.align_from; }
+        if run { self.show_align_panel = false; self.start_alignment(ui.ctx()); }
+        if use_pins {
+            self.show_align_panel = false;
+            self.audio_index.assign_pages_from_timeline();
+            self.audio_index.timeline_is_live = true;
+            self.transcript_all = false;
+            self.audio_index.save(&self.pdf_path);
+            self.audio_toast("󰄬 Assigned segment pages from pins");
+        }
+        if close { self.show_align_panel = false; }
+    }
+
     fn start_lecture_transcription(&mut self, wav_path: PathBuf, ctx: &egui::Context) {
         if self.is_transcribing {
             return;
@@ -8935,35 +9123,32 @@ fn audio_fab_button(
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.asr_progress = Some((0, self.audio_index.lecture_duration_ms.max(1)));
 
-        // Recorded/pinned markers are trusted over text alignment
-        let live_timeline = (self.audio_index.timeline_is_live
-            && !self.audio_index.timeline.is_empty())
-        .then(|| self.audio_index.timeline.clone());
-
-        let pdf_path = self.pdf_path.clone();
-        let total_pages = self.total_pages;
-        let notes_map = self.notes.clone();
         let tx = self.asr_tx.clone();
         let cancel = self.asr_cancel.clone();
         let w_ctx = ctx.clone();
 
         thread::spawn(move || {
-            let slide_texts = if live_timeline.is_some() {
-                Vec::new()
-            } else {
-                extract_slide_texts(&pdf_path, total_pages, &notes_map)
-            };
-            audio::transcribe_lecture(
-                &model_dir,
-                &wav_path,
-                &slide_texts,
-                live_timeline,
-                &cancel,
-                &mut |msg| {
-                    let _ = tx.send(msg);
-                    w_ctx.request_repaint();
-                },
-            );
+            audio::transcribe_lecture(&model_dir, &wav_path, &cancel, &mut |msg| {
+                let _ = tx.send(msg);
+                w_ctx.request_repaint();
+            });
+        });
+    }
+
+    fn start_alignment(&mut self, ctx: &egui::Context) {
+        if self.is_transcribing || self.audio_index.segments.is_empty() { return; }
+        let (lo, hi) = (self.align_from.max(1), self.align_to.min(self.total_pages));
+        if lo > hi { self.audio_toast("󰅚 Invalid page range"); return; }
+        self.is_transcribing = true;      // riusa il flag "busy" del dock
+        self.asr_progress = None;
+        let mut idx = self.audio_index.clone();
+        let (pdf, total, notes) = (self.pdf_path.clone(), self.total_pages, self.notes.clone());
+        let (tx, ctx) = (self.asr_tx.clone(), ctx.clone());
+        thread::spawn(move || {
+            let texts = extract_slide_texts(&pdf, total, &notes);
+            idx.align_to_slides(&texts, (lo, hi));
+            let _ = tx.send(audio::AsrJobResult::Aligned { segments: idx.segments, timeline: idx.timeline, range: (lo, hi) });
+            ctx.request_repaint();
         });
     }
 
@@ -9008,7 +9193,8 @@ fn audio_fab_button(
             .map(|a| !a.is_empty())
             .unwrap_or(false);
 
-        let has_transcript = self.audio_index.segments.iter().any(|s| s.page == page);
+        let has_transcript = self.audio_index.segments.iter().any(|s| s.page == page)
+            || self.audio_index.other_lectures.iter().any(|l| l.segments.iter().any(|s| s.page == page));
 
         has_note || has_anns || has_transcript
     }
@@ -9154,16 +9340,7 @@ fn insert_blank_page_after(&mut self, after_page: u32, style: notes::BlankPageSt
                         bm.page += 1;
                     }
                 }
-                for (_, p) in &mut self.audio_index.timeline {
-                    if *p >= new_page_num {
-                        *p += 1;
-                    }
-                }
-                for seg in &mut self.audio_index.segments {
-                    if seg.page >= new_page_num {
-                        seg.page += 1;
-                    }
-                }
+                self.audio_index.for_each_page_mut(|p| if *p >= new_page_num { *p += 1 });
                 self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
                     .into_iter()
                     .map(|(p, memos)| (if p >= new_page_num { p + 1 } else { p }, memos))
@@ -9283,8 +9460,7 @@ fn delete_pdf_page_and_shift_data(&mut self, page_to_del: u32, ctx: &egui::Conte
             self.user_bookmarks.retain_mut(|bm| match shift(bm.page) {
                 Some(np) => { bm.page = np; true }, None => false,
             });
-            for (_, page) in &mut self.audio_index.timeline { if *page > page_to_del { *page -= 1; } }
-            for seg in &mut self.audio_index.segments { if seg.page > page_to_del { seg.page -= 1; } }
+            self.audio_index.for_each_page_mut(|p| if *p > page_to_del { *p -= 1 });
             self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
                 .into_iter().filter_map(|(p, v)| {
                     if p == page_to_del { None } else { Some((if p > page_to_del { p - 1 } else { p }, v)) }
@@ -9347,8 +9523,7 @@ fn reorder_pdf_page(&mut self, from_page: u32, to_page: u32, ctx: &egui::Context
             self.blank_pages = self.blank_pages.iter().copied().map(remap).collect();
             self.hidden_pages = self.hidden_pages.iter().copied().map(remap).collect();
             for bm in &mut self.user_bookmarks { bm.page = remap(bm.page); }
-            for (_, page) in &mut self.audio_index.timeline { *page = remap(*page); }
-            for seg in &mut self.audio_index.segments { seg.page = remap(seg.page); }
+            self.audio_index.for_each_page_mut(|p| *p = remap(*p));
             self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
                 .into_iter().map(|(p,v)| (remap(p),v)).collect();
             self.audio_index.save(&self.pdf_path);
@@ -12543,24 +12718,30 @@ impl eframe::App for Lapis {
         }
         while let Ok(msg) = self.asr_rx.try_recv() {
             match msg {
-                audio::AsrJobResult::Lecture {
-                    segments,
-                    timeline,
-                    done_ms,
-                    total_ms,
-                    finished,
-                } => {
-                    let count = segments.len();
+                audio::AsrJobResult::Lecture { segments, done_ms, total_ms, finished } => {
+                    let n = segments.len();
                     self.audio_index.segments = segments;
-                    self.audio_index.timeline = timeline;
+                    if self.audio_index.timeline_is_live { self.audio_index.assign_pages_from_timeline(); }
                     if finished {
                         self.is_transcribing = false;
                         self.asr_progress = None;
+                        if !self.audio_index.timeline_is_live { self.transcript_all = true; }
                         self.audio_index.save(&self.pdf_path);
-                        self.audio_toast(format!("󰄬 Aligned {} transcript segments to slides!", count));
+                        self.audio_toast(format!("󰄬 Transcribed {n} segments. Use Align to map them to slides"));
                     } else {
                         self.asr_progress = Some((done_ms, total_ms));
                     }
+                }
+                audio::AsrJobResult::Aligned { segments, timeline, range } => {
+                    self.is_transcribing = false;
+                    let n = segments.len();
+                    self.audio_index.segments = segments;
+                    self.audio_index.timeline = timeline;
+                    self.audio_index.timeline_is_live = false;
+                    self.audio_index.page_range = Some(range);
+                    self.transcript_all = false;
+                    self.audio_index.save(&self.pdf_path);
+                    self.audio_toast(format!("󰄬 Aligned {n} segments to pages {}–{}", range.0, range.1));
                 }
                 audio::AsrJobResult::Memo {
                     page,

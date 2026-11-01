@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::io::{self, BufRead, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -660,59 +660,64 @@ fn parse_slide_header(line: &str) -> Option<(u32, Option<&str>)> {
     let prefixes = ["slide", "pagina", "page", "pag.", "pag", "sld", "p.", "p"];
 
     for kw in prefixes {
-        if core.len() > kw.len() && core[..kw.len()].eq_ignore_ascii_case(kw) {
-            let after_kw = &core[kw.len()..];
+        let Some(head) = core.get(..kw.len()) else { continue }; // None se non è char boundary
+        if core.len() <= kw.len() || !head.eq_ignore_ascii_case(kw) { continue; }
+        let after_kw = &core[kw.len()..];
 
-            // Must be followed by whitespace, '#', '.', ':' or '-' (prevents matching words like "point")
-            let first_ch = after_kw.chars().next()?;
-            if !first_ch.is_whitespace() && !matches!(first_ch, '#' | '.' | ':' | '-') {
-                continue;
-            }
+        // Must be followed by whitespace, '#', '.', ':' or '-' (prevents matching words like "point")
+        let first_ch = after_kw.chars().next()?;
+        if !first_ch.is_whitespace() && !matches!(first_ch, '#' | '.' | ':' | '-') {
+            continue;
+        }
 
-            let rest = after_kw
-                .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '#' | '.'))
-                .trim_start();
+        let rest = after_kw
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '#' | '.'))
+            .trim_start();
 
-            // Extract consecutive ASCII digits for the page number
-            let digit_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if digit_len == 0 {
-                continue;
-            }
+        // Extract consecutive ASCII digits for the page number
+        let digit_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digit_len == 0 {
+            continue;
+        }
 
-            let page_num: u32 = rest[..digit_len].parse().ok()?;
-            if page_num == 0 {
-                return None;
-            }
+        let page_num: u32 = rest[..digit_len].parse().ok()?;
+        if page_num == 0 {
+            return None;
+        }
 
-            let remainder = rest[digit_len..].trim();
-            if remainder.is_empty() {
+        let remainder = rest[digit_len..].trim();
+        if remainder.is_empty() {
+            return Some((page_num, None));
+        }
+
+        // If remainder only contains closing divider chars (e.g. "---"), ignore it
+        let clean_rem = remainder
+            .trim_start_matches(|c: char| matches!(c, ':' | '-' | '—' | '–' | ')' | ']'))
+            .trim();
+
+        if clean_rem.is_empty() {
+            return Some((page_num, None));
+        } else if remainder.starts_with(':')
+            || remainder.starts_with('-')
+            || remainder.starts_with('—')
+            || remainder.starts_with('–')
+        {
+            // Inline note after a header (e.g. "Slide 3: Key concept").
+            return Some((page_num, Some(clean_rem)));
+        } else {
+            // E.g. "P 1 qualcosa" without separator might be normal text unless line started with #
+            if trimmed.starts_with('#') || kw.len() >= 4 {
                 return Some((page_num, None));
-            }
-
-            // If remainder only contains closing divider chars (e.g. "---"), ignore it
-            let clean_rem = remainder
-                .trim_start_matches(|c: char| matches!(c, ':' | '-' | '—' | '–' | ')' | ']'))
-                .trim();
-
-            if clean_rem.is_empty() {
-                return Some((page_num, None));
-            } else if remainder.starts_with(':')
-                || remainder.starts_with('-')
-                || remainder.starts_with('—')
-                || remainder.starts_with('–')
-            {
-                // Inline note after a header (e.g. "Slide 3: Key concept").
-                return Some((page_num, Some(clean_rem)));
-            } else {
-                // E.g. "P 1 qualcosa" without separator might be normal text unless line started with #
-                if trimmed.starts_with('#') || kw.len() >= 4 {
-                    return Some((page_num, None));
-                }
             }
         }
     }
 
     None
+}
+
+fn parse_lapis_header(line: &str) -> Option<u32> {
+    let rest = line.trim().strip_prefix('#')?.trim_start_matches('#').trim_start();
+    rest.strip_prefix("Slide ")?.trim().parse().ok().filter(|&n| n > 0)
 }
 
 /// Imports notes from a `.txt` or `.md` file, mapping each section to its slide number.
@@ -721,8 +726,8 @@ pub fn import_notes_from_file(
     path: &Path,
     max_pages: u32,
 ) -> io::Result<HashMap<u32, String>> {
-    let file = File::open(path)?;
-    let reader = io::BufReader::new(file);
+    let text = fs::read_to_string(path)?;
+    let strict = text.lines().next().map_or(false, |l| l.starts_with("<!-- Notes exported from Lapis"));
 
     let mut imported: HashMap<u32, String> = HashMap::new();
     let mut current_page: Option<u32> = None;
@@ -743,9 +748,9 @@ pub fn import_notes_from_file(
         buf.clear();
     };
 
-    for line_res in reader.lines() {
-        let line = line_res?;
-        if let Some((page_num, inline_text)) = parse_slide_header(&line) {
+    for line in text.lines() {
+        let hdr = if strict { parse_lapis_header(line).map(|n| (n, None)) } else { parse_slide_header(line) };
+        if let Some((page_num, inline_text)) = hdr {
             flush_note(current_page, &mut current_buf, &mut imported);
             current_page = Some(page_num);
             if let Some(inline) = inline_text {
@@ -753,7 +758,7 @@ pub fn import_notes_from_file(
                 current_buf.push('\n');
             }
         } else if current_page.is_some() {
-            current_buf.push_str(&line);
+            current_buf.push_str(line);
             current_buf.push('\n');
         }
     }
@@ -1002,8 +1007,8 @@ pub fn format_latex_expr(expr: &str) -> String {
             '4' => Some('₄'),
             '5' => Some('₅'),
             '6' => Some('₆'),
-            '7' => Some('⁷'),
-            '8' => Some('⁸'),
+            '7' => Some('₇'),
+            '8' => Some('₈'),
             '9' => Some('₉'),
             '+' => Some('₊'),
             '-' => Some('₋'),
@@ -1644,4 +1649,15 @@ pub fn prepare_image_xobjects(
         out.xobjects.push((name, id));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_multibyte_does_not_panic() {
+        assert_eq!(parse_slide_header("### 󰗊 Lecture Transcript"), None);
+        assert_eq!(parse_slide_header("è un esempio"), None);
+    }
 }
