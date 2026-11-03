@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
 
+/// qdbus / wl-paste / wl-copy / xclip exist only on Linux/BSD desktops.
+/// On Windows and macOS only `arboard` is used.
+const EXTERNAL_TOOLS: bool = cfg!(all(unix, not(target_os = "macos")));
+
 /// External methods bit: results absent (binary not installed).
 static DEAD_CLIP_METHODS: AtomicU32 = AtomicU32::new(0);
 
@@ -45,7 +49,7 @@ pub fn clip_mark_dead(bit: u32) {
 
 /// Executes a command and returns its stdout; if the program does not exist, it marks it as absent.
 pub fn clip_run_capture(bit: u32, cmd: &str, args: &[&str]) -> Option<String> {
-    if clip_dead(bit) {
+    if !EXTERNAL_TOOLS || clip_dead(bit) {
         return None;
     }
     match Command::new(cmd)
@@ -96,6 +100,9 @@ fn clip_write_sender() -> &'static Sender<String> {
 
 /// External write performed exclusively by the serialized worker.
 pub fn clip_write_external(text: &str) {
+    if !EXTERNAL_TOOLS {
+        return;
+    }
     for (bit, cmd) in [(1u32, "qdbus6"), (2u32, "qdbus")] {
         if clip_dead(bit) {
             continue;

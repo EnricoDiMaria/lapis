@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -74,18 +74,11 @@ fn default_next_lecture_id() -> usize {
 impl AudioDocIndex {
 
     pub fn media_root() -> PathBuf {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .unwrap_or_else(|| PathBuf::from("."));
-        base.join("lapis/media")
+        crate::paths::data_dir().join("media")
     }
 
     pub fn media_dir_for_pdf(pdf_path: &Path) -> PathBuf {
-        let mut hasher = DefaultHasher::new();
-        let canonical = fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf());
-        canonical.hash(&mut hasher);
-        let dir = Self::media_root().join(format!("{:016x}", hasher.finish()));
+        let dir = Self::media_root().join(crate::docid::resolve_key(pdf_path));
         let _ = fs::create_dir_all(&dir);
         dir
     }
@@ -123,7 +116,7 @@ impl AudioDocIndex {
         to_save.ensure_lecture_ids();
 
         to_save.source_path = Some(
-            fs::canonicalize(pdf_path)
+            dunce::canonicalize(pdf_path)
                 .unwrap_or_else(|_| pdf_path.to_path_buf()),
         );
 
@@ -756,7 +749,7 @@ impl AudioEngine {
 }
 fn stretched_cache_path(input: &Path, speed: f32) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    fs::canonicalize(input)
+    dunce::canonicalize(input)
         .unwrap_or_else(|_| input.to_path_buf())
         .hash(&mut hasher);
     fs::metadata(input)
@@ -770,7 +763,7 @@ fn stretched_cache_path(input: &Path, speed: f32) -> PathBuf {
 }
 /// Converts any audio/video file (.mp4, .mkv, .mp3, .m4a, .wav, .ogg) into 16kHz Mono 16-bit PCM WAV.
 pub fn convert_media_to_16k_wav(input: &Path, output_wav: &Path) -> Result<u64, String> {
-    let status = Command::new("ffmpeg")
+    let status = crate::sysproc::ffmpeg()
         .args([
             "-y",
             "-i",
@@ -841,7 +834,7 @@ fn stretched_wav(input: &Path, speed: f32) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let tmp = out.with_extension("part.wav");
-    let status = Command::new("ffmpeg")
+    let status = crate::sysproc::ffmpeg()
         .args(["-y", "-nostdin", "-loglevel", "quiet", "-i"])
         .arg(input)
         .args([
@@ -941,12 +934,7 @@ pub fn find_asr_model() -> Option<PathBuf> {
         }
     }
 
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let models_dir = base.join("lapis/models");
-    let _ = fs::create_dir_all(&models_dir);
+    let models_dir = crate::paths::models_dir();
 
     for name in [
         "parakeet-tdt-0.6b-v3-int8",

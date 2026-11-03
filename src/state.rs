@@ -498,14 +498,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn config_path() -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let dir = base.join("lapis");
-        let _ = fs::create_dir_all(&dir);
-        dir.join("state.json")
+        crate::paths::config_dir().join("state.json")
     }
 
     pub fn load() -> Self {
@@ -528,7 +521,7 @@ impl AppState {
     }
 
     pub fn find_entry(&self, pdf_path: &Path) -> Option<&RecentFileEntry> {
-        let canonical = fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf());
+        let canonical = dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf());
         self.recent_files
             .iter()
             .find(|e| e.path == canonical || e.path == pdf_path)
@@ -538,7 +531,7 @@ impl AppState {
         if entry.path.as_os_str().is_empty() {
             return;
         }
-        if let Ok(canon) = fs::canonicalize(&entry.path) {
+        if let Ok(canon) = dunce::canonicalize(&entry.path) {
             entry.path = canon;
         }
         self.recent_files.retain(|e| e.path != entry.path);

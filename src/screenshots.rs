@@ -5,6 +5,7 @@
 use eframe::egui;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Mutex, OnceLock};
@@ -105,6 +106,12 @@ fn read_clipboard_image() -> Option<Shot> {
             }
         }
     }
+    read_clipboard_image_external()
+}
+
+/// Linux only: wl-paste (Wayland) and xclip (X11) fallbacks.
+#[cfg(target_os = "linux")]
+fn read_clipboard_image_external() -> Option<Shot> {
     let attempts: [(&str, &[&str]); 2] = [
         ("wl-paste", &["--type", "image/png"]),
         ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
@@ -126,6 +133,21 @@ fn read_clipboard_image() -> Option<Shot> {
     None
 }
 
+#[cfg(not(target_os = "linux"))]
+fn read_clipboard_image_external() -> Option<Shot> {
+    None
+}
+
+/// Windows/macOS: ask arboard directly (no external tools). Without this the paste
+/// of images would never be attempted, because `prefetch_clipboard_image` gates on it.
+#[cfg(not(target_os = "linux"))]
+pub fn clipboard_has_image() -> bool {
+    arboard::Clipboard::new()
+        .ok()
+        .map_or(false, |mut cb| cb.get_image().is_ok())
+}
+
+#[cfg(target_os = "linux")]
 pub fn clipboard_has_image() -> bool {
     let attempts: [(&str, &[&str]); 2] = [
         ("wl-paste", &["--list-types"]),
@@ -180,8 +202,8 @@ pub fn save_png(shot: &Shot, dir: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn markdown_image(path: &Path) -> String {
-    let clean = path.to_string_lossy().replace(' ', "%20");
-    format!("![screenshot](file://{clean})")
+    let clean = crate::paths::file_uri(path).replace(' ', "%20");
+    format!("![screenshot]({clean})")
 }
 
 #[derive(Clone, Debug)]

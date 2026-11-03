@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/Built_with-Rust-dca282.svg)](https://www.rust-lang.org/)
 [![GUI](https://img.shields.io/badge/GUI-egui-blue.svg)](https://github.com/emilk/egui)
-[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](../../releases/latest)
+[![Platform](https://img.shields.io/badge/Platform-Linux_%7C_Windows-lightgrey.svg)](../../releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>

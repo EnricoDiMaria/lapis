@@ -1,7 +1,8 @@
 [package]
 name = "lapis"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 
 [dependencies]
@@ -21,7 +22,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 lopdf = "0.34"
 rfd = "0.17.2"
-arboard = { version = "3", features = ["wayland-data-control"] }
+arboard = "3"
+dunce = "1"
 cpal = "0.18"
 hound = "3.5"
 rodio = "0.23"
@@ -30,6 +32,13 @@ flate2 = "1.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 egui_extras = { version = "0.37", features = ["all_loaders", "image", "file"] }
 spellbook = "0.3"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
+
+[build-dependencies]
+winresource = "0.1"
+
 
 [profile.release]
 opt-level = 3
