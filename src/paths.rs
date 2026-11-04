@@ -84,13 +84,55 @@ fn migrate_legacy_notes(new_dir: &Path) {
             let _ = fs::remove_file(&from);
         }
     }
-    let _ = fs::remove_dir(&legacy_notes); // riesce solo se vuota
-    let _ = fs::remove_dir(&legacy_root); // idem
+    let _ = fs::remove_dir(&legacy_notes);
+    let _ = fs::remove_dir(&legacy_root);
 }
 
+/// `file://` URI usable by egui_extras / Markdown.
+///
+/// Windows needs the standard form with three slashes: `C:\Users\me\a b.png` ->
+/// `file:///C:/Users/me/a b.png`. With two slashes egui_extras reads `C:` as a network host
+/// and fails with "The network path was not found (os error 53)". Backslashes are also
+/// replaced because in Markdown they are escape characters.
 pub fn file_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
-    #[cfg(windows)]
-    let s = s.replace('\\', "/");
-    format!("file://{s}")
+    if cfg!(windows) {
+        windows_file_uri(&s)
+    } else {
+        format!("file://{s}")
+    }
 }
+
+/// Pure function (testable on any OS): Windows path -> `file://` URI.
+fn windows_file_uri(path: &str) -> String {
+    let s = path.replace('\\', "/");
+    if s.starts_with("//") {
+        // UNC: //server/share/x.png -> file://server/share/x.png
+        format!("file:{s}")
+    } else {
+        // drive: C:/Users/x.png -> file:///C:/Users/x.png
+        format!("file:///{s}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_uris_use_three_slashes_and_forward_slashes() {
+        assert_eq!(
+            windows_file_uri(r"C:\Users\me\AppData\Local\lapis\media\abc\screenshots\shot_1.png"),
+            "file:///C:/Users/me/AppData/Local/lapis/media/abc/screenshots/shot_1.png"
+        );
+        assert_eq!(windows_file_uri(r"D:\a b\c.png"), "file:///D:/a b/c.png");
+        assert_eq!(windows_file_uri(r"\\server\share\x.png"), "file://server/share/x.png");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_uri_is_unchanged() {
+        assert_eq!(file_uri(Path::new("/home/me/a b.png")), "file:///home/me/a b.png");
+    }
+ }
+

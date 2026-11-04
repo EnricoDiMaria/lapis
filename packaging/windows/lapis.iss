@@ -20,25 +20,24 @@ Compression=lzma2/ultra
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; installazione per-utente di default (nessun UAC); l'utente può scegliere "per tutti" dal dialog
+; per-user install by default (no UAC); the user can choose "all users" in the dialog
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 WizardStyle=modern
 
 [Languages]
-Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Icona sul desktop"; Flags: unchecked
-Name: "pdfassoc"; Description: "Imposta Lapis come lettore PDF predefinito (consigliato: scegli comunque da Impostazioni di Windows)"; Flags: unchecked
-Name: "downloadmodel"; Description: "Scarica il modello di trascrizione offline Parakeet (~650 MB)"; Flags: unchecked
-; ffmpeg non è incluso nell'installer: viene scaricato dal sito ufficiale (solo se non è già nel PATH)
-Name: "downloadffmpeg"; Description: "Scarica ffmpeg (serve per importare audio/video, cambiare velocità e convertire le registrazioni)"; Check: not HasFFmpeg
+Name: "desktopicon"; Description: "Create a desktop icon"; Flags: unchecked
+Name: "pdfassoc"; Description: "Set Lapis as the default PDF reader (you can still change this in Windows Settings)"; Flags: unchecked
+Name: "downloadmodel"; Description: "Download the offline Parakeet transcription model (~650 MB)"; Flags: unchecked
+; ffmpeg is not bundled: it is downloaded from the official site (only if it is not already in PATH)
+Name: "downloadffmpeg"; Description: "Download ffmpeg (needed to import audio/video, change playback speed and convert recordings)"; Check: not HasFFmpeg
 
 [Files]
 Source: "..\..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
-; script che scarica VC++ Runtime e ffmpeg dai siti ufficiali (nulla di terze parti è incluso nell'installer)
+; script that downloads the VC++ Runtime and ffmpeg from their official sites (no third-party binaries are bundled)
 Source: "install-deps.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -46,18 +45,18 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Registry]
-; "Apri con" > Lapis
+; "Open with" > Lapis
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".pdf"; ValueData: ""
-; associazione opzionale
+; optional file association
 Root: HKA; Subkey: "Software\Classes\Lapis.pdf"; ValueType: string; ValueData: "PDF (Lapis)"; Flags: uninsdeletekey; Tasks: pdfassoc
 Root: HKA; Subkey: "Software\Classes\Lapis.pdf\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: pdfassoc
 Root: HKA; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "Lapis.pdf"; ValueData: ""; Flags: uninsdeletevalue; Tasks: pdfassoc
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-deps.ps1"" -VCRedist"; StatusMsg: "Download e installazione Microsoft Visual C++ Runtime..."; Flags: waituntilterminated; Check: NeedsVCRedist
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-deps.ps1"" -FFmpeg -AppDir ""{app}"""; StatusMsg: "Download di ffmpeg..."; Flags: waituntilterminated; Tasks: downloadffmpeg
-Filename: "{app}\{#AppExe}"; Description: "Avvia Lapis"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-deps.ps1"" -VCRedist"; StatusMsg: "Downloading and installing the Microsoft Visual C++ Runtime..."; Flags: waituntilterminated; Check: NeedsVCRedist
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-deps.ps1"" -FFmpeg -AppDir ""{app}"""; StatusMsg: "Downloading ffmpeg..."; Flags: waituntilterminated; Tasks: downloadffmpeg
+Filename: "{app}\{#AppExe}"; Description: "Launch Lapis"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const
@@ -81,7 +80,7 @@ end;
 
 procedure InitializeWizard;
 begin
-  ModelPage := CreateDownloadPage('Modello di trascrizione', 'Download del modello Parakeet TDT 0.6B v3 (int8)...', nil);
+  ModelPage := CreateDownloadPage('Transcription model', 'Downloading the Parakeet TDT 0.6B v3 (int8) model...', nil);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -90,7 +89,7 @@ begin
   if (CurPageID = wpReady) and WizardIsTaskSelected('downloadmodel') then
   begin
     ModelPage.Clear;
-    { Inserire gli SHA256 reali al posto di '' per la verifica d'integrità }
+    { Put the real SHA256 hashes in place of '' to verify file integrity }
     ModelPage.Add(ModelBase + 'vocab.txt', 'vocab.txt', '');
     ModelPage.Add(ModelBase + 'encoder-model.int8.onnx', 'encoder-model.int8.onnx', '');
     ModelPage.Add(ModelBase + 'decoder_joint-model.int8.onnx', 'decoder_joint-model.int8.onnx', '');
@@ -101,8 +100,8 @@ begin
         ModelOk := True;
       except
         ModelOk := False;
-        { non bloccante: si può riprovare dopo con  install.ps1 model }
-        SuppressibleMsgBox('Download del modello non riuscito. Lapis verrà installato comunque; potrai scaricare il modello più tardi.', mbInformation, MB_OK, IDOK);
+        { not blocking: the model can be added later }
+        SuppressibleMsgBox('The model download failed. Lapis will be installed anyway; you can add the model later by placing its files in %LOCALAPPDATA%\lapis\models\parakeet-tdt-0.6b-v3-int8.', mbInformation, MB_OK, IDOK);
       end;
     finally
       ModelPage.Hide;
@@ -127,7 +126,7 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-    if MsgBox('Rimuovere anche modelli ASR, cache audio, dizionari e impostazioni di Lapis?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    if MsgBox('Also remove the data Lapis keeps on this computer: ASR models, audio recordings, notes backups, dictionaries and settings?' + #13#10#13#10 + 'Notes saved inside your PDF files are not affected.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
     begin
       DelTree(ExpandConstant('{localappdata}\lapis'), True, True, True);
       DelTree(ExpandConstant('{userappdata}\lapis'), True, True, True);
