@@ -1,3 +1,4 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::path::{PathBuf, Path};
@@ -27,6 +28,9 @@ use crate::clipboard::*;
 mod screenshots;
 use screenshots::{ShotJobs, ShotTarget};
 mod doc_lock;
+mod docid;
+mod paths;
+mod sysproc;
 
 fn setup_nerd_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -179,10 +183,8 @@ fn dir_size(p: &Path) -> u64 {
 }
  
 fn path_key(p: &Path) -> String {
-    notes::get_backup_path(p)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default()
+    // read-only: does not create ids for recent files that were never opened
+    docid::lookup_key(p)
 }
  
 fn stretch_cache_dir() -> PathBuf {
@@ -225,7 +227,7 @@ fn remove_media_file(dir: &Path, name: &str) -> std::io::Result<()> {
  
 fn make_storage_entry(key: String, r: RawStorage, pdf_path: Option<PathBuf>) -> StorageEntry {
     let pdf_exists = pdf_path.as_ref().map(|p| p.exists()).unwrap_or(false);
-    let orig_path = pdf_path.as_ref().map(|p| notes::original_backup_path(p));
+    let orig_path = pdf_path.as_ref().map(|p| notes::original_backup_lookup(p));
     let orig_size = orig_path
         .as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
@@ -353,7 +355,7 @@ fn scan_storage(
         if out.iter().any(|e| e.id == key) {
             continue;
         }
-        if notes::original_backup_path(&rp.path).exists() {
+        if notes::original_backup_lookup(&rp.path).exists() {
             out.push(make_storage_entry(
                 key,
                 RawStorage::default(),
@@ -2131,7 +2133,7 @@ impl Lapis {
                     }
                 }
                 None => {
-                    self.audio_toast("󰅚 Put parakeet-tdt-0.6b-v3-int8 in ~/.local/share/lapis/models/");
+                    self.audio_toast(format!("󰅚 Put parakeet-tdt-0.6b-v3-int8 in {}", paths::models_dir().display()));
                 }
             },
             kind => {
@@ -4412,9 +4414,9 @@ fn handle_slide_annotations(
                             ) {
                                 Ok(png_path) => {
                                     let md_link = format!(
-                                        "\n![Snip p.{}](file://{})\n",
+                                        "\n![Snip p.{}]({})\n",
                                         page_num,
-                                        png_path.display()
+                                        paths::file_uri(&png_path)
                                     );
                                     self.current_note.push_str(&md_link);
                                     self.note_is_dirty = true;
@@ -5499,7 +5501,7 @@ fn handle_slide_annotations(
                                                         let mut action: Option<StorageAction> = None;
                                                     
                                                         let open_canon = if self.has_pdf() {
-                                                            std::fs::canonicalize(&self.pdf_path).ok()
+                                                            dunce::canonicalize(&self.pdf_path).ok()
                                                         } else {
                                                             None
                                                         };
@@ -11225,7 +11227,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 (a.points[0], a.points[1], a.text.clone())
             };
             let rect = egui::Rect::from_two_pos(to_screen(p0), to_screen(p1));
-            let uri = format!("file://{}", dir.join(&name).display());
+            let uri = paths::file_uri(&dir.join(&name));
             egui::Image::new(uri).paint_at(ui, rect);
  
             if !cursor_tool {
@@ -15700,18 +15702,35 @@ impl eframe::App for Lapis {
     }
 }
 
+fn load_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .ok()?
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
 fn main() -> eframe::Result<()> {
-    let initial_pdf = env::args()
+    // With windows_subsystem = "windows" and panic = "abort" a crash would be silent.
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write(paths::data_dir().join("crash.log"), info.to_string());
+    }));
+
+    let initial_pdf = env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .filter(|p| p.exists());
 
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_drag_and_drop(true)
-            .with_inner_size([1200.0, 720.0])
-            .with_min_inner_size([560.0, 400.0])
-            .with_title("Lapis"),
+        .with_inner_size([1200.0, 720.0])
+        .with_min_inner_size([560.0, 400.0])
+        .with_title("Lapis");
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let opts = eframe::NativeOptions {
+        viewport,
         ..Default::default()
     };
 

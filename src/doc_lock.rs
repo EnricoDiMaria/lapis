@@ -14,11 +14,11 @@ pub struct DocLock {
 #[derive(Debug)]
 pub enum LockError {
     Busy,
-    Io(io::Error),
+    Io((io::Error)),
 }
 
 pub fn canonical(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -31,11 +31,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 fn lock_file_for(canon: &Path) -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("lapis")
+    crate::paths::data_dir()
         .join("locks")
         .join(format!("{:016x}.lock", fnv1a(canon.to_string_lossy().as_bytes())))
 }

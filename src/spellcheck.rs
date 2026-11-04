@@ -10,11 +10,7 @@ const BUNDLED_DIC: &[u8] = include_bytes!("../assets/dictionaries/en_US.dic");
 
 /// Folder where the app stores user-added dictionaries and personal words.
 pub fn dict_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("lapis/dictionaries");
+    let dir = crate::paths::data_dir().join("dictionaries");
     let _ = fs::create_dir_all(&dir);
     dir
 }

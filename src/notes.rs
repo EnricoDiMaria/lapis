@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use serde::{Deserialize, Serialize};
@@ -55,7 +56,14 @@ pub struct DocData {
     #[serde(default)] 
     pub blank_pages: std::collections::HashSet<u32>,
     #[serde(default)]
-    pub source_path: Option<PathBuf>,  
+    pub source_path: Option<PathBuf>,
+    /// Stable document identity (see docid.rs). Travels with the PDF.
+    #[serde(default)]
+    pub doc_id: Option<String>,
+    /// Revision: ms since the epoch, strictly increasing along a chain of saves.
+    /// 0 = data written by versions that did not track revisions.
+    #[serde(default)]
+    pub rev: u64,
 }
 
 const NOTES_START_TAG: &[u8] = b"\n---Lapis_NOTES_V1---\n";
@@ -462,27 +470,13 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     save_pdf_with_notes(&mut doc, pdf_path, "reorder", &notes)
 }
 
+/// Notes backups: `<data_dir>/notes` (migrates the legacy `lapispdf/notes` folder on first use).
 pub fn get_backup_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
-        })
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let notes_dir = base.join("lapispdf").join("notes");
-    let _ = fs::create_dir_all(&notes_dir);
-    notes_dir
+    crate::paths::notes_backup_dir()
 }
 
 pub fn get_backup_path(pdf_path: &Path) -> PathBuf {
-    let canonical = fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    let filename = format!("{:016x}.json", hash);
-    get_backup_dir().join(filename)
+    get_backup_dir().join(format!("{}.json", crate::docid::resolve_key(pdf_path)))
 }
 
 pub fn parse_doc_data_bytes(bytes: &[u8]) -> Option<DocData> {
@@ -505,7 +499,7 @@ fn save_local_backup(pdf_path: &Path, data: &DocData) {
     }
     let mut data = data.clone();
     data.source_path = Some(
-        fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()),
+        dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()),
     );
     if let Ok(json) = serde_json::to_string_pretty(&data) {
         let _ = fs::write(backup_path, json);
@@ -522,58 +516,169 @@ fn load_local_backup(pdf_path: &Path) -> Option<DocData> {
     parse_doc_data_bytes(&bytes)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn known_revs() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static REVS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+    REVS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_rev(pdf_path: &Path, rev: u64) {
+    if let Ok(mut m) = known_revs().lock() {
+        m.insert(pdf_path.to_path_buf(), rev);
+    }
+}
+
+/// Next revision: never lower than the last one loaded/saved for this document, even if this
+/// machine's clock is behind (keeps the order correct along a chain of edits across machines).
+fn next_rev(pdf_path: &Path) -> u64 {
+    let last = known_revs()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(pdf_path).copied())
+        .unwrap_or_else(|| load_local_backup(pdf_path).map(|d| d.rev).unwrap_or(0));
+    now_ms().max(last + 1)
+}
+
+fn same_content(a: &DocData, b: &DocData) -> bool {
+    a.blank_pages == b.blank_pages
+        && serde_json::to_value(&a.notes).ok() == serde_json::to_value(&b.notes).ok()
+        && serde_json::to_value(&a.annotations).ok() == serde_json::to_value(&b.annotations).ok()
+}
+
+/// When one version wins over the other, the loser is kept (if different and not empty) as
+/// `notes/<id>.conflict-<ms>.bak` (newest 5 kept) so a wrong choice never loses data.
+/// The `.bak` extension keeps these files out of the storage manager list.
+fn stash_conflict(key: &str, lost: &DocData, kept: &DocData) {
+    if (lost.notes.is_empty() && lost.annotations.is_empty()) || same_content(lost, kept) {
+        return;
+    }
+    let dir = get_backup_dir();
+    if let Ok(json) = serde_json::to_string_pretty(lost) {
+        let _ = fs::write(dir.join(format!("{key}.conflict-{}.bak", now_ms())), json);
+    }
+    let prefix = format!("{key}.conflict-");
+    let mut all: Vec<PathBuf> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.starts_with(&prefix))
+        })
+        .collect();
+    all.sort(); // timestamps with the same number of digits: lexicographic == chronological
+    while all.len() > 5 {
+        let _ = fs::remove_file(all.remove(0));
+    }
+}
+
+/// Reads only the document id from the data appended after %%EOF (last 8 MB of the file).
+pub(crate) fn read_trailing_doc_id(pdf_path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct IdOnly {
+        #[serde(default)]
+        doc_id: Option<String>,
+    }
+    let mut f = File::open(pdf_path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let take = len.min(8 * 1024 * 1024);
+    f.seek(SeekFrom::Start(len - take)).ok()?;
+    let mut buf = Vec::with_capacity(take as usize);
+    f.read_to_end(&mut buf).ok()?;
+    let start = buf
+        .windows(NOTES_START_TAG.len())
+        .rposition(|w| w == NOTES_START_TAG)?;
+    let content_start = start + NOTES_START_TAG.len();
+    let end = buf[content_start..]
+        .windows(NOTES_END_TAG.len())
+        .position(|w| w == NOTES_END_TAG)?;
+    serde_json::from_slice::<IdOnly>(&buf[content_start..content_start + end])
+        .ok()?
+        .doc_id
+}
+
+/// Reads the whole note block appended after %%EOF.
+fn read_trailing_doc_data(pdf_path: &Path) -> Option<DocData> {
+    let mut file = File::open(pdf_path).ok()?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).ok()?;
+    let start_pos = buffer
+        .windows(NOTES_START_TAG.len())
+        .rposition(|w| w == NOTES_START_TAG)?;
+    let content_start = start_pos + NOTES_START_TAG.len();
+    let end_offset = buffer[content_start..]
+        .windows(NOTES_END_TAG.len())
+        .position(|w| w == NOTES_END_TAG)?;
+    parse_doc_data_bytes(&buffer[content_start..content_start + end_offset])
+}
+
+/// Copy of the data without machine-specific fields, for embedding in the PDF.
+fn portable(data: &DocData) -> DocData {
+    let mut d = data.clone();
+    d.source_path = None;
+    d
+}
+
 pub fn load_doc_data(pdf_path: &Path) -> DocData {
     if pdf_path.as_os_str().is_empty() {
         return DocData::default();
     }
+    let key = crate::docid::resolve_key(pdf_path);
 
-    // 1. Read from local XDG backup first (always up-to-date and immune to PDF locks)
+    // 1. Local backup (immune to PDF locks) and 2. note block appended to the PDF.
     let backup_opt = load_local_backup(pdf_path);
+    let pdf_opt = read_trailing_doc_data(pdf_path);
 
-    // 2. Read from PDF trailing bytes
-    let mut pdf_opt: Option<DocData> = None;
-    if let Ok(mut file) = File::open(pdf_path) {
-        let mut buffer = Vec::new();
-        if file.read_to_end(&mut buffer).is_ok() {
-            if let Some(start_pos) = buffer
-                .windows(NOTES_START_TAG.len())
-                .rposition(|w| w == NOTES_START_TAG)
-            {
-                let content_start = start_pos + NOTES_START_TAG.len();
-                if let Some(end_offset) = buffer[content_start..]
-                    .windows(NOTES_END_TAG.len())
-                    .position(|w| w == NOTES_END_TAG)
-                {
-                    let json_bytes = &buffer[content_start..content_start + end_offset];
-                    pdf_opt = parse_doc_data_bytes(json_bytes);
-                }
+    // Newest revision wins as a whole (so deletions propagate too).
+    // Unversioned data (rev == 0, written by older versions) keeps the old rule:
+    // backup wins and only the pages missing from it are taken from the PDF.
+    // `heal` = the PDF is behind the local backup and must be rewritten.
+    let (mut data, heal) = match (backup_opt, pdf_opt) {
+        (Some(b), Some(p)) if b.rev > 0 && p.rev > 0 => {
+            if p.rev > b.rev {
+                stash_conflict(&key, &b, &p);
+                (p, false)
+            } else if b.rev > p.rev {
+                stash_conflict(&key, &p, &b);
+                (b, true)
+            } else {
+                (b, false)
             }
         }
-    }
+        (Some(b), Some(p)) if b.rev == 0 && p.rev > 0 => {
+            stash_conflict(&key, &b, &p);
+            (p, false)
+        }
+        (Some(mut b), Some(p)) => {
+            for (k, v) in p.notes {
+                b.notes.entry(k).or_insert(v);
+            }
+            for (k, v) in p.annotations {
+                b.annotations.entry(k).or_insert(v);
+            }
+            let upgrade = b.rev > 0; // PDF written by an older version: bring it up to date
+            (b, upgrade)
+        }
+        (Some(b), None) => (b, true),
+        (None, Some(p)) => (p, false),
+        (None, None) => return DocData::default(),
+    };
 
-    match (backup_opt, pdf_opt) {
-        (Some(mut b_data), Some(p_data)) => {
-            // Merge any missing page from PDF trailing into backup data
-            for (k, v) in p_data.notes {
-                b_data.notes.entry(k).or_insert(v);
-            }
-            for (k, v) in p_data.annotations {
-                b_data.annotations.entry(k).or_insert(v);
-            }
-            save_local_backup(pdf_path, &b_data);
-            b_data
-        }
-        (Some(b_data), None) => {
-            save_local_backup(pdf_path, &b_data);
-            let _ = save_data_to_pdf_trailing(pdf_path, &b_data);
-            b_data
-        }
-        (None, Some(p_data)) => {
-            save_local_backup(pdf_path, &p_data);
-            p_data
-        }
-        (None, None) => DocData::default(),
+    data.doc_id = Some(key);
+    remember_rev(pdf_path, data.rev);
+    save_local_backup(pdf_path, &data);
+    if heal {
+        let _ = save_data_to_pdf_trailing(pdf_path, &portable(&data));
     }
+    data
 }
 
 pub fn save_doc_data(
@@ -595,12 +700,16 @@ pub fn save_doc_data(
     let mut clean_pages: HashSet<u32> = blank_pages.clone();
     clean_pages.retain(|&v| v != 0);
 
+    let rev = next_rev(pdf_path);
     let data = DocData {
         notes: clean_notes,
         annotations: clean_anns,
         blank_pages: clean_pages,
+        doc_id: Some(crate::docid::resolve_key(pdf_path)),
+        rev,
         ..Default::default()
     };
+    remember_rev(pdf_path, rev);
 
     // Always write the local JSON backup first!
     save_local_backup(pdf_path, &data);
@@ -1427,23 +1536,24 @@ pub fn create_blank_study_notebook(dest_path: &Path) -> io::Result<()> {
 
 /// Shared originals folder: ~/.local/share/lapis/originals or XDG_DATA_HOME/lapis/originals.
 fn original_storage_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("lapis").join("originals");
+    let dir = crate::paths::data_dir().join("originals");
     let _ = fs::create_dir_all(&dir);
     dir
 }
 
-/// Use the full path to avoid collisions between PDFs with the same name.
+/// `<doc id>_<file name>.orig` (the id is stable: see docid.rs).
 pub fn original_backup_path(pdf_path: &Path) -> PathBuf {
-    let canonical = fs::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    let hash = hasher.finish();
+    original_backup_path_for(pdf_path, &crate::docid::resolve_key(pdf_path))
+}
+
+/// Read-only variant (does not create ids nor migrate): for listings such as the storage manager.
+pub fn original_backup_lookup(pdf_path: &Path) -> PathBuf {
+    original_backup_path_for(pdf_path, &crate::docid::lookup_key(pdf_path))
+}
+
+fn original_backup_path_for(pdf_path: &Path, key: &str) -> PathBuf {
     let fname = pdf_path.file_name().and_then(|n| n.to_str()).unwrap_or("document.pdf");
-    original_storage_dir().join(format!("{hash:016x}_{fname}.orig"))
+    original_storage_dir().join(format!("{key}_{fname}.orig"))
 }
 
 /// Legacy path used only to migrate older backups.
@@ -1659,5 +1769,88 @@ mod tests {
     fn header_multibyte_does_not_panic() {
         assert_eq!(parse_slide_header("### 󰗊 Lecture Transcript"), None);
         assert_eq!(parse_slide_header("è un esempio"), None);
+    }
+
+    #[test]
+    fn identity_follows_the_file_and_newest_revision_wins() {
+        let _l = crate::docid::test_lock();
+        let root = std::env::temp_dir().join(format!("lapis_notes_flow_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // SAFETY: test serializzati da test_lock(), nessun altro thread legge l'ambiente.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
+            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
+        }
+        let pdf_a = root.join("a.pdf");
+        fs::write(&pdf_a, b"%PDF-1.4\n%%EOF\n").unwrap();
+
+        // salvataggio iniziale: l'id finisce nel blocco note dentro il PDF
+        let mut notes = HashMap::new();
+        notes.insert(1u32, "first".to_string());
+        let _ = load_doc_data(&pdf_a);
+        save_doc_data(&pdf_a, &notes, &HashMap::new(), HashSet::new()).unwrap();
+        let id_a = crate::docid::resolve_key(&pdf_a);
+        assert_eq!(read_trailing_doc_id(&pdf_a).as_deref(), Some(id_a.as_str()));
+        assert!(load_local_backup(&pdf_a).unwrap().rev > 0);
+
+        // 1) spostato/rinominato: stesso id, note intatte
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let pdf_b = sub.join("renamed.pdf");
+        fs::rename(&pdf_a, &pdf_b).unwrap();
+        assert_eq!(crate::docid::resolve_key(&pdf_b), id_a);
+        assert_eq!(load_doc_data(&pdf_b).notes.get(&1).map(String::as_str), Some("first"));
+
+        // 2) copia con l'originale ancora presente: id nuovo, note comunque caricate dal PDF
+        let pdf_c = root.join("copy.pdf");
+        fs::copy(&pdf_b, &pdf_c).unwrap();
+        let id_c = crate::docid::resolve_key(&pdf_c);
+        assert_ne!(id_c, id_a);
+        assert_eq!(load_doc_data(&pdf_c).notes.len(), 1);
+
+        // 3) PDF modificato altrove (revisione più recente) batte il backup locale vecchio
+        let mut remote = DocData::default();
+        remote.notes.insert(1, "edited elsewhere".into());
+        remote.doc_id = Some(id_a.clone());
+        remote.rev = now_ms() + 10_000;
+        save_data_to_pdf_trailing(&pdf_b, &remote).unwrap();
+        let loaded = load_doc_data(&pdf_b);
+        assert_eq!(loaded.notes[&1], "edited elsewhere");
+        assert_eq!(load_local_backup(&pdf_b).unwrap().notes[&1], "edited elsewhere");
+        let stashed = fs::read_dir(get_backup_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id_a}.conflict-")))
+            .count();
+        assert_eq!(stashed, 1, "la versione scartata deve essere conservata");
+
+        // 4) un salvataggio successivo ha sempre revisione maggiore di quella caricata
+        let mut n2 = HashMap::new();
+        n2.insert(1u32, "local edit".to_string());
+        save_doc_data(&pdf_b, &n2, &HashMap::new(), HashSet::new()).unwrap();
+        assert!(load_local_backup(&pdf_b).unwrap().rev > remote.rev);
+
+        // 5) backup più recente del PDF (scrittura nel PDF fallita): il PDF viene riallineato
+        let mut newer = DocData::default();
+        newer.notes.insert(1, "local newer".into());
+        newer.rev = now_ms() + 60_000;
+        save_local_backup(&pdf_b, &newer);
+        assert_eq!(load_doc_data(&pdf_b).notes[&1], "local newer");
+        assert_eq!(read_trailing_doc_data(&pdf_b).unwrap().notes[&1], "local newer");
+
+        // 6) dati senza revisione (versioni precedenti): regola storica, il backup vince
+        //    e le pagine mancanti arrivano dal PDF
+        let mut old_pdf = DocData::default();
+        old_pdf.notes.insert(2, "only in pdf".into());
+        save_data_to_pdf_trailing(&pdf_c, &old_pdf).unwrap(); // rev 0
+        let mut old_bak = DocData::default();
+        old_bak.notes.insert(1, "in backup".into());
+        save_local_backup(&pdf_c, &old_bak); // rev 0
+        let merged = load_doc_data(&pdf_c);
+        assert_eq!(merged.notes.len(), 2);
+        assert_eq!(merged.notes[&1], "in backup");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

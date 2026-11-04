@@ -276,14 +276,7 @@ pub fn dark_presets() -> Vec<Self> {
 
     /// Returns `~/.config/lapis/theme.json` (respecting `XDG_CONFIG_HOME`).
     pub fn default_config_path() -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let dir = base.join("lapis");
-        let _ = fs::create_dir_all(&dir);
-        dir.join("theme.json")
+        crate::paths::config_dir().join("theme.json")
     }
 
     pub fn save(&self) -> io::Result<()> {
