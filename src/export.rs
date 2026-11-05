@@ -84,7 +84,9 @@ pub fn compute_export_geometry(slide_width_pct: f32) -> (f64, f64, f64) {
     (split_x, text_x, avail_text_w)
 }
 
-pub fn export_slides_with_notes(
+/// Fallback: every page is rasterised on a fixed 16:9 canvas (used only when the source PDF
+/// cannot be processed by `export_vector`).
+fn export_rasterized(
     source_pdf: &Path,
     output_pdf: &Path,
     notes: &HashMap<u32, String>,
@@ -92,6 +94,10 @@ pub fn export_slides_with_notes(
     settings: &ExportSettings,
     hidden_pages: &std::collections::HashSet<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let no_notes = HashMap::new();
+    let no_anns = HashMap::new();
+    let notes = if settings.content.includes_notes() { notes } else { &no_notes };
+    let annotations = if settings.content.includes_annotations() { annotations } else { &no_anns };
     let src_str = source_pdf
         .to_str()
         .ok_or("Invalid UTF-8 path for source PDF")?;
@@ -140,7 +146,7 @@ pub fn export_slides_with_notes(
             draw_background(&mut ops, false, split_x, &pal);
             draw_slide_xobject(&mut ops, sx, sy, sw, sh);
             append_selectable_pdf_text_ops(&mut ops, &mu_page, sx, sy, sw, sh);
-            draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh);
+            draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh, sw / (pix_w as f64 / 2.0));
 
             let page_id = add_export_page(
                 &mut pdf,
@@ -178,7 +184,7 @@ pub fn export_slides_with_notes(
                 ops.push(Operation::new("S", vec![]));
                 ops.push(Operation::new("Q", vec![]));
                 append_selectable_pdf_text_ops(&mut ops, &mu_page, sx, sy, sw, sh);
-                draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh);
+                draw_pdf_annotations(&mut ops, page_anns, &prepared.names, sx, sy, sw, sh, sw / (pix_w as f64 / 2.0));
 
                 // Right column header badge
                 let header_y = CANVAS_H - MARGIN - 11.0;
@@ -515,6 +521,7 @@ fn draw_pdf_annotations(
     sy: f64,
     sw: f64,
     sh: f64,
+    k: f64,
 ) {
     if anns.is_empty() {
         return;
@@ -528,7 +535,8 @@ fn draw_pdf_annotations(
         let r = (ann.color[0] as f64) / 255.0;
         let g = (ann.color[1] as f64) / 255.0;
         let b = (ann.color[2] as f64) / 255.0;
-
+        // Pen/shape width: the width chosen in the app, scaled with the slide (k = 1 on original pages).
+        let lw = (ann.stroke_width as f64 * k).max(0.4);
         match ann.kind {
             AnnotationKind::Highlight => {
                 if ann.points.len() >= 2 {
@@ -536,17 +544,14 @@ fn draw_pdf_annotations(
                     let (x2, y2) = to_pdf(*ann.points.last().unwrap());
                     let rx = x1.min(x2);
                     let ry = y1.min(y2);
-                    let rw = (x2 - x1).abs().max(2.0);
-                    let rh = (y2 - y1).abs().max(4.0);
-
+                    let rw = (x2 - x1).abs().max(2.0 * k);
+                    let rh = (y2 - y1).abs().max(4.0 * k);
+                    // Semi-transparent fill, like on screen.
                     ops.push(Operation::new("q", vec![]));
-                    ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![1.5.into()]));
-                    ops.push(Operation::new(
-                        "re",
-                        vec![rx.into(), ry.into(), rw.into(), rh.into()],
-                    ));
-                    ops.push(Operation::new("S", vec![]));
+                    ops.push(Operation::new("gs", vec![Object::Name(b"GsHl".to_vec())]));
+                    ops.push(Operation::new("rg", vec![r.into(), g.into(), b.into()]));
+                    ops.push(Operation::new("re", vec![rx.into(), ry.into(), rw.into(), rh.into()]));
+                    ops.push(Operation::new("f", vec![]));
                     ops.push(Operation::new("Q", vec![]));
                 }
             }
@@ -556,7 +561,9 @@ fn draw_pdf_annotations(
                     let (x2, _) = to_pdf(*ann.points.last().unwrap());
                     ops.push(Operation::new("q", vec![]));
                     ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![2.2.into()]));
+                    ops.push(Operation::new("w", vec![lw.into()]));
+                    ops.push(Operation::new("J", vec![1.into()]));
+                    ops.push(Operation::new("j", vec![1.into()]));
                     ops.push(Operation::new("m", vec![x1.into(), y1.into()]));
                     ops.push(Operation::new("l", vec![x2.into(), y1.into()]));
                     ops.push(Operation::new("S", vec![]));
@@ -567,7 +574,9 @@ fn draw_pdf_annotations(
                 if ann.points.len() >= 2 {
                     ops.push(Operation::new("q", vec![]));
                     ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![2.2.into()]));
+                    ops.push(Operation::new("w", vec![lw.into()]));
+                    ops.push(Operation::new("J", vec![1.into()]));
+                    ops.push(Operation::new("j", vec![1.into()]));
                     let (x0, y0) = to_pdf(ann.points[0]);
                     ops.push(Operation::new("m", vec![x0.into(), y0.into()]));
                     for &pt in &ann.points[1..] {
@@ -584,7 +593,9 @@ fn draw_pdf_annotations(
                     let (x2, y2) = to_pdf(*ann.points.last().unwrap());
                     ops.push(Operation::new("q", vec![]));
                     ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![2.2.into()]));
+                    ops.push(Operation::new("w", vec![lw.into()]));
+                    ops.push(Operation::new("J", vec![1.into()]));
+                    ops.push(Operation::new("j", vec![1.into()]));
                     ops.push(Operation::new(
                         "re",
                         vec![
@@ -611,7 +622,9 @@ fn draw_pdf_annotations(
 
                     ops.push(Operation::new("q", vec![]));
                     ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![2.2.into()]));
+                    ops.push(Operation::new("w", vec![lw.into()]));
+                    ops.push(Operation::new("J", vec![1.into()]));
+                    ops.push(Operation::new("j", vec![1.into()]));
                     ops.push(Operation::new("m", vec![(cx + rad).into(), cy.into()]));
                     ops.push(Operation::new(
                         "c",
@@ -667,7 +680,9 @@ fn draw_pdf_annotations(
                     let (x2, y2) = to_pdf(*ann.points.last().unwrap());
                     ops.push(Operation::new("q", vec![]));
                     ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![2.2.into()]));
+                    ops.push(Operation::new("w", vec![lw.into()]));
+                    ops.push(Operation::new("J", vec![1.into()]));
+                    ops.push(Operation::new("j", vec![1.into()]));
                     ops.push(Operation::new("m", vec![x1.into(), y1.into()]));
                     ops.push(Operation::new("l", vec![x2.into(), y2.into()]));
 
@@ -680,7 +695,7 @@ fn draw_pdf_annotations(
                             let uy = dy / len;
                             let px = -uy;
                             let py = ux;
-                            let hl = 10.0;
+                            let hl = (lw * 4.2).clamp(9.0 * k, 18.0 * k);
                             let w1x = x2 - ux * hl + px * (hl * 0.55);
                             let w1y = y2 - uy * hl + py * (hl * 0.55);
                             let w2x = x2 - ux * hl - px * (hl * 0.55);
@@ -905,16 +920,19 @@ fn draw_pdf_annotations(
                     let (x2, y2) = to_pdf(*ann.points.last().unwrap());
                     let rx = x1.min(x2);
                     let ry = y1.min(y2);
-                    let rw = (x2 - x1).abs().max(2.0);
-                    let rh = (y2 - y1).abs().max(4.0);
-
+                    let rw = (x2 - x1).abs().max(2.0 * k);
+                    let rh = (y2 - y1).abs().max(4.0 * k);
+                    // Occlusion tape: (almost) opaque fill with a white border.
                     ops.push(Operation::new("q", vec![]));
-                    ops.push(Operation::new("RG", vec![r.into(), g.into(), b.into()]));
-                    ops.push(Operation::new("w", vec![1.5.into()]));
-                    ops.push(Operation::new(
-                        "re",
-                        vec![rx.into(), ry.into(), rw.into(), rh.into()],
-                    ));
+                    ops.push(Operation::new("gs", vec![Object::Name(b"GsTape".to_vec())]));
+                    ops.push(Operation::new("rg", vec![r.into(), g.into(), b.into()]));
+                    ops.push(Operation::new("re", vec![rx.into(), ry.into(), rw.into(), rh.into()]));
+                    ops.push(Operation::new("f", vec![]));
+                    ops.push(Operation::new("Q", vec![]));
+                    ops.push(Operation::new("q", vec![]));
+                    ops.push(Operation::new("RG", vec![1.0.into(), 1.0.into(), 1.0.into()]));
+                    ops.push(Operation::new("w", vec![(1.5 * k).into()]));
+                    ops.push(Operation::new("re", vec![rx.into(), ry.into(), rw.into(), rh.into()]));
                     ops.push(Operation::new("S", vec![]));
                     ops.push(Operation::new("Q", vec![]));
                 }
@@ -1518,6 +1536,7 @@ fn add_export_page(
         "XObject" => dictionary! {
             "Im0" => img_id,
         },
+        "ExtGState" => ext_gstates(),
     };
 
     let page_id = pdf.add_object(dictionary! {
@@ -1529,4 +1548,688 @@ fn add_export_page(
     });
 
     Ok(page_id)
+}
+
+// ───────────────────── vector export: the original pages are reused ─────────────────────
+//
+// The source PDF is opened with lopdf and modified in place:
+//  * pages without notes stay byte-for-byte the original page (same size, vector content,
+//    selectable text, links) with the annotations drawn on top in an extra layer;
+//  * pages with notes are rebuilt as "slide on the left (original size, no margins) + notes on
+//    the right", where the slide is the original page embedded as a Form XObject (still vector).
+// If lopdf cannot handle the source (encrypted/damaged files) the caller falls back to the
+// rasterised export below.
+
+struct PageGeo {
+    /// Visible box (CropBox ∩ MediaBox) in the page's own user space.
+    bbox: [f64; 4],
+    /// Maps the user space to the "display space" (origin at the lower-left corner, after /Rotate).
+    m: [f64; 6],
+    /// Inverse of `m`.
+    inv: [f64; 6],
+    /// Displayed width / height in points.
+    dw: f64,
+    dh: f64,
+}
+
+fn es(e: lopdf::Error) -> String {
+    e.to_string()
+}
+
+fn obj_num(o: &Object) -> Option<f64> {
+    match o {
+        Object::Integer(i) => Some(*i as f64),
+        Object::Real(r) => Some(*r as f64),
+        _ => None,
+    }
+}
+
+fn page_rect(doc: &LoDocument, page_id: ObjectId, key: &[u8]) -> Option<[f64; 4]> {
+    let o = crate::notes::resolve_obj(doc, crate::notes::page_inherited(doc, page_id, key)?);
+    let a = o.as_array().ok()?;
+    if a.len() < 4 {
+        return None;
+    }
+    let mut v = [0.0f64; 4];
+    for (i, item) in a.iter().take(4).enumerate() {
+        v[i] = obj_num(&crate::notes::resolve_obj(doc, item.clone()))?;
+    }
+    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+}
+
+fn invert_affine(m: [f64; 6]) -> [f64; 6] {
+    let det = m[0] * m[3] - m[1] * m[2];
+    let det = if det.abs() < 1e-12 { 1.0 } else { det };
+    [
+        m[3] / det,
+        -m[1] / det,
+        -m[2] / det,
+        m[0] / det,
+        (m[2] * m[5] - m[3] * m[4]) / det,
+        (m[1] * m[4] - m[0] * m[5]) / det,
+    ]
+}
+
+fn page_geo(doc: &LoDocument, page_id: ObjectId) -> Option<PageGeo> {
+    let media = page_rect(doc, page_id, b"MediaBox")?;
+    let mut b = media;
+    if let Some(c) = page_rect(doc, page_id, b"CropBox") {
+        let x0 = media[0].max(c[0]);
+        let y0 = media[1].max(c[1]);
+        let x1 = media[2].min(c[2]);
+        let y1 = media[3].min(c[3]);
+        if x1 > x0 && y1 > y0 {
+            b = [x0, y0, x1, y1];
+        }
+    }
+    let rot = crate::notes::page_inherited(doc, page_id, b"Rotate")
+        .map(|o| crate::notes::resolve_obj(doc, o))
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(0);
+    let rot = (((rot % 360) + 360) % 360) / 90 * 90;
+    let (x0, y0, x1, y1) = (b[0], b[1], b[2], b[3]);
+    let (w, h) = (x1 - x0, y1 - y0);
+    let (m, dw, dh) = match rot {
+        0 => ([1.0, 0.0, 0.0, 1.0, -x0, -y0], w, h),
+        90 => ([0.0, -1.0, 1.0, 0.0, -y0, x1], h, w),
+        180 => ([-1.0, 0.0, 0.0, -1.0, x1, y1], w, h),
+        _ => ([0.0, 1.0, -1.0, 0.0, y1, -x0], h, w),
+    };
+    if dw <= 0.0 || dh <= 0.0 {
+        return None;
+    }
+    Some(PageGeo { bbox: b, m, inv: invert_affine(m), dw, dh })
+}
+
+fn real_array(v: &[f64]) -> Object {
+    Object::Array(v.iter().map(|x| Object::Real(*x as f32)).collect())
+}
+
+/// The original page as a Form XObject whose display space is [0,dw]x[0,dh] (rotation applied).
+fn make_slide_form(pdf: &mut LoDocument, page_id: ObjectId, geo: &PageGeo) -> Result<ObjectId, String> {
+    let content = pdf.get_page_content(page_id).map_err(es)?;
+    let resources = match crate::notes::page_inherited(pdf, page_id, b"Resources")
+        .map(|o| crate::notes::resolve_obj(pdf, o))
+    {
+        Some(Object::Dictionary(d)) => d,
+        _ => lopdf::Dictionary::new(),
+    };
+    let dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Form",
+        "BBox" => real_array(&geo.bbox),
+        "Matrix" => real_array(&geo.m),
+        "Resources" => Object::Dictionary(resources),
+    };
+    Ok(pdf.add_object(Stream::new(dict, content)))
+}
+
+/// Annotation layer as a Form XObject of size `w` x `h` (display units); `k` scales stroke widths.
+fn make_annotation_form(
+    pdf: &mut LoDocument,
+    anns: &[PageAnnotation],
+    prepared: &crate::notes::PreparedImages,
+    fonts: (ObjectId, ObjectId, ObjectId),
+    w: f64,
+    h: f64,
+    k: f64,
+) -> Result<ObjectId, Box<dyn std::error::Error>> {
+    let mut ops = Vec::new();
+    draw_pdf_annotations(&mut ops, anns, &prepared.names, 0.0, 0.0, w, h, k);
+    let bytes = Content { operations: ops }.encode()?;
+    let mut xobjects = lopdf::Dictionary::new();
+    for (name, id) in prepared.xobject_entries() {
+        xobjects.set(name.as_str(), *id);
+    }
+    let resources = dictionary! {
+        "Font" => dictionary! { "F1" => fonts.0, "F2" => fonts.1, "F3" => fonts.2 },
+        "XObject" => xobjects,
+        "ExtGState" => ext_gstates(),
+    };
+    let dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Form",
+        "BBox" => real_array(&[0.0, 0.0, w, h]),
+        "Resources" => resources,
+    };
+    Ok(pdf.add_object(Stream::new(dict, bytes)))
+}
+
+/// Transparency used by highlights and occlusion tapes (same alphas as the on-screen view).
+fn ext_gstates() -> lopdf::Dictionary {
+    dictionary! {
+        "GsHl" => dictionary! { "Type" => "ExtGState", "ca" => Object::Real(95.0 / 255.0), "CA" => Object::Real(95.0 / 255.0) },
+        "GsTape" => dictionary! { "Type" => "ExtGState", "ca" => Object::Real(248.0 / 255.0), "CA" => Object::Real(248.0 / 255.0) },
+    }
+}
+
+/// Draws the annotation layer on top of an untouched original page.
+fn overlay_page(
+    pdf: &mut LoDocument,
+    page_id: ObjectId,
+    geo: &PageGeo,
+    ann_form: ObjectId,
+) -> Result<(), String> {
+    crate::notes::register_xobject_on_page(pdf, page_id, "LpAnn", ann_form)?;
+    let pre = pdf.add_object(Stream::new(dictionary! {}, b"q\n".to_vec()));
+    let i = geo.inv;
+    let post_src = format!(
+        "\nQ\nq {:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm /LpAnn Do Q\n",
+        i[0], i[1], i[2], i[3], i[4], i[5]
+    );
+    let post = pdf.add_object(Stream::new(dictionary! {}, post_src.into_bytes()));
+
+    let existing: Vec<Object> = match pdf.get_dictionary(page_id).map_err(es)?.get(b"Contents") {
+        Ok(Object::Reference(id)) => match pdf.get_object(*id) {
+            Ok(Object::Array(a)) => a.clone(),
+            _ => vec![Object::Reference(*id)],
+        },
+        Ok(Object::Array(a)) => a.clone(),
+        _ => Vec::new(),
+    };
+    let mut all = vec![Object::Reference(pre)];
+    all.extend(existing);
+    all.push(Object::Reference(post));
+    pdf.get_object_mut(page_id)
+        .and_then(|o| o.as_dict_mut())
+        .map_err(es)?
+        .set("Contents", Object::Array(all));
+    Ok(())
+}
+
+fn with_kids<R>(
+    pdf: &mut LoDocument,
+    parent: ObjectId,
+    f: impl FnOnce(&mut Vec<Object>) -> R,
+) -> Result<R, String> {
+    let kids = pdf
+        .get_dictionary(parent)
+        .map_err(es)?
+        .get(b"Kids")
+        .map_err(es)?
+        .clone();
+    match kids {
+        Object::Reference(id) => {
+            let arr = pdf.get_object_mut(id).map_err(es)?.as_array_mut().map_err(es)?;
+            Ok(f(arr))
+        }
+        Object::Array(_) => {
+            let d = pdf.get_object_mut(parent).map_err(es)?.as_dict_mut().map_err(es)?;
+            let arr = d.get_mut(b"Kids").map_err(es)?.as_array_mut().map_err(es)?;
+            Ok(f(arr))
+        }
+        _ => Err("page tree without Kids".to_string()),
+    }
+}
+
+fn bump_count(pdf: &mut LoDocument, mut node: ObjectId, delta: i64) {
+    loop {
+        let Ok(d) = pdf.get_object_mut(node).and_then(|o| o.as_dict_mut()) else {
+            break;
+        };
+        if let Ok(c) = d.get(b"Count").and_then(Object::as_i64) {
+            d.set("Count", c + delta);
+        }
+        match d.get(b"Parent").and_then(Object::as_reference) {
+            Ok(p) => node = p,
+            Err(_) => break,
+        }
+    }
+}
+
+fn page_parent(pdf: &LoDocument, page_id: ObjectId) -> Result<ObjectId, String> {
+    pdf.get_dictionary(page_id)
+        .map_err(es)?
+        .get(b"Parent")
+        .and_then(Object::as_reference)
+        .map_err(es)
+}
+
+fn detach_page(pdf: &mut LoDocument, page_id: ObjectId) -> Result<(), String> {
+    let parent = page_parent(pdf, page_id)?;
+    with_kids(pdf, parent, |kids| {
+        kids.retain(|o| o.as_reference().ok() != Some(page_id))
+    })?;
+    bump_count(pdf, parent, -1);
+    pdf.delete_object(page_id);
+    Ok(())
+}
+
+fn insert_page_after(pdf: &mut LoDocument, after: ObjectId, new_page: ObjectId) -> Result<(), String> {
+    let parent = page_parent(pdf, after)?;
+    with_kids(pdf, parent, |kids| {
+        match kids.iter().position(|o| o.as_reference().ok() == Some(after)) {
+            Some(pos) => kids.insert(pos + 1, Object::Reference(new_page)),
+            None => kids.push(Object::Reference(new_page)),
+        }
+    })?;
+    bump_count(pdf, parent, 1);
+    Ok(())
+}
+
+fn op_do(name: &str) -> Operation {
+    Operation::new("Do", vec![Object::Name(name.as_bytes().to_vec())])
+}
+
+fn op_cm(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Operation {
+    Operation::new("cm", vec![a.into(), b.into(), c.into(), d.into(), e.into(), f.into()])
+}
+
+/// Rebuilds `page_id` as "slide | notes" (the slide keeps its original size and has no margins);
+/// notes that do not fit continue on additional pages that repeat the slide.
+#[allow(clippy::too_many_arguments)]
+fn build_notes_pages(
+    pdf: &mut LoDocument,
+    page_id: ObjectId,
+    geo: &PageGeo,
+    slide_form: ObjectId,
+    ann_form: Option<ObjectId>,
+    fonts: (ObjectId, ObjectId, ObjectId),
+    p_num: u32,
+    total_pages: u32,
+    raw_note: &str,
+    ratio: f64,
+    font_scale: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pal = LIGHT;
+    let h_c = CANVAS_H;
+    let base_s_c = h_c / geo.dh;
+    let s_c = base_s_c * ratio;
+    let sw_c = geo.dw * s_c;
+    let sh_c = geo.dh * s_c;
+    let w_total = (geo.dw * base_s_c).round();
+    let text_x = sw_c + MARGIN;
+    let avail_text_w = w_total - text_x - MARGIN;
+    let slide_y = (h_c - sh_c) / 2.0;
+    let avail_text_w = w_total - text_x - MARGIN;
+    let k = geo.dh / h_c; // canvas units -> points: the slide is drawn at exactly its original size
+    let parent_id = page_parent(pdf, page_id)?;
+
+    let processed_md = crate::notes::preprocess_markdown_math(raw_note);
+    let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale);
+    let chunks = paginate_note_lines(&layout_lines, h_c - MARGIN * 2.4);
+    let total_parts = chunks.len().max(1);
+
+    let mut last_id = page_id;
+    for (part_idx, chunk) in chunks.into_iter().enumerate() {
+        let mut ops = vec![Operation::new("q", vec![]), op_cm(k, 0.0, 0.0, k, 0.0, 0.0)];
+        fill_rect(&mut ops, 0.0, 0.0, w_total, h_c, pal.page_bg);
+        ops.push(Operation::new("q", vec![]));
+        ops.push(op_cm(s_c, 0.0, 0.0, s_c, 0.0, slide_y));
+        ops.push(op_do("LpSlide"));
+        ops.push(Operation::new("Q", vec![]));
+        if ann_form.is_some() {
+            ops.push(Operation::new("q", vec![]));
+            ops.push(op_cm(s_c, 0.0, 0.0, s_c, 0.0, slide_y));
+            ops.push(op_do("LpAnn"));
+            ops.push(Operation::new("Q", vec![]));
+        }
+        fill_rect(&mut ops, sw_c - 0.3, 0.0, 0.6, h_c, pal.divider);
+
+        let header_y = h_c - MARGIN - 11.0;
+        let header_str = if total_parts > 1 {
+            format!("Slide {} / {}  (Notes {}/{})", p_num, total_pages, part_idx + 1, total_parts)
+        } else {
+            format!("Slide {} / {}", p_num, total_pages)
+        };
+        push_styled_span(
+            &mut ops,
+            &header_str,
+            text_x,
+            header_y,
+            8.5 * font_scale.clamp(0.85, 1.2),
+            pal.muted,
+            SpanStyle::default(),
+            false,
+        );
+        let div_y = header_y - 6.0;
+        fill_rect(&mut ops, text_x, div_y - 0.25, avail_text_w, 0.5, pal.divider);
+
+        let mut cur_y = div_y - 14.0;
+        for line in chunk {
+            cur_y -= line.font_size;
+            render_layout_line(&mut ops, &line, text_x, cur_y, avail_text_w, &pal);
+            cur_y -= line.height - line.font_size;
+        }
+        ops.push(Operation::new("Q", vec![]));
+
+        let bytes = Content { operations: ops }.encode()?;
+        let content_id = pdf.add_object(Stream::new(dictionary! {}, bytes));
+        let mut xobjects = dictionary! { "LpSlide" => slide_form };
+        if let Some(a) = ann_form {
+            xobjects.set("LpAnn", a);
+        }
+        let resources = dictionary! {
+            "Font" => dictionary! { "F1" => fonts.0, "F2" => fonts.1, "F3" => fonts.2 },
+            "XObject" => xobjects,
+        };
+        let page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => parent_id,
+            "MediaBox" => real_array(&[0.0, 0.0, w_total * k, h_c * k]),
+            "Resources" => resources,
+            "Contents" => content_id,
+        };
+        if part_idx == 0 {
+            // Same object id: bookmarks and links that point to this page keep working.
+            pdf.objects.insert(page_id, Object::Dictionary(page_dict));
+        } else {
+            let new_id = pdf.add_object(page_dict);
+            insert_page_after(pdf, last_id, new_id)?;
+            last_id = new_id;
+        }
+    }
+    Ok(())
+}
+
+fn export_vector(
+    source_pdf: &Path,
+    output_pdf: &Path,
+    notes: &HashMap<u32, String>,
+    annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    settings: &ExportSettings,
+    hidden_pages: &std::collections::HashSet<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pdf = crate::notes::load_clean_pdf(source_pdf)?;
+    let pages: Vec<(u32, ObjectId)> = pdf.get_pages().into_iter().collect();
+    if pages.is_empty() {
+        return Err("the source PDF has no pages".into());
+    }
+    let include_ann = settings.content.includes_annotations();
+    let include_notes = settings.content.includes_notes();
+
+    for (n, id) in &pages {
+        if hidden_pages.contains(n) {
+            detach_page(&mut pdf, *id)?;
+        }
+    }
+
+    let fonts = (
+        embed_monospace_font(&mut pdf, "JetBrainsMono-Regular")?,
+        embed_monospace_font(&mut pdf, "JetBrainsMono-Bold")?,
+        embed_monospace_font(&mut pdf, "JetBrainsMono-Italic")?,
+    );
+    let ratio = (settings.slide_width_pct as f64 / 100.0).clamp(0.40, 0.80);
+    let font_scale = (settings.base_font_size as f64 / 20.0).clamp(0.60, 1.65);
+    let total_pages = pages.len() as u32;
+    let media_dir = crate::audio::AudioDocIndex::media_dir_for_pdf(source_pdf).join("screenshots");
+    let mut img_cache = HashMap::new();
+
+    for (p_num, page_id) in pages {
+        if hidden_pages.contains(&p_num) {
+            continue;
+        }
+        let raw_note = if include_notes {
+            notes.get(&p_num).map(|s| s.trim()).unwrap_or("")
+        } else {
+            ""
+        };
+        let page_anns: &[PageAnnotation] = if include_ann {
+            annotations.get(&p_num).map(|v| v.as_slice()).unwrap_or(&[])
+        } else {
+            &[]
+        };
+        if raw_note.is_empty() && page_anns.is_empty() {
+            continue; // untouched: identical to the original page
+        }
+        let geo = page_geo(&pdf, page_id).ok_or("cannot read the page size")?;
+        let prepared = prepare_image_xobjects(&mut pdf, page_anns, &media_dir, &mut img_cache);
+
+        if raw_note.is_empty() {
+            let form = make_annotation_form(&mut pdf, page_anns, &prepared, fonts, geo.dw, geo.dh, 1.0)?;
+            overlay_page(&mut pdf, page_id, &geo, form)?;
+        } else {
+            let slide_form = make_slide_form(&mut pdf, page_id, &geo)?;
+            let s_c = CANVAS_H / geo.dh;
+            let ann_form = if page_anns.is_empty() {
+                None
+            } else {
+                Some(make_annotation_form(
+                    &mut pdf,
+                    page_anns,
+                    &prepared,
+                    fonts,
+                    geo.dw * s_c,
+                    geo.dh * s_c,
+                    s_c,
+                )?)
+            };
+            build_notes_pages(
+                &mut pdf, page_id, &geo, slide_form, ann_form, fonts, p_num, total_pages, raw_note, ratio,
+                font_scale,
+            )?;
+        }
+    }
+
+    pdf.prune_objects();
+    pdf.compress();
+    pdf.save(output_pdf)?;
+    Ok(())
+}
+
+pub fn export_slides_with_notes(
+    source_pdf: &Path,
+    output_pdf: &Path,
+    notes: &HashMap<u32, String>,
+    annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    settings: &ExportSettings,
+    hidden_pages: &std::collections::HashSet<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match export_vector(source_pdf, output_pdf, notes, annotations, settings, hidden_pages) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("Vector export failed ({e}); falling back to the rasterised export.");
+            export_rasterized(source_pdf, output_pdf, notes, annotations, settings, hidden_pages)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ExportContent;
+
+    fn sample_pdf(path: &Path) {
+        let mut doc = LoDocument::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id =
+            doc.add_object(dictionary! {"Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"});
+        let mut kids: Vec<Object> = Vec::new();
+        // (width, height, /Rotate)
+        for (i, (w, h, rot)) in [(612.0f32, 792.0f32, 0i64), (612.0, 792.0, 90), (400.0, 300.0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let ops = vec![
+                Operation::new("rg", vec![0.7.into(), 0.85.into(), 1.0.into()]),
+                Operation::new("re", vec![40.into(), 40.into(), 200.into(), 100.into()]),
+                Operation::new("f", vec![]),
+                Operation::new("BT", vec![]),
+                Operation::new("rg", vec![0.into(), 0.into(), 0.into()]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 24.into()]),
+                Operation::new("Td", vec![50.into(), (h - 80.0).into()]),
+                Operation::new("Tj", vec![Object::string_literal(format!("Page {}", i + 1))]),
+                Operation::new("ET", vec![]),
+            ];
+            let content_id =
+                doc.add_object(Stream::new(dictionary! {}, Content { operations: ops }.encode().unwrap()));
+            let mut page = dictionary! {
+                "Type" => "Page", "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), w.into(), h.into()],
+                "Resources" => dictionary! {"Font" => dictionary! {"F1" => font_id}},
+                "Contents" => content_id,
+            };
+            if rot != 0 {
+                page.set("Rotate", rot);
+            }
+            kids.push(doc.add_object(page).into());
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => 3}),
+        );
+        let cat = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+        doc.trailer.set("Root", cat);
+        doc.save(path).unwrap();
+    }
+
+    fn page_sizes(path: &Path) -> Vec<(f32, f32)> {
+        let d = MuDocument::open(path.to_str().unwrap()).unwrap();
+        (0..d.page_count().unwrap())
+            .map(|i| {
+                let b = d.load_page(i).unwrap().bounds().unwrap();
+                (b.x1 - b.x0, b.y1 - b.y0)
+            })
+            .collect()
+    }
+
+    /// (width, height, stride, RGB samples) at 1 px = 1 pt.
+    fn render(path: &Path, index: i32) -> (usize, usize, usize, Vec<u8>) {
+        let d = MuDocument::open(path.to_str().unwrap()).unwrap();
+        let p = d.load_page(index).unwrap();
+        let pix = p
+            .to_pixmap(&Matrix::new_scale(1.0, 1.0), &Colorspace::device_rgb(), false, false)
+            .unwrap();
+        (pix.width() as usize, pix.height() as usize, pix.stride() as usize, pix.samples().to_vec())
+    }
+
+    fn px(img: &(usize, usize, usize, Vec<u8>), x: usize, y: usize) -> (u8, u8, u8) {
+        let i = y * img.2 + x * 3;
+        (img.3[i], img.3[i + 1], img.3[i + 2])
+    }
+
+    fn ann(kind: AnnotationKind, color: [u8; 3], pts: &[(f32, f32)], width: f32) -> PageAnnotation {
+        PageAnnotation {
+            kind,
+            color,
+            points: pts.to_vec(),
+            text: String::new(),
+            font_size: 18.0,
+            bold: false,
+            italic: false,
+            stroke_width: width,
+        }
+    }
+
+    #[test]
+    fn vector_export_keeps_pages_sizes_widths_and_modes() {
+        let _l = crate::docid::test_lock();
+        let root = std::env::temp_dir().join(format!("lapis_export_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: tests are serialised by test_lock().
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
+            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
+        }
+        let src = root.join("src.pdf");
+        sample_pdf(&src);
+
+        let mut notes = HashMap::new();
+        notes.insert(2u32, "# Title\n\nSome **bold** note about page two.".to_string());
+        let mut anns: HashMap<u32, Vec<PageAnnotation>> = HashMap::new();
+        anns.insert(
+            1,
+            vec![
+                ann(AnnotationKind::Freehand, [255, 0, 0], &[(0.1, 0.5), (0.9, 0.5)], 10.0),
+                ann(AnnotationKind::Highlight, [255, 255, 0], &[(0.1, 0.2), (0.5, 0.25)], 2.0),
+                ann(AnnotationKind::Tape, [0, 0, 255], &[(0.6, 0.6), (0.9, 0.7)], 2.0),
+            ],
+        );
+        anns.insert(2, vec![ann(AnnotationKind::Rect, [0, 200, 0], &[(0.1, 0.1), (0.3, 0.2)], 6.0)]);
+        let hidden = std::collections::HashSet::new();
+        let run = |content: ExportContent, hidden: &std::collections::HashSet<u32>, notes: &HashMap<u32, String>| {
+            let out = root.join(format!("out_{:?}.pdf", content));
+            let cfg = ExportSettings { content, ..Default::default() };
+            export_slides_with_notes(&src, &out, notes, &anns, &cfg, hidden).unwrap();
+            out
+        };
+
+        // ── annotations + notes ──
+        let out = run(ExportContent::AnnotationsAndNotes, &hidden, &notes);
+        let sizes = page_sizes(&out);
+        assert_eq!(sizes.len(), 3);
+        assert_eq!(sizes[0], (612.0, 792.0), "page without notes keeps the original size");
+        assert_eq!(sizes[2], (400.0, 300.0));
+        // page 2 is /Rotate 90 -> displayed 792 x 612; the slide keeps its height and takes 63% of the width
+        assert!((sizes[1].1 - 612.0).abs() < 0.6, "height = original slide height: {:?}", sizes[1]);
+        assert!((792.0 / sizes[1].0 - 0.63).abs() < 0.01, "slide ratio: {:?}", sizes[1]);
+
+        // untouched page 3 is pixel-identical to the original
+        assert_eq!(render(&out, 2).3, render(&src, 2).3);
+
+        // page 1: pen width = the width chosen in the app (10 pt), full-opacity colour
+        let p1 = render(&out, 0);
+        let red_rows = (380..412)
+            .filter(|&y| {
+                let (r, g, b) = px(&p1, 306, y);
+                r > 200 && g < 80 && b < 80
+            })
+            .count();
+        assert!((9..=12).contains(&red_rows), "pen thickness {red_rows}");
+        // highlight: translucent (yellow tint over white, not opaque yellow)
+        let (_, _, hb) = px(&p1, 183, 178);
+        assert!((120..200).contains(&hb), "highlight alpha, blue channel = {hb}");
+        // occlusion tape: (almost) opaque
+        let (tr, _, tb) = px(&p1, 459, 515);
+        assert!(tr < 25 && tb > 230, "tape should cover the page: {tr},{tb}");
+
+        // page 2 composite: the slide is drawn at its original size (left part equals the original)
+        let comp = render(&out, 1);
+        let orig2 = render(&src, 1);
+        let mut diff = 0;
+        for y in 0..600 {
+            for x in 0..700 {
+                // the rect annotation (x 79..238, y 61..122, 6 pt wide) is drawn on the composite only
+                if (70..250).contains(&x) && (50..135).contains(&y) {
+                    continue;
+                }
+                if px(&comp, x, y) != px(&orig2, x, y) {
+                    diff += 1;
+                }
+            }
+        }
+        assert!(diff < 50, "slide region differs from the original in {diff} px");
+
+        // ── annotations only: notes are not exported, page 2 keeps its size and shows the annotation
+        //    exactly where it belongs even though the page is rotated ──
+        let out = run(ExportContent::Annotations, &hidden, &notes);
+        let sizes = page_sizes(&out);
+        assert_eq!(sizes[1], (792.0, 612.0));
+        let r = render(&out, 1);
+        let green = (55..68).any(|y| {
+            let (rr, g, b) = px(&r, 158, y);
+            rr < 60 && g > 150 && b < 60
+        });
+        assert!(green, "rect annotation on the rotated page");
+        let o = render(&src, 1);
+        assert!(!(55..68).any(|y| px(&o, 158, y).1 > 150 && px(&o, 158, y).0 < 60));
+
+        // ── notes only: annotations are not drawn, page 1 stays identical ──
+        let out = run(ExportContent::Notes, &hidden, &notes);
+        assert_eq!(render(&out, 0).3, render(&src, 0).3);
+        assert!((page_sizes(&out)[1].1 - 612.0).abs() < 0.6);
+
+        // ── hidden pages are removed ──
+        let mut hide = std::collections::HashSet::new();
+        hide.insert(3u32);
+        let out = run(ExportContent::AnnotationsAndNotes, &hide, &notes);
+        assert_eq!(page_sizes(&out).len(), 2);
+
+        // ── long notes continue on extra pages ──
+        let mut long = HashMap::new();
+        long.insert(2u32, (0..220).map(|i| format!("line number {i}")).collect::<Vec<_>>().join("\n\n"));
+        let out = run(ExportContent::Notes, &hidden, &long);
+        assert!(page_sizes(&out).len() > 3);
+
+        // ── fallback (used for files lopdf cannot process) still produces a valid PDF ──
+        let fb = root.join("fallback.pdf");
+        let cfg = ExportSettings::default();
+        export_rasterized(&src, &fb, &notes, &anns, &cfg, &hidden).unwrap();
+        let fb_sizes = page_sizes(&fb);
+        assert_eq!(fb_sizes.len(), 3);
+        assert!(fb_sizes.iter().all(|s| *s == (960.0, 540.0)));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

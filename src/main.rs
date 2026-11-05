@@ -1877,11 +1877,12 @@ impl Lapis {
         self.toast_message = Some((" Exporting...".to_string(), std::time::Instant::now()));
 
         let out_path = self.pdf_path.with_file_name(format!(
-            "{}_annotated.pdf",
+            "{}{}.pdf",
             self.pdf_path
                 .file_stem()
                 .unwrap_or_default()
-                .to_string_lossy()
+                .to_string_lossy(),
+            self.app_state.export_settings.content.file_suffix()
         ));
 
         let source_path = self.pdf_path.clone();
@@ -5387,7 +5388,7 @@ fn handle_slide_annotations(
 
                                                     // ───────────── SYSTEM & EXPORT ─────────────
                                                     SettingsTab::SystemAndData => {
-                                                        ui.label(egui::RichText::new("System Integration & Document Management").size(15.0).strong());
+                                                                                                                ui.label(egui::RichText::new("System Integration & Document Management").size(15.0).strong());
                                                         ui.add_space(8.0);
                                                         ui.label(egui::RichText::new("Current PDF Actions").size(15.0).strong());
                                                         ui.add_space(6.0);
@@ -5396,83 +5397,118 @@ fn handle_slide_annotations(
                                                             if ui.button("󰇚  Download Original PDF").clicked() {
                                                                 self.prompt_download_original_pdf(ui.ctx());
                                                             }
-                                                            if ui.button("󰐕  Insert New Page").clicked() && self.has_pdf() {
-                                                                self.insert_blank_page_after(self.current_page, self.app_state.settings.default_page_style, ui.ctx());
+                                                            let export_label = if self.is_exporting {
+                                                                "󱑚  Exporting...".to_string()
+                                                            } else {
+                                                                format!(
+                                                                    "󰚥  Export PDF ({})",
+                                                                    self.app_state.export_settings.content.short_label()
+                                                                )
+                                                            };
+                                                            if ui.button(export_label).clicked() {
+                                                                if !self.is_exporting {
+                                                                    self.start_export(ui.ctx());
+                                                                }
                                                             }
                                                         });
 
                                                     ui.add_space(12.0);
                                                     ui.separator();
                                                     ui.add_space(8.0);
+                                                        ui.label(
+                                                            egui::RichText::new("PDF Export")
+                                                                .size(15.0)
+                                                                .strong(),
+                                                        );
+                                                        ui.add_space(4.0);
 
-                                                    ui.label(
-                                                        egui::RichText::new("16:9 Annotated PDF Export")
-                                                            .size(15.0)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(4.0);
-
-                                                    ui.weak(
-                                                        "Customize note typography and slide proportions in exported PDFs.",
-                                                    );
-                                                    ui.add_space(8.0);
-
-                                                    let mut export_changed = false;
-
-                                                    {
-                                                        let cfg = &mut self.app_state.export_settings;
-
-                                                        egui::Grid::new("export_settings_grid")
-                                                            .num_columns(2)
-                                                            .spacing([12.0, 10.0])
-                                                            .show(ui, |ui| {
-                                                                ui.label("Notes Base Font Size:");
-                                                                if ui
-                                                                    .add(
-                                                                        egui::DragValue::new(&mut cfg.base_font_size)
-                                                                            .range(12.0..=32.0)
-                                                                            .speed(0.2)
-                                                                            .suffix(" pt"),
-                                                                    )
-                                                                    .changed()
-                                                                {
-                                                                    export_changed = true;
-                                                                }
-                                                                ui.end_row();
-
-                                                                ui.label("Slide Width on Split Pages:");
-                                                                if ui
-                                                                    .add(
-                                                                        egui::DragValue::new(&mut cfg.slide_width_pct)
-                                                                            .range(40.0..=80.0)
-                                                                            .speed(0.5)
-                                                                            .suffix(" %"),
-                                                                    )
-                                                                    .changed()
-                                                                {
-                                                                    export_changed = true;
-                                                                }
-                                                                ui.end_row();
-                                                            });
-
+                                                        ui.weak(
+                                                            "Customize note typography and slide proportions in exported PDFs.",
+                                                        );
                                                         ui.add_space(8.0);
 
-                                                        if ui
-                                                            .button("󰑐  Restore Export Defaults")
-                                                            .clicked()
+                                                        let mut export_changed = false;
+
                                                         {
-                                                            *cfg = state::ExportSettings::default();
-                                                            export_changed = true;
+                                                            let cfg = &mut self.app_state.export_settings;
+
+                                                            egui::Grid::new("export_settings_grid")
+                                                                .num_columns(2)
+                                                                .spacing([12.0, 10.0])
+                                                                .show(ui, |ui| {
+                                                                    ui.label("Notes Base Font Size:");
+
+                                                                    if ui
+                                                                        .add(
+                                                                            egui::DragValue::new(&mut cfg.base_font_size)
+                                                                                .range(12.0..=32.0)
+                                                                                .speed(0.2)
+                                                                                .suffix(" pt"),
+                                                                        )
+                                                                        .changed()
+                                                                    {
+                                                                        export_changed = true;
+                                                                    }
+
+                                                                    ui.end_row();
+
+                                                                    ui.label("Export content:");
+
+                                                                    ui.vertical(|ui| {
+                                                                        let current = cfg.content;
+
+                                                                        for content in crate::state::ExportContent::ALL {
+                                                                            let btn = egui::Button::new(content.label())
+                                                                                .selected(current == content);
+
+                                                                            if ui
+                                                                                .add_sized([220.0, 28.0], btn)
+                                                                                .clicked()
+                                                                                && current != content
+                                                                            {
+                                                                                cfg.content = content;
+                                                                                export_changed = true;
+                                                                            }
+                                                                        }
+                                                                    });
+
+                                                                    ui.end_row();
+
+                                                                    ui.label("Slide Width on Split Pages:");
+
+                                                                    if ui
+                                                                        .add(
+                                                                            egui::DragValue::new(&mut cfg.slide_width_pct)
+                                                                                .range(40.0..=80.0)
+                                                                                .speed(0.5)
+                                                                                .suffix(" %"),
+                                                                        )
+                                                                        .changed()
+                                                                    {
+                                                                        export_changed = true;
+                                                                    }
+
+                                                                    ui.end_row();
+                                                                });
+
+                                                            ui.add_space(8.0);
+
+                                                            if ui
+                                                                .button("󰑐  Restore Export Defaults")
+                                                                .clicked()
+                                                            {
+                                                                *cfg = state::ExportSettings::default();
+                                                                export_changed = true;
+                                                            }
+
+                                                            if export_changed {
+                                                                cfg.clamp_valid();
+                                                            }
                                                         }
 
                                                         if export_changed {
-                                                            cfg.clamp_valid();
+                                                            settings_dirty = true;
                                                         }
-                                                    }
-
-                                                    if export_changed {
-                                                        settings_dirty = true;
-                                                    }
 
                                                     }     
                                                     SettingsTab::Storage => {
@@ -13609,12 +13645,15 @@ impl eframe::App for Lapis {
                                     ui.separator();
  
                                     let export_label = if self.is_exporting {
-                                        "󱑚  Exporting..."
+                                        "󱑚  Exporting...".to_string()
                                     } else {
-                                        "󰚥  Export with notes (16:9)"
+                                        format!(
+                                            "󰚥  Export PDF ({})",
+                                            self.app_state.export_settings.content.short_label()
+                                        )
                                     };
  
-                                    if menu_item(ui, export_label, !self.is_exporting).clicked() {
+                                    if menu_item(ui, &export_label, !self.is_exporting).clicked() {
                                         self.start_export(ui.ctx());
                                         close_requested = true;
                                     }

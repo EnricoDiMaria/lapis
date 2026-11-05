@@ -102,20 +102,76 @@ impl Default for SlideshowEmptyMode {
         Self::StaticEmpty
     }
 }
+/// What the exported PDF contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExportContent {
+    /// The original pages with the drawn annotations on top (no notes).
+    Annotations,
+    /// Pages with notes get the "slide | notes" layout; no annotations are drawn.
+    Notes,
+    /// Annotations and notes.
+    #[default]
+    AnnotationsAndNotes,
+}
+
+impl ExportContent {
+    pub const ALL: [ExportContent; 3] = [
+        ExportContent::AnnotationsAndNotes,
+        ExportContent::Annotations,
+        ExportContent::Notes,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportContent::Annotations => "Annotations only",
+            ExportContent::Notes => "Notes only",
+            ExportContent::AnnotationsAndNotes => "Annotations + notes",
+        }
+    }
+
+    /// Short text for the FILE menu button.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            ExportContent::Annotations => "annotations",
+            ExportContent::Notes => "notes",
+            ExportContent::AnnotationsAndNotes => "annotations + notes",
+        }
+    }
+
+    pub fn file_suffix(self) -> &'static str {
+        match self {
+            ExportContent::Annotations => "_annotated",
+            ExportContent::Notes => "_notes",
+            ExportContent::AnnotationsAndNotes => "_annotated_notes",
+        }
+    }
+
+    pub fn includes_annotations(self) -> bool {
+        matches!(self, ExportContent::Annotations | ExportContent::AnnotationsAndNotes)
+    }
+
+    pub fn includes_notes(self) -> bool {
+        matches!(self, ExportContent::Notes | ExportContent::AnnotationsAndNotes)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExportSettings {
     /// Base font size in points for exported notes (valid range: 12.0..=32.0)
     pub base_font_size: f32,
-    /// Percentage of the 16:9 canvas width occupied by the slide when notes are present (valid range: 40.0..=80.0)
+    /// Percentage of the page width occupied by the slide when notes are present (valid range: 40.0..=80.0)
     pub slide_width_pct: f32,
+    /// What to export: annotations, notes or both.
+    pub content: ExportContent,
 }
 
 impl Default for ExportSettings {
     fn default() -> Self {
         Self {
             base_font_size: 20.0,
-            slide_width_pct: 63.0,
+            slide_width_pct: 75.0,
+            content: ExportContent::AnnotationsAndNotes,
         }
     }
 }

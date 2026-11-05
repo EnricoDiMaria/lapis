@@ -80,6 +80,12 @@ fn read_pdf_and_notes(pdf_path: &Path) -> io::Result<(Vec<u8>, Vec<u8>)> {
     Ok((bytes, tail))
 }
 
+/// Loads the PDF without the note block appended after %%EOF (used by the export).
+pub(crate) fn load_clean_pdf(pdf_path: &Path) -> Result<lopdf::Document, String> {
+    let (clean, _notes) = read_pdf_and_notes(pdf_path).map_err(|e| e.to_string())?;
+    load_lopdf(&clean, pdf_path, "export")
+}
+
 /// Try lopdf in memory, then normalize once with MuPDF if needed.
 fn load_lopdf(clean: &[u8], pdf_path: &Path, tag: &str) -> Result<lopdf::Document, String> {
     match lopdf::Document::load_mem(clean) {
@@ -1607,7 +1613,7 @@ pub fn export_original_pdf(pdf_path: &Path, dest_path: &Path) -> io::Result<()> 
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Valore ereditato dai nodi Pages (MediaBox, Rotate, Resources…), risalendo i Parent.
-fn page_inherited(doc: &lopdf::Document, mut id: lopdf::ObjectId, key: &[u8]) -> Option<lopdf::Object> {
+pub(crate) fn page_inherited(doc: &lopdf::Document, mut id: lopdf::ObjectId, key: &[u8]) -> Option<lopdf::Object> {
     for _ in 0..16 {
         let dict = doc.get_object(id).ok()?.as_dict().ok()?;
         if let Ok(v) = dict.get(key) {
@@ -1619,7 +1625,7 @@ fn page_inherited(doc: &lopdf::Document, mut id: lopdf::ObjectId, key: &[u8]) ->
 }
 
 /// Resolve indirect references; return direct objects unchanged.
-fn resolve_obj(doc: &lopdf::Document, o: lopdf::Object) -> lopdf::Object {
+pub(crate) fn resolve_obj(doc: &lopdf::Document, o: lopdf::Object) -> lopdf::Object {
     match o {
         lopdf::Object::Reference(r) => doc.get_object(r).map(|x| x.clone()).unwrap_or(lopdf::Object::Null),
         other => other,
@@ -1678,7 +1684,7 @@ fn add_image_xobject(doc: &mut lopdf::Document, shot: &crate::screenshots::Shot)
 }
 
 /// Add an XObject to one page without changing other pages.
-fn register_xobject_on_page(
+pub(crate) fn register_xobject_on_page(
     doc: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
     name: &str,
@@ -1711,6 +1717,11 @@ pub struct PreparedImages {
 }
 
 impl PreparedImages {
+    /// `(resource name, XObject id)` of every prepared image.
+    pub(crate) fn xobject_entries(&self) -> &[(String, lopdf::ObjectId)] {
+        &self.xobjects
+    }
+
     /// Add XObjects to `page_id` after creating the page.
     /// Call once for each page that uses the prepared resources.
     pub fn register_on(&self, doc: &mut lopdf::Document, page_id: lopdf::ObjectId) {
