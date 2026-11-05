@@ -9922,9 +9922,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
         let mut close_menu = false;
 
-        // ====================================================================
-        // 1. CERCHIO RADIALE
-        // ====================================================================
+        // 1. Radial circle
         let pick_id = ui.make_persistent_id("radial_shape_pick");
         let shape_pick: bool = ui.data(|d| d.get_temp::<egui::Pos2>(pick_id)) == Some(raw_center);
 
@@ -9956,71 +9954,41 @@ fn push_undo_snapshot(&mut self, page: u32) {
                 let clicked = bg_resp.clicked();
                 let mut label_hover: Option<String> = None;
 
-                // Central hub: Undo on the left, Redo on the right.
-                let hub_r = 22.0;
+                // Central hub: Undo
+                let hub_r = 18.0;
                 let can_undo = self
                     .undo_stack
                     .get(&self.current_page)
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
-                let can_redo = self
-                    .redo_stack
-                    .get(&self.current_page)
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
 
                 let in_hub = hover_pos.map(|p| p.distance(c) <= hub_r).unwrap_or(false);
-                let hub_left = in_hub && hover_pos.map(|p| p.x < c.x).unwrap_or(false);
-                let hub_right = in_hub && !hub_left;
 
                 painter.circle_filled(c, hub_r, rgb(self.theme.bg_elevated));
                 painter.circle_stroke(c, hub_r, egui::Stroke::new(1.0, rgb(self.theme.border)));
-                painter.line_segment(
-                    [
-                        c - egui::vec2(0.0, hub_r - 6.0),
-                        c + egui::vec2(0.0, hub_r - 6.0),
-                    ],
-                    egui::Stroke::new(1.0, rgb(self.theme.border)),
-                );
+                let undo_pos = c;
+                if in_hub && can_undo {
+                    painter.circle_filled(undo_pos, 18.0, rgb(self.theme.bg_active));
+                }
 
-                let undo_pos = c + egui::vec2(-9.0, 0.0);
-                let redo_pos = c + egui::vec2(9.0, 0.0);
-                if hub_left && can_undo {
-                    painter.circle_filled(undo_pos, 10.0, rgb(self.theme.bg_active));
-                }
-                if hub_right && can_redo {
-                    painter.circle_filled(redo_pos, 10.0, rgb(self.theme.bg_active));
-                }
                 let fg = rgb(self.theme.fg_primary);
                 let fg_dim = fg.gamma_multiply(0.35);
                 painter.text(
                     undo_pos,
                     egui::Align2::CENTER_CENTER,
                     "󰕌",
-                    egui::FontId::proportional(13.0),
+                    egui::FontId::proportional(16.0),
                     if can_undo { fg } else { fg_dim },
                 );
-                painter.text(
-                    redo_pos,
-                    egui::Align2::CENTER_CENTER,
-                    "󰑎",
-                    egui::FontId::proportional(13.0),
-                    if can_redo { fg } else { fg_dim },
-                );
 
-                if hub_left {
+                if in_hub {
                     label_hover = Some("Undo".to_string());
                     if clicked && can_undo {
                         self.undo_annotation(self.current_page);
                     }
-                } else if hub_right {
-                    label_hover = Some("Redo".to_string());
-                    if clicked && can_redo {
-                        self.redo_annotation(self.current_page);
-                    }
                 }
 
-                // ---------- Anello interno: colori o forme (radius = 36px) ----------
+                // Intenal colors ring
                                 if shape_pick {
                     // Choose a shape instead of a color.
                     let kinds = [

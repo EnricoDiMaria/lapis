@@ -391,17 +391,16 @@ The result is a single study document combining the original lecture material, y
 **Documents and export**
 
 - [ ] Alternative export layouts for pages with notes: notes on a following page, notes below the slide, or notes as PDF comments.
-- [ ] Fix the *Original PDF* feature.
 - [ ] Fix: closing a PDF to go back to the home screen still leaves the document marked as open.
 - [ ] Add SHA256 verification to model downloads (installer, `install.sh` and `install.ps1`).
 
 **Viewing and interface**
 
+- [X] Right-click menu with only the Undo button.
 - [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
-- [ ] Fullscreen mode, including tiling compositors such as Hyprland.
+- [ ] Fullscreen mode possible (even in non slideshow mode), including in tiling compositors such as Hyprland.
 - [ ] Frameless toolbar buttons with hover colour feedback and other visual polish.
 - [ ] Right-click on the zoom percentage to fit the page.
-- [ ] Right-click menu with only the Undo button.
 - [ ] Syntax highlighting for more programming languages in code blocks.
 
 **Study tools**
