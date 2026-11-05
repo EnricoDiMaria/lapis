@@ -386,7 +386,7 @@ The result is a single study document combining the original lecture material, y
 - [x] Application icon.
 - [x] **Better PDF export**: choose annotations, notes, or both; pages without notes stay identical to the original (size, resolution, no borders); pen widths and all annotation types are exported faithfully; compact *slide | notes* layout without large margins.
 
-### Planned
+### Planned in next releases
 
 **Documents and export**
 
