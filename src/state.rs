@@ -320,7 +320,7 @@ pub fn consume(&self, i: &mut egui::InputState) -> bool {
 
 }
 
-pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 14] {
+pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 15] {
     [
         ("Save notes", &mut cfg.save_notes),
         ("Toggle notes panel", &mut cfg.toggle_notes),
@@ -336,6 +336,7 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
         ("Search in notes", &mut cfg.search_notes),
         ("Trackpad draw (hold)", &mut cfg.trackpad_draw_hold),
         ("Radial tools menu", &mut cfg.radial_tools_menu),
+        ("Toggle fullscreen", &mut cfg.toggle_fullscreen),
     ]
 }
  
@@ -445,6 +446,7 @@ pub struct ShortcutsConfig {
     pub search_notes: ShortcutBinding,
     pub trackpad_draw_hold: ShortcutBinding,
     pub radial_tools_menu: ShortcutBinding,
+    pub toggle_fullscreen: ShortcutBinding,
 }
 
 impl Default for ShortcutsConfig {
@@ -464,6 +466,7 @@ impl Default for ShortcutsConfig {
             search_notes: ShortcutBinding::new(true, false, false, "F"),
             trackpad_draw_hold: ShortcutBinding::new(false, false, false, "Space"),
             radial_tools_menu: ShortcutBinding::new(false, false, false, "Z"),
+            toggle_fullscreen: ShortcutBinding::new(false, false, false, "F11"),
         }
     }
 }

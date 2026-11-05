@@ -85,6 +85,16 @@ Combines the presentation view with the notes workspace.
 
 This mode is useful when presenting or reviewing a slide while keeping its associated notes available.
 
+### Fullscreen — `F11`
+
+Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11` (or use
+**Toggle Fullscreen** in the Command Palette) to enter or leave fullscreen. The shortcut can be changed in
+**Settings → Keybindings**.
+
+Fullscreen also works in tiling compositors such as Hyprland. If you leave fullscreen with a compositor
+keybinding, Lapis follows that change instead of forcing fullscreen back. In the slideshow modes `F11` has no
+effect: press `Esc` to exit them.
+
 ---
 
 ## 3. Split View

@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fullscreen outside slideshow.** `F11` (configurable in Settings → Keybindings, also available in
+  the Command Palette) toggles fullscreen in every view mode. The window command is now sent only when
+  the wanted state changes, and changes made from outside (e.g. a Hyprland keybinding) are followed,
+  so fullscreen works in tiling compositors.
+
 ### Fixed
 
 - Closing a PDF to go back to the home screen left the document marked as open: the per-document

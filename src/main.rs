@@ -1343,6 +1343,12 @@ struct Lapis {
     reanchor_ref_y: f32,
     scroll_epoch: u32,
     doc_lock: Option<doc_lock::DocLock>,
+    /// Fullscreen requested by the user (F11 / command palette), independent from slideshow.
+    user_fullscreen: bool,
+    /// Last fullscreen state sent to the window system. The command is sent only when the wanted
+    /// state changes, so a compositor that is slow (or refuses) is never fought every frame.
+    fullscreen_sent: Option<bool>,
+    fullscreen_cmd_at: Option<std::time::Instant>,
 }
 
 impl Lapis {
@@ -1513,6 +1519,9 @@ impl Lapis {
             reanchor_ref_y: 0.0,
             scroll_epoch: 0,
             doc_lock: None,
+            user_fullscreen: false,
+            fullscreen_sent: None,
+            fullscreen_cmd_at: None,
         };
 
         if let Some(path) = initial_path {
@@ -6409,6 +6418,7 @@ fn handle_slide_annotations(
             ("mode_continuous", "󰍜  Switch to Continuous Scroll Mode", "View"),
             ("mode_single", "󰈙  Switch to Single Page Mode", "View"),
             ("mode_slideshow", "󰐨  Enter Presentation / Slideshow Mode", "View"),
+            ("toggle_fullscreen", "󰊓  Toggle Fullscreen [F11]", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             ("insert_blank", "󰐕  Insert Blank Ruled Page After Current Slide", "Document"),
             ("delete_page", "󰆴  Delete Current Page from PDF", "Document"),
@@ -6572,6 +6582,11 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
             "mode_book" => self.view_mode = ViewMode::TwoPage,
             "mode_single" => self.view_mode = ViewMode::SinglePage,
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
+            "toggle_fullscreen" => {
+                if !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+                    self.user_fullscreen = !self.user_fullscreen;
+                }
+            }
             "toggle_dark" => {
                 self.pdf_dark_mode = !self.pdf_dark_mode;
                 self.page_cache.clear();
@@ -12849,6 +12864,7 @@ impl eframe::App for Lapis {
         let mut act_toggle_notes = false;
         let mut act_toggle_mode = false;
         let mut act_toggle_toc = false;
+        let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
 
         if self.rebinding_action.is_none() {
@@ -12953,6 +12969,17 @@ impl eframe::App for Lapis {
                     };
                 }
                             }
+            // Fullscreen: F11 always works (also while typing notes); a rebinding made of a
+            // plain key only works when no text field has the focus.
+                {
+                    let b = &self.app_state.shortcuts.toggle_fullscreen;
+                    let plain = !b.ctrl && !b.alt && !b.shift && b.extra_key.is_none();
+                    let by_binding = (!plain || !any_focused) && b.consume(i);
+                    let by_f11 = i.consume_key(egui::Modifiers::NONE, egui::Key::F11);
+                    if by_binding || by_f11 {
+                        act_toggle_fullscreen = true;
+                    }
+                }
             // 6. View Mode Shortcuts: Alt+1 (Single), Alt+2 (Continuous), Alt+3 (TwoPage), Alt+4 (Slideshow), Alt+4 (Slideshow+Notes), Esc (Exit Slideshow)
                 if sc.view_single.consume(i) {
                     self.view_mode = ViewMode::SinglePage;
@@ -13090,10 +13117,38 @@ impl eframe::App for Lapis {
         );
         let shot_ctx = ui.ctx().clone();
         self.process_screenshots(&shot_ctx, any_focused, in_slideshow);
-        let is_fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        if in_slideshow != is_fullscreen {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(in_slideshow));
+        // Fullscreen is wanted in slideshow modes and whenever the user asked for it.
+        // F11 does nothing in slideshow (Esc exits it); the user choice is kept for afterwards.
+        if act_toggle_fullscreen && !in_slideshow {
+            self.user_fullscreen = !self.user_fullscreen;
+        }
+        let wanted_fullscreen = in_slideshow || self.user_fullscreen;
+        let actual_fullscreen = ui.input(|i| i.viewport().fullscreen);
+        if self.fullscreen_sent != Some(wanted_fullscreen) {
+            // Edge-triggered: send the command only when the wanted state changes.
+            // Re-sending it every frame fights tiling compositors (e.g. Hyprland), which
+            // report the new state asynchronously or let the user leave fullscreen themselves.
+            if self.fullscreen_sent.is_some()
+                || actual_fullscreen.unwrap_or(false) != wanted_fullscreen
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(wanted_fullscreen));
+                self.fullscreen_cmd_at = Some(std::time::Instant::now());
+                ui.ctx().request_repaint();
+            }
+            self.fullscreen_sent = Some(wanted_fullscreen);
+        } else if !in_slideshow {
+            // Fullscreen changed from outside (compositor keybinding, window manager, ...):
+            // follow the real state instead of forcing ours back.
+            let settled = self
+                .fullscreen_cmd_at
+                .map_or(true, |t| t.elapsed() > std::time::Duration::from_millis(800));
+            if let Some(actual) = actual_fullscreen {
+                if settled && actual != self.user_fullscreen {
+                    self.user_fullscreen = actual;
+                    self.fullscreen_sent = Some(actual);
+                }
+            }
         }
 
         if !in_slideshow && self.has_pdf(){    
