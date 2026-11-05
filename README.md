@@ -382,38 +382,31 @@ The result is a single study document combining the original lecture material, y
 
 # Roadmap
 
-### Done in 1.2.0
-
-- [x] Native **Windows** build with installer and update support.
-- [x] Application icon.
-- [x] **Better PDF export**: choose annotations, notes, or both; pages without notes stay identical to the original (size, resolution, no borders); pen widths and all annotation types are exported faithfully; compact *slide | notes* layout without large margins.
-
 ### Planned in next releases
 
 **Documents and export**
 
-- [X] Fix: closing a PDF to go back to the home screen still leaves the document marked as open.
 - [ ] Alternative export layouts for pages with notes: notes on a following page, notes below the slide, or notes as PDF comments.
 - [ ] Add SHA256 verification to model downloads (installer, `install.sh` and `install.ps1`).
+- [ ] Fix: Export screenshorts and snips
 
 **Viewing and interface**
 
-- [X] Right-click menu with only the Undo button.
-- [X] Right-click on the zoom percentage to fit the page.
-- [X] Fullscreen mode possible (even in non slideshow mode), including in tiling compositors such as Hyprland.
-- [X] Add key `C` as a toggle between Continuous and SinglePage
-- [X] Syntax highlighting for more programming languages in code blocks.
 - [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
-- [ ] Frameless toolbar buttons with hover colour feedback and other visual polish.
-- [ ] Add key `C` as a toggle between Continuous and SinglePage
+- [ ] Frameless toolbar buttons with hover colour feedback, nicer toast messages and other visual polish.
 
 **Study tools**
 
 - [ ] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
+- [ ] Fix textboxes rendered under screenshots
+- [ ] Improve flashcards
 
 **Platform and project**
 
 - [ ] Screenshots in the README.
+- [ ] (Optional) Updates availability verification at startup
+- [ ] Overall code improvement
+
 ---
 
 # Data & Privacy

@@ -15575,10 +15575,6 @@ impl eframe::App for Lapis {
                     return;
                 }
                 if self.view_mode == ViewMode::SinglePage || self.view_mode == ViewMode::Slideshow || self.view_mode == ViewMode::SlideshowWithNotes  {
-                    if let Some((handle, dims)) = self.page_cache.get(&self.current_page) {
-                        self.texture_handle = Some(handle.clone());
-                        self.page_dims = *dims;
-                    }
                     let mut canvas_scroll = egui::ScrollArea::both()
                         .id_salt("pdf_canvas_scroll")
                         .auto_shrink([false, false]);
