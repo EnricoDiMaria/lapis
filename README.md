@@ -397,11 +397,12 @@ The result is a single study document combining the original lecture material, y
 **Viewing and interface**
 
 - [X] Right-click menu with only the Undo button.
+- [X] Right-click on the zoom percentage to fit the page.
 - [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
 - [ ] Fullscreen mode possible (even in non slideshow mode), including in tiling compositors such as Hyprland.
 - [ ] Frameless toolbar buttons with hover colour feedback and other visual polish.
-- [ ] Right-click on the zoom percentage to fit the page.
 - [ ] Syntax highlighting for more programming languages in code blocks.
+- [ ] Add key `C` as a toggle between Continuous and SinglePage
 
 **Study tools**
 

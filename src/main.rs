@@ -13159,57 +13159,61 @@ impl eframe::App for Lapis {
                         ZoomMode::Custom => format!("󰍉 {:.0}%", self.zoom_scale * 100.0),
                     };
  
-                    ui.menu_button(zoom_label, |ui| {
-                        ui.set_min_width(140.0);
-                        if ui.button("Zoom In [Ctrl++]").clicked() {
-                            self.enter_custom_zoom();
-                            self.zoom_scale = (self.zoom_scale + 0.1).min(3.0);
-                        }
-                        if ui.button("Zoom Out [Ctrl+-]").clicked() {
-                            self.enter_custom_zoom();
-                            self.zoom_scale = (self.zoom_scale - 0.1).max(0.3);
-                        }
-                        ui.separator();
-                        if ui
-                            .selectable_label(self.zoom_mode == ZoomMode::FitWidth, "󰤼  Fit Width")
-                            .clicked()
-                        {
-                            self.zoom_mode = ZoomMode::FitWidth;
-                            ui.close();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.zoom_mode == ZoomMode::FitHeight,
-                                "󰤻  Fit Height",
-                            )
-                            .clicked()
-                        {
-                            self.zoom_mode = ZoomMode::FitHeight;
-                            ui.close();
-                        }
-                        if ui
-                            .selectable_label(self.zoom_mode == ZoomMode::FitPage, "󰊓  Fit Page")
-                            .clicked()
-                        {
-                            self.zoom_mode = ZoomMode::FitPage;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui
-                            .selectable_label(
-                                self.zoom_mode == ZoomMode::Custom
-                                    && (self.zoom_scale - 1.0).abs() < 0.01,
-                                "󰑐  100% [Ctrl+0]",
-                            )
-                            .clicked()
-                        {
-                            self.zoom_scale = 1.0;
-                            self.zoom_mode = ZoomMode::Custom;
-                            ui.close();
-                        }
-                    })
-                    .response
-                    .on_hover_text("Zoom Mode [Ctrl+Scroll]");
+                    let zoom_menu = ui.menu_button(zoom_label, |ui| {
+                    ui.set_min_width(140.0);
+                    if ui.button("Zoom In [Ctrl++]").clicked() {
+                        self.enter_custom_zoom();
+                        self.zoom_scale = (self.zoom_scale + 0.1).min(3.0);
+                    }
+                    if ui.button("Zoom Out [Ctrl+-]").clicked() {
+                        self.enter_custom_zoom();
+                        self.zoom_scale = (self.zoom_scale - 0.1).max(0.3);
+                    }
+                    ui.separator();
+                    if ui
+                        .selectable_label(self.zoom_mode == ZoomMode::FitWidth, "󰤼  Fit Width")
+                        .clicked()
+                    {
+                        self.zoom_mode = ZoomMode::FitWidth;
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.zoom_mode == ZoomMode::FitHeight,
+                            "󰤻  Fit Height",
+                        )
+                        .clicked()
+                    {
+                        self.zoom_mode = ZoomMode::FitHeight;
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(self.zoom_mode == ZoomMode::FitPage, "󰊓  Fit Page")
+                        .clicked()
+                    {
+                        self.zoom_mode = ZoomMode::FitPage;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .selectable_label(
+                            self.zoom_mode == ZoomMode::Custom
+                                && (self.zoom_scale - 1.0).abs() < 0.01,
+                            "󰑐  100% [Ctrl+0]",
+                        )
+                        .clicked()
+                    {
+                        self.zoom_scale = 1.0;
+                        self.zoom_mode = ZoomMode::Custom;
+                        ui.close();
+                    }
+                });
+
+                let resp = zoom_menu.response.on_hover_text("Zoom Mode [Ctrl+Scroll] | Tasto DX: Fit Page");
+
+                if resp.hovered() && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
+                    self.zoom_mode = ZoomMode::FitPage;
+                }
  
                     if stage < 3 {
                         if ui
