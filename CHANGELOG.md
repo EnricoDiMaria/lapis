@@ -4,6 +4,15 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Closing a PDF to go back to the home screen left the document marked as open: the per-document
+  lock was never released, so the file still counted as open (other Lapis windows refused to open
+  it and its storage cleanup actions stayed disabled). The lock is now released on close.
+- Zoom with the mouse wheel / trackpad is anchored to the cursor position again in Single Page mode.
+
 ## [1.2.0] - 2026/11/05
 
 ### Added

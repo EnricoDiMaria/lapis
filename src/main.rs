@@ -2776,6 +2776,10 @@ fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.sync_and_save();
         self.save_session_state();
 
+        // Release the per-document lock, otherwise the file stays marked as open
+        // (other windows get "already open" and the storage cleanup stays disabled).
+        self.doc_lock = None;
+
         self.pdf_path = PathBuf::new();
         self.pdf_name.clear();
         self.texture_handle = None;
