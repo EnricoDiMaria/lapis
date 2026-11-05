@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock was never released, so the file still counted as open (other Lapis windows refused to open
   it and its storage cleanup actions stayed disabled). The lock is now released on close.
 - Zoom with the mouse wheel / trackpad is anchored to the cursor position again in Single Page mode.
+- Switching from continuous to single page now correctly update the texture of the page.
 
 ## [1.2.0] - 2026/11/05
 
