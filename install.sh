@@ -55,6 +55,15 @@ download_file() {
     mv -f "$part" "$dest"
 }
 
+get_app_version() {
+    local cargo_file="./Cargo.toml"
+    if [[ -f "$cargo_file" ]]; then
+        sed -n 's/^version = "\(.*\)"/\1/p' "$cargo_file" | head -n 1
+    else
+        echo "1.2.0"
+    fi
+}
+
 install_binary() {
     mkdir -p "$BIN_DIR"
     need tar
@@ -90,7 +99,9 @@ install_binary() {
 }
 
 install_desktop() {
-    echo "-> Registering icon and desktop entry..."
+    local version
+    version="$(get_app_version)"
+    echo "-> Registering icon and desktop entry (v$version)..."
     mkdir -p "$APP_DIR" "$ICON_DIR"
 
     cat > "$ICON_DIR/lapis.svg" << 'EOF'
@@ -146,7 +157,7 @@ EOF
 
     cat > "$APP_DIR/lapis.desktop" << EOF
 [Desktop Entry]
-Version=1.2.0
+Version=$version
 Type=Application
 Name=Lapis
 GenericName=PDF Study Suite
@@ -161,21 +172,9 @@ StartupWMClass=lapis
 EOF
 
     update-desktop-database "$APP_DIR" 2>/dev/null || true
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "$APP_DIR" 2>/dev/null || true
-    fi
-    
-    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-        if [[ ! -f "$HOME/.local/share/icons/hicolor/index.theme" ]] && [[ -f "/usr/share/icons/hicolor/index.theme" ]]; then
-            cp "/usr/share/icons/hicolor/index.theme" "$HOME/.local/share/icons/hicolor/index.theme" 2>/dev/null || true
-        fi
-        gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-    fi
-    
-    if [[ "${XDG_CURRENT_DESKTOP:-}" =~ "KDE" ]]; then
-        kbuildsycoca6 --noincremental 2>/dev/null || kbuildsycoca5 --noincremental 2>/dev/null || true
-    fi
-    echo "✔ Desktop entry registered"
+    rm -f "$HOME/.local/share/icons/hicolor/icon-theme.cache" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    echo "✔ Desktop entry and icon registered (v$version)"
 }
 
 download_model() {
@@ -200,7 +199,9 @@ download_model() {
 uninstall_lapis() {
     echo "-> Uninstalling Lapis..."
     rm -f "$BIN_DIR/lapis" "$APP_DIR/lapis.desktop" "$ICON_DIR/lapis.svg"
+    rm -f "$HOME/.local/share/icons/hicolor/icon-theme.cache" 2>/dev/null || true
     update-desktop-database "$APP_DIR" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
     echo "✔ Lapis binary and desktop entry removed."
     ask "Do you also want to remove ASR models, notes, dictionaries and cache in ~/.local/share/lapis? [y/N] "
     if [[ "$REPLY" =~ ^[Yy]$ ]]; then
@@ -214,12 +215,12 @@ show_help() {
 Usage: ./install.sh [COMMAND] [ARCHIVE_PATH]
 
 Commands:
-  install             Install Lapis (uses local .tar.gz if present, otherwise GitHub)
-  local [path.tar.gz] Install or update strictly from a local archive or ./target/release/lapis
-  update              Update the Lapis binary from GitHub (or local if present)
-  model               Download or resume the Parakeet offline ASR model
-  uninstall           Remove Lapis from your system
-  help                Show this help message
+  install              Install Lapis (uses local .tar.gz if present, otherwise GitHub)
+  local [path.tar.gz]  Install or update strictly from a local archive or ./target/release/lapis
+  update               Update the Lapis binary and desktop integration from GitHub
+  model                Download or resume the Parakeet offline ASR model
+  uninstall            Remove Lapis from your system
+  help                 Show this help message
 EOF
 }
 
@@ -234,6 +235,7 @@ case "$ACTION" in
     update|--update|-u)
         echo "󰏪 Updating Lapis..."
         install_binary
+        install_desktop
         ;;
     model|download-model|--model|-m)
         download_model
@@ -247,7 +249,7 @@ case "$ACTION" in
     install|--install|"")
         if [[ -f "$BIN_DIR/lapis" && -z "$ACTION" ]]; then
             echo "󰏪 Lapis is already installed. What would you like to do?"
-            echo "  1) Update Lapis binary (uses local .tar.gz if in current folder, else GitHub)"
+            echo "  1) Update Lapis binary and desktop entry"
             echo "  2) Install from local ./lapis-linux-x86_64.tar.gz or ./target/release/lapis"
             echo "  3) Download / Repair Parakeet ASR model (~650 MB)"
             echo "  4) Reinstall everything (binary + .desktop + icon)"
@@ -255,7 +257,7 @@ case "$ACTION" in
             echo "  6) Cancel"
             ask "Select an option [1-6]: "
             case "$REPLY" in
-                1) install_binary ;;
+                1) install_binary; install_desktop ;;
                 2) install_binary "local"; install_desktop ;;
                 3) download_model ;;
                 4) install_binary; install_desktop ;;
