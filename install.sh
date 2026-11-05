@@ -161,7 +161,20 @@ StartupWMClass=lapis
 EOF
 
     update-desktop-database "$APP_DIR" 2>/dev/null || true
-    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$APP_DIR" 2>/dev/null || true
+    fi
+    
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        if [[ ! -f "$HOME/.local/share/icons/hicolor/index.theme" ]] && [[ -f "/usr/share/icons/hicolor/index.theme" ]]; then
+            cp "/usr/share/icons/hicolor/index.theme" "$HOME/.local/share/icons/hicolor/index.theme" 2>/dev/null || true
+        fi
+        gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
+    
+    if [[ "${XDG_CURRENT_DESKTOP:-}" =~ "KDE" ]]; then
+        kbuildsycoca6 --noincremental 2>/dev/null || kbuildsycoca5 --noincremental 2>/dev/null || true
+    fi
     echo "✔ Desktop entry registered"
 }
 
