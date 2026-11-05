@@ -161,6 +161,7 @@ StartupWMClass=lapis
 EOF
 
     update-desktop-database "$APP_DIR" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
     echo "✔ Desktop entry registered"
 }
 
