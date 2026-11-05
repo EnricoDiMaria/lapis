@@ -15497,17 +15497,18 @@ impl eframe::App for Lapis {
                         .auto_shrink([false, false]);
 
                     if let Some((opt_anchor, old)) = zoom_fix {
-                        let old_pitch_y = old.3; // l'altezza visible_h precedente
-                        let scale_ratio = visible_h / old_pitch_y.max(1.0);
-
-                        let y = if let Some(a) = opt_anchor {
-                            // Cursor-anchored zoom (Ctrl + wheel or touchpad pinch).
-                            (((self.pdf_scroll_offset.y + a.y) * scale_ratio) - a.y).max(0.0)
-                        } else {
-                            // Global zoom from fit modes and UI controls.
-                            // Keep the page center proportionally anchored.
-                            (((self.pdf_scroll_offset.y + old.3 * 0.5) * scale_ratio) - visible_h * 0.5).max(0.0)
-                        };
+                        // `old` = (display_w, display_h, visible_w, visible_h) of the previous frame.
+                        // Cursor-anchored zoom (Ctrl + wheel or touchpad pinch) keeps the page
+                        // point under the cursor fixed; fit modes and UI zoom keep the view center.
+                        let anchor_y = opt_anchor.map(|a| a.y).unwrap_or(visible_h * 0.5);
+                        let y = zoom_scroll_offset(
+                            self.pdf_scroll_offset.y,
+                            anchor_y,
+                            old.3,
+                            visible_h,
+                            old.1,
+                            display_h,
+                        );
 
                         let anchor_x = opt_anchor.map(|a| a.x).unwrap_or(visible_w * 0.5);
                         let x = zoom_scroll_offset(
@@ -15562,6 +15563,9 @@ impl eframe::App for Lapis {
                             );
                         }
                     });
+
+                    // Needed to turn the pointer position into a canvas-relative zoom anchor.
+                    self.canvas_rect = out.inner_rect;
 
                     self.pdf_scroll_offset = clamp_scroll_offset(
                         self.pdf_scroll_offset, 
