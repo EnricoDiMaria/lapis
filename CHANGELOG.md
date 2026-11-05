@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so fullscreen works in tiling compositors.
 - Key `C` toggles between Continuous and Single Page view (configurable, also in the Command Palette).
 
+- **Syntax highlighting for many more languages** in fenced code blocks (C/C++, Java, Go, JavaScript,
+  Python, Ruby, PHP, SQL, shell, Haskell, Lua, Scala, ... through syntect). Common aliases such as
+  `ts`, `tsx`, `jsx`, `kotlin`, `zsh` or `postgres` map to the closest available syntax.
+
 ### Fixed
 
 - Closing a PDF to go back to the home screen left the document marked as open: the per-document

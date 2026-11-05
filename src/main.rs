@@ -10790,7 +10790,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                         .color(rgb(self.theme.fg_muted)),
                                 );
                                 ui.add_space(4.0);
-                                let q_md = notes::preprocess_markdown_math(&card.front);
+                                let q_md = notes::preprocess_markdown_view(&card.front);
                                 egui_commonmark::CommonMarkViewer::new().show(
                                     ui,
                                     &mut self.commonmark_cache,
@@ -10837,7 +10837,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                             .color(rgb(self.theme.success)),
                                     );
                                     ui.add_space(4.0);
-                                    let a_md = notes::preprocess_markdown_math(&card.back);
+                                    let a_md = notes::preprocess_markdown_view(&card.back);
                                     egui_commonmark::CommonMarkViewer::new().show(
                                         ui,
                                         &mut self.commonmark_cache,
@@ -11573,7 +11573,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(note_font_sz * 1.35));
 
                 let pre_defs = notes::preprocess_definitions(md_source);
-                let rendered_md = notes::preprocess_markdown_math(&pre_defs);
+                let rendered_md = notes::preprocess_markdown_view(&pre_defs);
 
                 egui_commonmark::CommonMarkViewer::new().show(
                     ui,
@@ -12327,7 +12327,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                     );
 
                                     let pre_defs = notes::preprocess_definitions(&self.current_note);
-                                    let rendered_md = notes::preprocess_markdown_math(&pre_defs);
+                                    let rendered_md = notes::preprocess_markdown_view(&pre_defs);
 
                                     egui_commonmark::CommonMarkViewer::new().show(
                                         ui,
@@ -12673,7 +12673,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                             .collect::<Vec<_>>()
                                             .join("\n");
                                         let rendered =
-                                            notes::preprocess_markdown_math(&preview_lines);
+                                            notes::preprocess_markdown_view(&preview_lines);
                                         egui_commonmark::CommonMarkViewer::new().show(
                                             ui,
                                             &mut self.commonmark_cache,

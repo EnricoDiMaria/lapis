@@ -402,9 +402,9 @@ The result is a single study document combining the original lecture material, y
 - [X] Right-click on the zoom percentage to fit the page.
 - [X] Fullscreen mode possible (even in non slideshow mode), including in tiling compositors such as Hyprland.
 - [X] Add key `C` as a toggle between Continuous and SinglePage
+- [X] Syntax highlighting for more programming languages in code blocks.
 - [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
 - [ ] Frameless toolbar buttons with hover colour feedback and other visual polish.
-- [ ] Syntax highlighting for more programming languages in code blocks.
 - [ ] Add key `C` as a toggle between Continuous and SinglePage
 
 **Study tools**

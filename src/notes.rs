@@ -1235,6 +1235,64 @@ pub fn preprocess_definitions(markdown: &str) -> String {
     out
 }
 
+/// Fence language names unknown to the bundled syntax set, mapped to the closest syntax it has
+/// (e.g. TypeScript -> JavaScript). Only used for on-screen rendering, never for exports.
+fn code_fence_alias(lang: &str) -> Option<&'static str> {
+    Some(match lang.to_ascii_lowercase().as_str() {
+        "ts" | "typescript" | "tsx" | "jsx" | "mjs" | "cjs" | "node" | "vue" | "svelte" => "js",
+        "json5" | "jsonc" => "json",
+        "kt" | "kts" | "kotlin" => "java",
+        "csharp" | "c#" => "cs",
+        "golang" => "go",
+        "python3" | "py3" => "py",
+        "c++" | "cc" | "cxx" | "hpp" | "hxx" | "cuda" | "cu" => "cpp",
+        "shell" | "console" | "zsh" | "fish" | "ksh" | "dockerfile" => "sh",
+        "scss" | "sass" | "less" => "css",
+        "svg" | "xhtml" | "xaml" => "xml",
+        "postgres" | "postgresql" | "mysql" | "sqlite" | "plsql" | "tsql" => "sql",
+        "octave" => "matlab",
+        _ => return None,
+    })
+}
+
+/// Rewrites the language of fenced code blocks through [`code_fence_alias`].
+fn alias_code_fences(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let mut in_code_block = false;
+    for line in markdown.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let eol = &line[body.len()..];
+        let rest = body.trim_start();
+        if rest.starts_with("```") {
+            in_code_block = !in_code_block;
+            if in_code_block {
+                let indent = &body[..body.len() - rest.len()];
+                let ticks = rest.chars().take_while(|&c| c == '`').count();
+                let lang = rest[ticks..]
+                    .trim()
+                    .split(|c: char| c.is_whitespace() || c == ',' || c == '{')
+                    .next()
+                    .unwrap_or("");
+                if let Some(alias) = code_fence_alias(lang) {
+                    out.push_str(indent);
+                    out.push_str(&"`".repeat(ticks));
+                    out.push_str(alias);
+                    out.push_str(eol);
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Markdown preparation for on-screen rendering: math preprocessing plus code-fence language
+/// aliases, so more programming languages get syntax highlighting.
+pub fn preprocess_markdown_view(markdown: &str) -> String {
+    alias_code_fences(&preprocess_markdown_math(markdown))
+}
+
 // Convert display and inline math into styled Markdown for egui_commonmark. 
 
 pub fn preprocess_markdown_math(markdown: &str) -> String { let mut result = String::with_capacity(markdown.len() + 64); let mut rem = markdown;      // 1. Process display math blocks. 

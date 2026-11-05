@@ -284,7 +284,8 @@ You can use Markdown syntax to structure your notes with:
 - Lists
 - Numbered steps
 - Links
-- Code blocks
+- Code blocks, with syntax highlighting for many programming languages (use a fenced block such as
+  ```` ```python ````, ```` ```cpp ````, ```` ```js ````, ```` ```sql ```` ...)
 - Mathematical expressions
 
 ### Preview mode
