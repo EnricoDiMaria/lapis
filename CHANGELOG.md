@@ -4,7 +4,7 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - UNRELEASED
+## [1.2.0] - 2026/11/05
 
 ### Added
 
@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the notes is always the one that is loaded.
 - **Conflict safety net.** When two versions of the notes differ, the one that is not used is
   kept as `notes/<id>.conflict-<timestamp>.bak` (the latest five are retained).
+- **Choose what to export.** The PDF export can now contain annotations only, notes only, or
+  both (Settings → System & Export → PDF Export → Export content). The FILE menu button shows the
+  current mode and the output file is named accordingly (`_annotated`, `_notes`, `_annotated_notes`).
 - `ffmpeg` is looked up next to the Lapis executable (or via `LAPIS_FFMPEG`) before falling
   back to `PATH`.
 
@@ -39,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local data is no longer keyed by a hash of the file path. Existing data is migrated to the
   new document ID the first time each PDF is opened.
 - On launch, a file path passed on the command line may now contain non-UTF-8 characters.
+- **PDF export keeps the original pages.** Pages without notes are now the original pages (same
+  size, resolution, selectable text, links and bookmarks, no borders), with the annotations drawn on
+  top. Pages with notes show the slide on the left at its original size, without margins, and the
+  notes on the right, using the slide width set in the settings. Files that cannot be processed this
+  way (encrypted or damaged) fall back to the previous rasterised export.
+- The user guide moved to `docs/USER_GUIDE.md`; the README gained Windows instructions, a technical
+  overview and an updated roadmap.
 - Minimum supported Rust version is now 1.89.
 
 ### Fixed
@@ -48,7 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revision now wins, and the PDF is brought back in sync when it was behind the local backup.
 - Local data could become orphaned after a Rust toolchain upgrade, because the path hash it
   was keyed on is not guaranteed to be stable across compiler versions.
-- Image paths with backslashes (Windows) no longer break Markdown image links.
+- Image paths with backslashes (Windows) no longer break Markdown image links, and screenshots load
+  on Windows.
+- PDF export used fixed stroke widths: pen, line, shape and underline widths now match the width
+  used in the app.
+- PDF export drew highlights and occlusion tapes as outlines: highlights are now translucent fills
+  and tapes are opaque boxes, as on screen.
+- PDF export lowered the resolution of every page; pages are now kept as vector content.
 
 ### Compatibility and upgrade notes
 
