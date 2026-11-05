@@ -6417,6 +6417,7 @@ fn handle_slide_annotations(
             ("toggle_split", "󰯌  Toggle Split-View (Side-by-Side PDF)", "View"),
             ("mode_continuous", "󰍜  Switch to Continuous Scroll Mode", "View"),
             ("mode_single", "󰈙  Switch to Single Page Mode", "View"),
+            ("mode_toggle_cont_single", "󰍜  Toggle Continuous / Single Page [C]", "View"),
             ("mode_slideshow", "󰐨  Enter Presentation / Slideshow Mode", "View"),
             ("toggle_fullscreen", "󰊓  Toggle Fullscreen [F11]", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
@@ -6581,6 +6582,14 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
             "mode_continuous" => self.view_mode = ViewMode::Continuous,
             "mode_book" => self.view_mode = ViewMode::TwoPage,
             "mode_single" => self.view_mode = ViewMode::SinglePage,
+            "mode_toggle_cont_single" => {
+                if self.view_mode == ViewMode::Continuous {
+                    self.view_mode = ViewMode::SinglePage;
+                } else if !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+                    self.view_mode = ViewMode::Continuous;
+                    self.continuous_scroll_to_page = Some(self.current_page);
+                }
+            }
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
             "toggle_fullscreen" => {
                 if !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
@@ -13009,6 +13018,21 @@ impl eframe::App for Lapis {
                         self.view_mode = self.prev_view_mode;
                     }
                 }
+            // Toggle Continuous <-> Single page (default: C). Plain key: only when not typing,
+            // and never while a Ctrl/Alt chord (e.g. Ctrl+C copy) is held.
+            let in_show = matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes);
+            if !any_focused && !in_show && self.has_pdf() {
+                let b = &self.app_state.shortcuts.toggle_continuous_single;
+                let chord_free = b.ctrl || !i.modifiers.command;
+                if chord_free && b.consume(i) {
+                    if self.view_mode == ViewMode::Continuous {
+                        self.view_mode = ViewMode::SinglePage;
+                    } else {
+                        self.view_mode = ViewMode::Continuous;
+                        self.continuous_scroll_to_page = Some(self.current_page);
+                    }
+                }
+            }
             // 7. Continuous Viewmode arrows shortcuts
             if !any_focused && self.view_mode == ViewMode::Continuous {
              if i.key_pressed(egui::Key::ArrowDown) {

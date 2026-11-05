@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Command Palette) toggles fullscreen in every view mode. The window command is now sent only when
   the wanted state changes, and changes made from outside (e.g. a Hyprland keybinding) are followed,
   so fullscreen works in tiling compositors.
+- Key `C` toggles between Continuous and Single Page view (configurable, also in the Command Palette).
 
 ### Fixed
 

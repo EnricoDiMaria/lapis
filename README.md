@@ -343,6 +343,7 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `Alt + 3` | Two-Page Book |
 | `Alt + 4` | Slideshow |
 | `Alt + 5` | Slideshow + Notes |
+| `C` | Toggle Continuous / Single Page when not typing |
 | `F11` | Toggle fullscreen (also outside slideshow) |
 | `PageUp` | Previous page |
 | `PageDown` | Next page |
@@ -399,8 +400,9 @@ The result is a single study document combining the original lecture material, y
 
 - [X] Right-click menu with only the Undo button.
 - [X] Right-click on the zoom percentage to fit the page.
-- [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
 - [X] Fullscreen mode possible (even in non slideshow mode), including in tiling compositors such as Hyprland.
+- [X] Add key `C` as a toggle between Continuous and SinglePage
+- [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
 - [ ] Frameless toolbar buttons with hover colour feedback and other visual polish.
 - [ ] Syntax highlighting for more programming languages in code blocks.
 - [ ] Add key `C` as a toggle between Continuous and SinglePage
