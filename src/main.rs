@@ -13635,7 +13635,7 @@ impl eframe::App for Lapis {
                 let arrow = if is_open { "▴" } else { "▾" };
  
                 let font_id = egui::FontId::proportional(14.0);
-                let make_label = |title: &str, arrow: &str| format!("󰈦 {} {} 󱌢", title, arrow);
+                let make_label = |title: &str, arrow: &str| format!(" {} {}", title, arrow);
                 let label_w = |s: &str| -> f32 {
                     (ui.painter()
                         .layout_no_wrap(s.to_owned(), font_id.clone(), ui.visuals().text_color())
@@ -14940,7 +14940,7 @@ impl eframe::App for Lapis {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let settings = egui::Button::new(
-                                                egui::RichText::new("󱌢  Settings")
+                                                egui::RichText::new("  Settings")
                                                     .size(12.0)
                                                     .color(rgb(self.theme.fg_primary)),
                                             )
