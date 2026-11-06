@@ -2374,7 +2374,7 @@ impl Lapis {
             }
         })
         .response
-        .on_hover_text("Change View Mode [Alt+1..5]");
+        .on_hover_text("Change View Mode");
     }
 
     fn topbar_split_button(&mut self, ui: &mut egui::Ui, sq_btn: egui::Vec2, labeled: bool) {
@@ -5271,7 +5271,7 @@ fn handle_slide_annotations(
                                                         if ui
                                                             .checkbox(
                                                                 &mut self.pdf_dark_mode,
-                                                                "Smart PDF Dark Mode (invert slide background to deep slate)",
+                                                                "PDF Dark Mode (invert slide background to deep slate)",
                                                             )
                                                             .changed()
                                                         {
@@ -13437,7 +13437,7 @@ impl eframe::App for Lapis {
                     }
                 });
 
-                let resp = zoom_menu.response.on_hover_text("Zoom Mode [Ctrl+Scroll] | Tasto DX: Fit Page");
+                let resp = zoom_menu.response.on_hover_text("Zoom Mode [Ctrl+Scroll] | Right Click: Fit Page");
 
                 if resp.hovered() && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
                     self.zoom_mode = ZoomMode::FitPage;
@@ -14049,7 +14049,7 @@ impl eframe::App for Lapis {
                                     let drag_source: u32 = ui.ctx().data(|d| d.get_temp(drag_source_id).unwrap_or(0));
                                     if drag_source != 0 {
                                         if let Some(pos) = pointer_pos.filter(|pos| card_rect.contains(*pos)) {
-                                            // Target = slot d'inserimento (da 1 a total_pages + 1).
+                                            // target = slot d'inserimento (da 1 a total_pages + 1).
                                             let target = if pos.y < card_rect.center().y {
                                                 p
                                             } else {
@@ -14281,7 +14281,7 @@ impl eframe::App for Lapis {
                                         ui.painter().text(
                                             hide_rect.center(),
                                             egui::Align2::CENTER_CENTER,
-                                            if is_hidden { "󰈉" } else { "󰈈" },
+                                            if is_hidden { "󰈉 " } else { "󰈈 " },
                                             egui::FontId::proportional(11.5),
                                             if is_hidden || hide_hovered {
                                                 rgb(self.theme.error)

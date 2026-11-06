@@ -395,11 +395,12 @@ The result is a single study document combining the original lecture material, y
 
 - [ ] **Smart scientific dark mode**: selective inversion (shader- or MuPDF-based) that darkens white slide backgrounds while keeping figures, plots and coloured lines correct.
 - [ ] Frameless toolbar buttons with hover colour feedback, nicer toast messages and other visual polish.
+- [ ] Follow cursor with autoscroll when writing in the note edit panel.
 
 **Study tools**
 
 - [X] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
-- [ ] Fix textboxes rendered under screenshots
+- [ ] Fix textboxes rendered under screenshots.
 - [ ] Improve flashcards
 
 **Platform and project**
