@@ -1339,6 +1339,11 @@ struct Lapis {
     last_slide_rects: Vec<(u32, egui::Rect)>,
     selected_image: Option<(u32, usize)>,
     image_drag: Option<ImageDrag>,
+    home_thumb_tx: Sender<(PathBuf, egui::ColorImage)>,
+    home_thumb_rx: Receiver<(PathBuf, egui::ColorImage)>,
+    home_thumb_cache: HashMap<PathBuf, (egui::TextureHandle, (usize, usize))>,
+    home_thumb_pending: HashSet<PathBuf>,
+    home_logo: Option<egui::TextureHandle>,
     audio_dock_height: f32,
     jump_lock_y: Option<f32>,
     continuous_anchor_page: u32,
@@ -1377,6 +1382,19 @@ impl Lapis {
         let (_res_tx, res_rx) = channel::<WorkerMsg>();
         let (export_tx, export_rx) = channel::<Result<PathBuf, String>>();
         let (asr_tx, asr_rx) = channel::<audio::AsrJobResult>();
+        let (home_thumb_tx, home_thumb_rx) = channel::<(PathBuf, egui::ColorImage)>();
+        let home_logo = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .ok()
+            .map(|img| {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let pixels = rgba.as_flat_samples();
+                cc.egui_ctx.load_texture(
+                    "lapis_home_logo",
+                    egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
         let spellchecker = spellcheck::SpellChecker::new(&app_state.settings.extra_dictionaries);
 
         let mut app = Self {
@@ -1517,6 +1535,11 @@ impl Lapis {
             last_slide_rects: Vec::new(),
             selected_image: None,
             image_drag: None,
+            home_thumb_tx,
+            home_thumb_rx,
+            home_thumb_cache: HashMap::new(),
+            home_thumb_pending: HashSet::new(),
+            home_logo,
             audio_dock_height: 180.0,
             jump_lock_y: None,
             continuous_anchor_page: 1,
@@ -12632,7 +12655,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 egui::Frame::NONE
                     .fill(panel_bg)
                     .stroke(egui::Stroke::NONE)
-                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .inner_margin(egui::Margin::symmetric(8, 2))
                     .show(&mut memo_ui, |u| {
                         self.render_page_voice_memos_strip(u);
                     });
@@ -14697,7 +14720,7 @@ impl eframe::App for Lapis {
                     egui::Frame::NONE
                         .fill(rgb(self.theme.bg_panel))
                         .corner_radius(egui::CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .inner_margin(egui::Margin::symmetric(8, 2))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -14844,225 +14867,741 @@ impl eframe::App for Lapis {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ui.style()).fill(rgb(self.theme.bg_canvas)).inner_margin(egui::Margin::ZERO),)
+            .frame(
+                egui::Frame::central_panel(&ui.style())
+                    .fill(rgb(self.theme.bg_canvas))
+                    .inner_margin(egui::Margin::ZERO),
+            )
             .show(ui, |ui| {
                 if !self.has_pdf() {
                     self.show_toc = false;
                     self.show_notes = false;
+
                     let mut file_to_open: Option<PathBuf> = None;
                     let mut file_to_remove: Option<PathBuf> = None;
 
-                    let avail_h = ui.available_height();
-
-                    ui.vertical_centered(|ui| {
-                        ui.add_space((avail_h * 0.14).max(30.0));
-
-                        // Header
-                        ui.horizontal(|ui| {
-                            let total_w = 32.0 + 10.0 + 85.0; // Estimated icon, spacing, and title width.
-                            let centering_pad = ((ui.available_width() - total_w) * 0.5).max(0.0);
-                            if centering_pad > 0.0 {
-                                ui.add_space(centering_pad);
-                            }
-
-                            ui.spacing_mut().item_spacing.x = 10.0;
-                            ui.label(
-                                egui::RichText::new("")
-                                    .size(32.0)
-                                    .color(rgb(self.theme.accent)),
-                            );
-                            ui.label(
-                                egui::RichText::new(" Lapis")
-                                    .size(32.0)
-                                    .strong()
-                                    .color(rgb(self.theme.fg_primary)),
-                            );
-                        });
-
-                        ui.add_space(8.0);
-
-                        ui.label(
-                            egui::RichText::new("Advanced PDF study suite")
-                                .size(13.5)
-                                .strong()
-                                .color(rgb(self.theme.fg_primary)),
+                    // Collect completed first-page previews and schedule missing ones off the UI thread.
+                    while let Ok((path, image)) = self.home_thumb_rx.try_recv() {
+                        let size = image.size;
+                        let texture = ui.ctx().load_texture(
+                            format!("home-preview:{}", path.display()),
+                            image,
+                            egui::TextureOptions::LINEAR,
                         );
-                        ui.add_space(3.0);
-                        ui.label(
-                            egui::RichText::new("Lecture audio sync & active recall  •  Vector drawing & Markdown notes")
-                                .size(11.5)
-                                .color(rgb(self.theme.fg_muted)),
-                        );
+                        self.home_thumb_cache
+                            .insert(path.clone(), (texture, size.into()));
+                        self.home_thumb_pending.remove(&path);
+                    }
 
-                        ui.add_space(30.0);
-
-                        // --- 2. Main actions ---
-                        egui::Frame::NONE
-                            .fill(rgb(self.theme.bg_panel))
-                            .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(16, 12))
-                            .show(ui, |ui| {
-                                ui.set_width(560.0);
-                                ui.columns(3, |cols| {
-                                    // 1: Open Study Deck / PDF
-                                    cols[0].vertical_centered_justified(|ui| {
-                                        let btn = egui::Button::new(
-                                            egui::RichText::new("󰂺  Open PDF")
-                                                .size(13.5)
-                                                .strong(),
-                                        )
-                                        .min_size(egui::vec2(170.0, 38.0));
-                                        if ui
-                                            .add(btn)
-                                            .on_hover_text("Open a PDF file (.pdf)")
-                                            .clicked()
-                                        {
-                                            self.dialogs.open(
-                                                ui.ctx(),
-                                                DialogKind::OpenPdf,
-                                                DialogSpec::open_file().filter("PDF files", &["pdf"]),
-                                            );
-                                        }
-                                    });
-
-                                    // 2: New Blank Study Notebook
-                                    cols[1].vertical_centered_justified(|ui| {
-                                        let btn = egui::Button::new(
-                                            egui::RichText::new("󰐕  Blank Notebook")
-                                                .size(13.5),
-                                        )
-                                        .min_size(egui::vec2(170.0, 38.0));
-                                        if ui
-                                            .add(btn)
-                                            .on_hover_text("Create a fresh ruled PDF notebook for freehand & Markdown notes")
-                                            .clicked()
-                                        {
-                                            self.dialogs.open(
-                                                ui.ctx(),
-                                                DialogKind::NewNotebook,
-                                                DialogSpec::save_file().file_name("notebook.pdf").filter("PDF Notebook", &["pdf"]),
-                                            );
-                                        }
-                                    });
-
-                                    // 3: Advanced Settings
-                                    cols[2].vertical_centered_justified(|ui| {
-                                        let btn = egui::Button::new(
-                                            egui::RichText::new("󰒓  Advanced Settings")
-                                                .size(13.5),
-                                        )
-                                        .min_size(egui::vec2(170.0, 38.0));
-                                        if ui
-                                            .add(btn)
-                                            .on_hover_text("Configure shortcuts, fonts, audio VAD & study tools")
-                                            .clicked()
-                                        {
-                                            self.show_settings = true;
-                                        }
-                                    });
-                                });
+                    for entry in &self.app_state.recent_files {
+                        let path = entry.path.clone();
+                        if path.is_file()
+                            && !self.home_thumb_cache.contains_key(&path)
+                            && self.home_thumb_pending.insert(path.clone())
+                        {
+                            let tx = self.home_thumb_tx.clone();
+                            let ctx = ui.ctx().clone();
+                            thread::spawn(move || {
+                                let rendered = path
+                                    .to_str()
+                                    .and_then(|p| Document::open(p).ok())
+                                    .and_then(|doc| render_to_image(&doc, 0, 0.42, false))
+                                    .map(|(_, image, _)| image);
+                                if let Some(image) = rendered {
+                                    let _ = tx.send((path, image));
+                                    ctx.request_repaint();
+                                }
                             });
+                        }
+                    }
 
-                        ui.add_space(18.0);
+                            ui.vertical_centered(|ui| {
+                                let content_width =
+                                    (ui.available_width() - 48.0).clamp(260.0, 1040.0);
+                                ui.set_width(content_width);
 
-                        // --- 3. Isolated card for recent ---
-                        egui::Frame::NONE
-                            .fill(rgb(self.theme.bg_panel))
-                            .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::same(16))
-                            .show(ui, |ui| {
-                                ui.set_width(560.0);
-                                ui.set_max_height(290.0);
+                                ui.add_space(60.0);
 
+                                // 1. Title and controls
                                 ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 12.0;
                                     ui.label(
-                                        egui::RichText::new("󱋡  Recent Files")
-                                            .size(14.0)
+                                        egui::RichText::new("")
+                                            .size(30.0)
+                                            .color(rgb(self.theme.accent)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(" Lapis")
+                                            .size(26.0)
                                             .strong()
                                             .color(rgb(self.theme.fg_primary)),
                                     );
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.label(
-                                                egui::RichText::new("Ctrl+P Command Palette")
-                                                    .size(11.5)
-                                                    .color(rgb(self.theme.fg_muted)),
-                                            );
+                                            let settings = egui::Button::new(
+                                                egui::RichText::new("󱌢  Settings")
+                                                    .size(12.0)
+                                                    .color(rgb(self.theme.fg_primary)),
+                                            )
+                                            .corner_radius(egui::CornerRadius::same(6))
+                                            .min_size(egui::vec2(92.0, 30.0));
+                                            if ui
+                                                .add(settings)
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                self.show_settings = true;
+                                            }
                                         },
                                     );
                                 });
-                                ui.add_space(4.0);
-                                ui.separator();
-                                ui.add_space(6.0);
+
+                                ui.add_space(28.0);
+
+                                // 2. Quick actions
+                                ui.columns(2, |cols| {
+                                    // Open PDF
+                                    let open_frame = egui::Frame::NONE
+                                        .fill(rgb(self.theme.bg_panel))
+                                        .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+                                        .corner_radius(egui::CornerRadius::same(
+                                            self.theme.corner_radius,
+                                        ))
+                                        .inner_margin(egui::Margin::same(16))
+                                        .show(&mut cols[0], |ui| {
+                                            ui.set_width(ui.available_width());
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("󰝰  Open PDF")
+                                                        .size(15.5)
+                                                        .strong()
+                                                        .color(rgb(self.theme.fg_primary)),
+                                                );
+                                            });
+
+                                            ui.add_space(6.0);
+
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Import an existing PDF document from your computer.",
+                                                )
+                                                .size(11.5)
+                                                .color(rgb(self.theme.fg_muted)),
+                                            );
+
+                                            ui.add_space(14.0);
+
+                                            ui.label(
+                                                egui::RichText::new("Browse files  →")
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(rgb(self.theme.accent)),
+                                            );
+                                        });
+
+                                    let open_rect = open_frame.response.rect;
+                                    let open_resp = cols[0]
+                                        .interact(
+                                            open_rect,
+                                            cols[0].id().with("action_open_pdf"),
+                                            egui::Sense::click(),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+                                    if open_resp.hovered() {
+                                        cols[0].painter().rect_stroke(
+                                            open_rect,
+                                            egui::CornerRadius::same(self.theme.corner_radius),
+                                            egui::Stroke::new(1.0, rgb(self.theme.accent)),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+
+                                    if open_resp.clicked() {
+                                        self.dialogs.open(
+                                            cols[0].ctx(),
+                                            DialogKind::OpenPdf,
+                                            DialogSpec::open_file()
+                                                .filter("PDF files", &["pdf"]),
+                                        );
+                                    }
+
+                                    // New Notebook
+                                    let nb_frame = egui::Frame::NONE
+                                        .fill(rgb(self.theme.bg_panel))
+                                        .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+                                        .corner_radius(egui::CornerRadius::same(
+                                            self.theme.corner_radius,
+                                        ))
+                                        .inner_margin(egui::Margin::same(16))
+                                        .show(&mut cols[1], |ui| {
+                                            ui.set_width(ui.available_width());
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("󱞁  Blank Notebook")
+                                                        .size(15.5)
+                                                        .strong()
+                                                        .color(rgb(self.theme.fg_primary)),
+                                                );
+                                            });
+
+                                            ui.add_space(6.0);
+
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Create a new blank study notebook from scratch.",
+                                                )
+                                                .size(11.5)
+                                                .color(rgb(self.theme.fg_muted)),
+                                            );
+
+                                            ui.add_space(14.0);
+
+                                            ui.label(
+                                                egui::RichText::new("Create notebook  →")
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(rgb(self.theme.accent)),
+                                            );
+                                        });
+
+                                    let nb_rect = nb_frame.response.rect;
+                                    let nb_resp = cols[1]
+                                        .interact(
+                                            nb_rect,
+                                            cols[1].scope_id().with("action_new_notebook"),
+                                            egui::Sense::click(),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+                                    if nb_resp.hovered() {
+                                        cols[1].painter().rect_stroke(
+                                            nb_rect,
+                                            egui::CornerRadius::same(self.theme.corner_radius),
+                                            egui::Stroke::new(1.0, rgb(self.theme.accent)),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+
+                                    if nb_resp.clicked() {
+                                        self.dialogs.open(
+                                            cols[1].ctx(),
+                                            DialogKind::NewNotebook,
+                                            DialogSpec::save_file()
+                                                .file_name("notebook.pdf")
+                                                .filter("PDF Notebook", &["pdf"]),
+                                        );
+                                    }
+                                });
+
+                                ui.add_space(32.0);
+
+                                // 3. Recent Documents
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Recent documents")
+                                            .size(15.5)
+                                            .strong()
+                                            .color(rgb(self.theme.fg_primary)),
+                                    );
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    self.app_state.home_grid_view,
+                                                    " 󱇙 ",
+                                                )
+                                                .on_hover_text("Grid view")
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                self.app_state.home_grid_view = true;
+                                                self.app_state.save();
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    !self.app_state.home_grid_view,
+                                                    "  ",
+                                                )
+                                                .on_hover_text("List view")
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                self.app_state.home_grid_view = false;
+                                                self.app_state.save();
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.add_space(12.0);
 
                                 if self.app_state.recent_files.is_empty() {
-                                    ui.add_space(32.0);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "No recent files. Open a PDF or create a Blank Notebook above.",
-                                        )
-                                        .color(rgb(self.theme.fg_muted)),
-                                    );
-                                    ui.add_space(32.0);
+                                    egui::Frame::NONE
+                                        .fill(rgb(self.theme.bg_panel))
+                                        .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+                                        .corner_radius(egui::CornerRadius::same(
+                                            self.theme.corner_radius,
+                                        ))
+                                        .inner_margin(egui::Margin::same(28))
+                                        .show(ui, |ui| {
+                                            ui.set_width((content_width - 58.0).max(100.0));
+                                            ui.vertical_centered(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("󰈙")
+                                                        .size(24.0)
+                                                        .color(rgb(self.theme.fg_muted)),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new("No documents yet")
+                                                        .size(14.0)
+                                                        .strong()
+                                                        .color(rgb(self.theme.fg_primary)),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Your recently opened PDFs will appear here.",
+                                                    )
+                                                    .size(11.5)
+                                                    .color(rgb(self.theme.fg_muted)),
+                                                );
+                                            });
+                                        });
                                 } else {
                                     egui::ScrollArea::vertical()
                                         .id_salt("recent_files_scroll")
                                         .auto_shrink([false, true])
+                                        .max_height((ui.available_height() - 32.0).max(120.0))                                        
                                         .show(ui, |ui| {
-                                            for entry in &self.app_state.recent_files {
+                                            if self.app_state.home_grid_view {
+                                                let gap = 12.0_f32;
+                                                let available = ui.available_width().max(1.0);
+                                                let cols = (((available + gap) / (165.0 + gap))
+                                                    .floor()
+                                                    as usize)
+                                                    .clamp(1, 6);
+                                                let card_w = (available
+                                                    - gap * (cols - 1) as f32)
+                                                    / cols as f32;
+                                                let card_h = 152.0_f32;
 
-                                                ui.horizontal(|ui| {
-                                                    let label = format!(
-                                                        "  {}   •   Slide {}/{} ",
-                                                        truncate_filename(&entry.name, 38),
-                                                        entry.last_page,
-                                                        entry.total_pages,
-                                                    );
-                                                    let btn = egui::Button::new(
-                                                        egui::RichText::new(label).size(13.2),
-                                                    )
-                                                    .min_size(egui::vec2(520.0, 32.0));
+                                                egui::Grid::new("recent_documents_grid")
+                                                    .num_columns(cols)
+                                                    .spacing(egui::vec2(gap, gap))
+                                                    .show(ui, |ui| {
+                                                        for (idx, entry) in self
+                                                            .app_state
+                                                            .recent_files
+                                                            .iter()
+                                                            .enumerate()
+                                                        {
+                                                            let cell = ui.allocate_ui_with_layout(
+                                                                egui::vec2(card_w, card_h),
+                                                                egui::Layout::top_down(
+                                                                    egui::Align::Min,
+                                                                ),
+                                                                |cell_ui| {
+                                                                    let frame = egui::Frame::NONE
+                                                                        .fill(rgb(
+                                                                            self.theme.bg_panel,
+                                                                        ))
+                                                                        .stroke(egui::Stroke::new(
+                                                                            1.0,
+                                                                            rgb(self.theme.border),
+                                                                        ))
+                                                                        .corner_radius(
+                                                                            egui::CornerRadius::same(8),
+                                                                        )
+                                                                        .inner_margin(
+                                                                            egui::Margin::same(8),
+                                                                        )
+                                                                        .show(cell_ui, |card_ui| {
+                                                                            // card_w - margin(16) - stroke(2) = card_w - 18
+                                                                            let inner_w = (card_w
+                                                                                - 18.0)
+                                                                                .max(60.0);
+                                                                            card_ui
+                                                                                .set_width(inner_w);
 
-                                                    if ui
-                                                        .add(btn)
-                                                        .on_hover_text(
-                                                            entry.path.to_string_lossy(),
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        file_to_open = Some(entry.path.clone());
-                                                    }
+                                                                            let preview_h =
+                                                                                card_h - 60.0;
+                                                                            card_ui.allocate_ui_with_layout(
+                                                                                egui::vec2(inner_w, preview_h),
+                                                                                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                                                                                |preview_ui| {
+                                                                                    if let Some((texture, (w, h))) = self.home_thumb_cache.get(&entry.path) {
+                                                                                        let max_w = inner_w - 4.0;
+                                                                                        let max_h = preview_h - 4.0;
+                                                                                        let scale = (max_w / (*w as f32).max(1.0)).min(max_h / (*h as f32).max(1.0));
+                                                                                        let size = egui::vec2(*w as f32 * scale, *h as f32 * scale);
+                                                                                        preview_ui.add(egui::Image::new((texture.id(), size)));
+                                                                                    } else if self.home_thumb_pending.contains(&entry.path) {
+                                                                                        preview_ui.spinner();
+                                                                                    } else {
+                                                                                        preview_ui.label(
+                                                                                            egui::RichText::new("PDF")
+                                                                                                .size(10.0)
+                                                                                                .color(rgb(self.theme.fg_muted)),
+                                                                                        );
+                                                                                    }
+                                                                                },
+                                                                            );
 
-                                                    if ui
-                                                        .add_sized(
-                                                            [32.0, 32.0],
-                                                            egui::Button::new("󰅖"),
-                                                        )
-                                                        .on_hover_text("Remove from history")
-                                                        .clicked()
-                                                    {
+                                                                            card_ui.add_space(6.0);
+
+                                                                            card_ui.add_sized(
+                                                                                [inner_w, 17.0],
+                                                                                egui::Label::new(
+                                                                                    egui::RichText::new(
+                                                                                        truncate_filename(&entry.name, 22),
+                                                                                    )
+                                                                                    .size(13.0)
+                                                                                    .strong()
+                                                                                    .color(rgb(self.theme.fg_primary)),
+                                                                                )
+                                                                                .truncate(),
+                                                                            );
+
+                                                                            card_ui.label(
+                                                                                egui::RichText::new(format!(
+                                                                                    "Page {} / {}",
+                                                                                    entry.last_page,
+                                                                                    entry.total_pages,
+                                                                                ))
+                                                                                .size(10.0)
+                                                                                .color(rgb(self.theme.fg_muted)),
+                                                                            );
+
+                                                                            card_ui.add_space(4.0);
+
+                                                                            let progress = (entry.last_page as f32
+                                                                                / (entry.total_pages.max(1) as f32))
+                                                                                .clamp(0.0, 1.0);
+                                                                            let (bar_rect, _) = card_ui.allocate_exact_size(
+                                                                                egui::vec2(inner_w, 3.0),
+                                                                                egui::Sense::hover(),
+                                                                            );
+                                                                            card_ui.painter().rect_filled(
+                                                                                bar_rect,
+                                                                                2.0,
+                                                                                rgb(self.theme.border),
+                                                                            );
+                                                                            let mut fill_rect = bar_rect;
+                                                                            fill_rect.set_width(
+                                                                                bar_rect.width() * progress,
+                                                                            );
+                                                                            card_ui.painter().rect_filled(
+                                                                                fill_rect,
+                                                                                2.0,
+                                                                                rgb(self.theme.accent),
+                                                                            );
+                                                                        });
+
+                                                                    let rect = frame.response.rect;
+                                                                    let close_rect =
+                                                                        egui::Rect::from_min_size(
+                                                                            egui::pos2(
+                                                                                rect.right()
+                                                                                    - 24.0,
+                                                                                rect.top() + 6.0,
+                                                                            ),
+                                                                            egui::vec2(18.0, 18.0),
+                                                                        );
+
+                                                                    let hovered = cell_ui
+                                                                        .rect_contains_pointer(
+                                                                            rect,
+                                                                        );
+                                                                    let on_close = hovered
+                                                                        && cell_ui
+                                                                            .rect_contains_pointer(
+                                                                                close_rect,
+                                                                            );
+
+                                                                    if hovered {
+                                                                        cell_ui
+                                                                            .painter()
+                                                                            .rect_stroke(
+                                                                                rect,
+                                                                                egui::CornerRadius::same(8),
+                                                                                egui::Stroke::new(
+                                                                                    1.0,
+                                                                                    rgb(self.theme.accent),
+                                                                                ),
+                                                                                egui::StrokeKind::Inside,
+                                                                            );
+                                                                    }
+
+                                                                    let mut remove_clicked = false;
+                                                                    let mut card_clicked = false;
+
+                                                                    if on_close {
+                                                                        let close_resp = cell_ui
+                                                                            .interact(
+                                                                                close_rect,
+                                                                                cell_ui.id().with((
+                                                                                    "remove_btn",
+                                                                                    idx,
+                                                                                )),
+                                                                                egui::Sense::click(),
+                                                                            )
+                                                                            .on_hover_text(
+                                                                                "Remove from history",
+                                                                            )
+                                                                            .on_hover_cursor(
+                                                                                egui::CursorIcon::PointingHand,
+                                                                            );
+                                                                        remove_clicked =
+                                                                            close_resp.clicked();
+                                                                    } else {
+                                                                        let card_resp = cell_ui
+                                                                            .interact(
+                                                                                rect,
+                                                                                cell_ui.id().with((
+                                                                                    "recent_card",
+                                                                                    idx,
+                                                                                )),
+                                                                                egui::Sense::click(),
+                                                                            )
+                                                                            .on_hover_text(
+                                                                                entry
+                                                                                    .path
+                                                                                    .to_string_lossy(),
+                                                                            )
+                                                                            .on_hover_cursor(
+                                                                                egui::CursorIcon::PointingHand,
+                                                                            );
+                                                                        card_clicked =
+                                                                            card_resp.clicked();
+                                                                    }
+
+                                                                    if hovered {
+                                                                        cell_ui
+                                                                            .painter()
+                                                                            .rect_filled(
+                                                                                close_rect,
+                                                                                4.0,
+                                                                                if on_close {
+                                                                                    rgb(self.theme.accent)
+                                                                                } else {
+                                                                                    rgb(self.theme.bg_canvas)
+                                                                                },
+                                                                            );
+                                                                        cell_ui.painter().text(
+                                                                            close_rect.center(),
+                                                                            egui::Align2::CENTER_CENTER,
+                                                                            "×",
+                                                                            egui::FontId::proportional(13.0),
+                                                                            rgb(self.theme.fg_primary),
+                                                                        );
+                                                                    }
+
+                                                                    (remove_clicked, card_clicked)
+                                                                },
+                                                            );
+
+                                                            let (remove_clicked, card_clicked) =
+                                                                cell.inner;
+                                                            if remove_clicked {
+                                                                file_to_remove =
+                                                                    Some(entry.path.clone());
+                                                            } else if card_clicked {
+                                                                file_to_open =
+                                                                    Some(entry.path.clone());
+                                                            }
+
+                                                            if (idx + 1) % cols == 0 {
+                                                                ui.end_row();
+                                                            }
+                                                        }
+                                                    });
+                                            } else {
+                                                // List
+                                                for (idx, entry) in
+                                                    self.app_state.recent_files.iter().enumerate()
+                                                {
+                                                    let row = egui::Frame::NONE
+                                                        .fill(rgb(self.theme.bg_panel))
+                                                        .stroke(egui::Stroke::new(
+                                                            1.0,
+                                                            rgb(self.theme.border),
+                                                        ))
+                                                        .corner_radius(egui::CornerRadius::same(6))
+                                                        .inner_margin(egui::Margin::symmetric(
+                                                            10, 6,
+                                                        ))
+                                                        .show(ui, |ui| {
+                                                            let mut remove_clicked = false;
+                                                            let mut close_rect = egui::Rect::NOTHING;
+
+                                                            ui.horizontal(|ui| {
+                                                                let row_h = 32.0;
+                                                                ui.set_min_height(row_h);
+
+                                                                ui.allocate_ui_with_layout(
+                                                                    egui::vec2(36.0, row_h),
+                                                                    egui::Layout::centered_and_justified(
+                                                                        egui::Direction::TopDown,
+                                                                    ),
+                                                                    |thumb_ui| {
+                                                                        if let Some((
+                                                                            texture,
+                                                                            (w, h),
+                                                                        )) = self
+                                                                            .home_thumb_cache
+                                                                            .get(&entry.path)
+                                                                        {
+                                                                            let max_w = 34.0_f32;
+                                                                            let max_h = 30.0_f32;
+                                                                            let scale = (max_w
+                                                                                / (*w as f32)
+                                                                                    .max(1.0))
+                                                                            .min(
+                                                                                max_h
+                                                                                    / (*h as f32)
+                                                                                        .max(1.0),
+                                                                            );
+                                                                            let size = egui::vec2(
+                                                                                *w as f32 * scale,
+                                                                                *h as f32 * scale,
+                                                                            );
+                                                                            thumb_ui.add(
+                                                                                egui::Image::new((
+                                                                                    texture.id(),
+                                                                                    size,
+                                                                                )),
+                                                                            );
+                                                                        } else if self
+                                                                            .home_thumb_pending
+                                                                            .contains(&entry.path)
+                                                                        {
+                                                                            thumb_ui.spinner();
+                                                                        }
+                                                                    },
+                                                                );
+
+                                                                ui.add_space(6.0);
+
+                                                                ui.add(
+                                                                    egui::Label::new(
+                                                                        egui::RichText::new(
+                                                                            truncate_filename(
+                                                                                &entry.name,
+                                                                                48,
+                                                                            ),
+                                                                        )
+                                                                        .size(12.5)
+                                                                        .strong()
+                                                                        .color(rgb(
+                                                                            self.theme.fg_primary,
+                                                                        )),
+                                                                    )
+                                                                    .truncate(),
+                                                                );
+
+                                                                ui.add_space(8.0);
+
+                                                                ui.label(
+                                                                    egui::RichText::new(format!(
+                                                                        "Page {} / {}",
+                                                                        entry.last_page,
+                                                                        entry.total_pages
+                                                                    ))
+                                                                    .size(10.0)
+                                                                    .color(rgb(
+                                                                        self.theme.fg_muted,
+                                                                    )),
+                                                                );
+
+                                                                ui.with_layout(
+                                                                    egui::Layout::right_to_left(
+                                                                        egui::Align::Center,
+                                                                    ),
+                                                                    |ui| {
+                                                                        let btn = ui
+                                                                            .small_button("×")
+                                                                            .on_hover_text(
+                                                                                "Remove from history",
+                                                                            )
+                                                                            .on_hover_cursor(
+                                                                                egui::CursorIcon::PointingHand,
+                                                                            );
+                                                                        close_rect = btn.rect;
+                                                                        if btn.clicked() {
+                                                                            remove_clicked = true;
+                                                                        }
+                                                                    },
+                                                                );
+                                                            });
+
+                                                            (remove_clicked, close_rect)
+                                                        });
+
+                                                    let row_rect = row.response.rect;
+                                                    let (remove_clicked, close_rect) = row.inner;
+                                                    let on_close =
+                                                        ui.rect_contains_pointer(close_rect);
+
+                                                    if remove_clicked {
                                                         file_to_remove = Some(entry.path.clone());
+                                                    } else if !on_close {
+                                                        let row_resp = ui
+                                                            .interact(
+                                                                row_rect,
+                                                                ui.id()
+                                                                    .with(("recent_row", idx)),
+                                                                egui::Sense::click(),
+                                                            )
+                                                            .on_hover_text(
+                                                                entry.path.to_string_lossy(),
+                                                            )
+                                                            .on_hover_cursor(
+                                                                egui::CursorIcon::PointingHand,
+                                                            );
+
+                                                        if row_resp.clicked() {
+                                                            file_to_open = Some(entry.path.clone());
+                                                        }
                                                     }
-                                                });
-                                                ui.add_space(3.0);
+
+                                                    if ui.rect_contains_pointer(row_rect) {
+                                                        ui.painter().rect_stroke(
+                                                            row_rect,
+                                                            egui::CornerRadius::same(6),
+                                                            egui::Stroke::new(
+                                                                1.0,
+                                                                rgb(self.theme.accent),
+                                                            ),
+                                                            egui::StrokeKind::Inside,
+                                                        );
+                                                    }
+                                                    ui.add_space(4.0);
+                                                }
                                             }
                                         });
                                 }
-                            });
-                    });
 
+                                ui.add_space(32.0);
+                            });
+                    
+                    
+                    // 4. Actions
                     if let Some(p) = file_to_remove {
                         self.app_state.remove_recent(&p);
                     }
+
                     if let Some(p) = file_to_open {
                         self.open_pdf_user(p, ui.ctx());
                     }
+
                     return;
                 }
-                
                 let visible_w = ui.available_width();
                 let visible_h = ui.available_height();
 

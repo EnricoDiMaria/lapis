@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The sheet scales with the panel, so drawings look the same in a very narrow or a very wide panel;
   `Ctrl + wheel` or pinch zooms the sheet. Sketches are saved with the document (notes data, backup and
   PDF trailer) and follow their page when pages are inserted, deleted or reordered.
+- **Complete Home Screen Redesign.** Redesigned *Open PDF* and *Blank Notebook* cards with stable borders, dedicated Nerd Font icons (`󰝰` and `󰎔`), and optimized click targets. **Grid & List Views:** Introduced toggle views for *Recent documents* (grid view with flush thumbnails, progress bars; and list view with full-row click targets).
 
 
 ## [1.2.1] - 2026/11/06 

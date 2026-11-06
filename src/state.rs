@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::ZoomMode;
 use crate::ViewMode;
 
-const MAX_RECENT_FILES: usize = 12;
+const MAX_RECENT_FILES: usize = 15;
 
  
 /// The time window within which the second button of a combo must follow the first.
@@ -284,7 +284,6 @@ pub fn consume(&self, i: &mut egui::InputState) -> bool {
         let recent = |ts: f64| now - ts <= CHORD_WINDOW_SECS;
  
         let extra_ok = held_extra || t.last_press.get(&ek).map(|&ts| recent(ts)).unwrap_or(false);
-        // I modificatori valgono se tenuti adesso OPPURE se lo erano da poco
         let ctrl_ok = !self.ctrl || cur_ctrl || recent(t.last_ctrl);
         let alt_ok = !self.alt || cur_alt || recent(t.last_alt);
         let shift_ok = !self.shift || cur_shift || recent(t.last_shift);
@@ -556,9 +555,15 @@ impl Default for AppSettings {
 #[serde(default)]
 pub struct AppState {
     pub recent_files: VecDeque<RecentFileEntry>,
+    #[serde(default = "default_home_grid_view")]
+    pub home_grid_view: bool,
     pub export_settings: ExportSettings,
     pub shortcuts: ShortcutsConfig,
     pub settings: AppSettings,
+}
+
+fn default_home_grid_view() -> bool {
+    true
 }
 
 impl AppState {
@@ -575,7 +580,10 @@ impl AppState {
                 return state;
             }
         }
-        Self::default()
+        Self {
+            home_grid_view: true,
+            ..Self::default()
+        }
     }
 
     pub fn save(&self) {

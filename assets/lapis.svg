@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <clipPath id="eraserClip"><path d="M 226 32 C 226 -2 334 -2 334 32 V 76 H 226 Z" /></clipPath>
+  </defs>
+  <g>
+    <path d="M 88 52 H 284 L 380 148 V 432 C 380 454 362 472 340 472 H 88 C 66 472 48 454 48 432 V 92 C 48 70 66 52 88 52 Z" fill="#e6e9ef" stroke="#89b4fa" stroke-width="8" stroke-linejoin="round" />
+    <path d="M 284 52 V 120 C 284 135.46 296.54 148 312 148 H 380 Z" fill="#89b4fa" />
+    <rect x="88" y="96" width="148" height="24" rx="12" fill="#1e3a8a" />
+    <rect x="88" y="142" width="148" height="100" rx="16" fill="#cdd6f4" />
+    <path d="M 108 218 L 142 178 L 174 202 L 210 164" fill="none" stroke="#1e3a8a" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="210" cy="164" r="9" fill="#f38ba8" />
+    <path d="M 132 268 H 94 L 116 294 L 94 320 H 132" fill="none" stroke="#1e3a8a" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="152" y1="286" x2="176" y2="286" stroke="#7f849c" stroke-width="9" stroke-linecap="round" />
+    <line x1="152" y1="304" x2="176" y2="304" stroke="#7f849c" stroke-width="9" stroke-linecap="round" />
+  </g>
+  <path d="M 82 396 C 96 348, 122 408, 146 374" fill="none" stroke="#2563eb" stroke-width="22" stroke-linecap="round" />
+  <g transform="translate(280, 240) rotate(45) translate(-280, -240)">
+    <g clip-path="url(#eraserClip)">
+      <rect x="226" y="-10" width="34" height="90" fill="#f5c2e7" />
+      <rect x="260" y="-10" width="40" height="90" fill="#f38ba8" />
+      <rect x="300" y="-10" width="34" height="90" fill="#eba0ac" />
+    </g>
+    <rect x="226" y="70" width="34" height="36" fill="#bac2de" />
+    <rect x="260" y="70" width="40" height="36" fill="#9399b2" />
+    <rect x="300" y="70" width="34" height="36" fill="#7f849c" />
+    <path d="M 226 106 H 260 V 330 L 226 316 Z" fill="#f9e2af" />
+    <path d="M 260 106 H 300 V 330 C 287 338 273 338 260 330 Z" fill="#fab387" />
+    <path d="M 300 106 H 334 V 316 L 300 330 Z" fill="#f29b6e" />
+    <path d="M 226 316 L 260 330 Q 280 338 300 330 L 334 316 L 280 430 Z" fill="#e6ccb2" />
+    <path d="M 300 330 L 334 316 L 280 430 Z" fill="#d4b499" />
+    <path d="M 226 316 L 260 330 L 280 430 Z" fill="#f5ebe0" />
+    <path d="M 255 377 Q 280 385 305 377 L 283 425 C 281.5 429 278.5 429 277 425 Z" fill="#1e3a8a" />
+    <path d="M 255 377 Q 268 381 280 381 L 278 426 Z" fill="#3b82f6" />
+  </g>
+</svg>
