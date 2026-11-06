@@ -344,6 +344,7 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `Alt + 4` | Slideshow |
 | `Alt + 5` | Slideshow + Notes |
 | `C` | Toggle Continuous / Single Page when not typing |
+| `Alt + S` | Open / close the Sketch tab of the notes panel |
 | `F11` | Toggle fullscreen (also outside slideshow) |
 | `PageUp` | Previous page |
 | `PageDown` | Next page |
@@ -397,7 +398,7 @@ The result is a single study document combining the original lecture material, y
 
 **Study tools**
 
-- [ ] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
+- [X] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
 - [ ] Fix textboxes rendered under screenshots
 - [ ] Improve flashcards
 

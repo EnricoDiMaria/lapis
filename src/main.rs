@@ -15,6 +15,7 @@ mod dialogs;
 use dialogs::{AsrRetry, DialogKind, DialogSpec, Dialogs};
 mod export;
 mod notes;
+mod sketch;
 mod theme;
 use theme::{rgb, SuiteTheme};
 mod state;
@@ -288,7 +289,10 @@ fn scan_storage(
             r.notes_count = data.as_ref().map(|d| d.notes.len()).unwrap_or(0);
             r.ann_count = data
                 .as_ref()
-                .map(|d| d.annotations.values().map(|v| v.len()).sum())
+                .map(|d| {
+                    d.annotations.values().map(|v| v.len()).sum::<usize>()
+                        + d.sketches.values().map(|s| s.strokes.len()).sum::<usize>()
+                })
                 .unwrap_or(0);
             r.src = data.as_ref().and_then(|d| d.source_path.clone());
             r.backup_path = Some(path);
@@ -373,7 +377,7 @@ fn scan_storage(
 fn storage_clear_notes(en: &StorageEntry) -> std::io::Result<()> {
     match (&en.pdf_path, en.pdf_exists) {
         (Some(p), true) => {
-            notes::save_doc_data(p, &HashMap::new(), &HashMap::new(), HashSet::new())
+            notes::save_doc_data(p, &HashMap::new(), &HashMap::new(), HashSet::new(), &HashMap::new())
         }
         _ => match &en.backup_path {
             Some(b) if b.exists() => std::fs::remove_file(b),
@@ -1067,6 +1071,8 @@ struct TocItem {
 enum NoteMode {
     Edit,
     Preview,
+    /// Per-page scratchpad (see `sketch.rs`).
+    Sketch,
 }
 
 /// Text of every slide (PDF text + the user's note for that slide), used to align the transcript.
@@ -1289,6 +1295,9 @@ struct Lapis {
     pdf_full_text_index: HashMap<u32, String>,
     spellchecker: spellcheck::SpellChecker,
     blank_pages: std::collections::HashSet<u32>,
+    /// Per-page sketch sheets shown in the notes panel "Sketch" tab.
+    sketches: HashMap<u32, notes::SketchPage>,
+    sketch: sketch::SketchState,
     split_view_enabled: bool,
     split_secondary_page: u32,
     split_secondary_zoom: f32,
@@ -1470,6 +1479,8 @@ impl Lapis {
             pdf_full_text_index: HashMap::new(),
             spellchecker,
             blank_pages: HashSet::new(),
+            sketches: HashMap::new(),
+            sketch: sketch::SketchState::default(),
             split_view_enabled: false,
             split_secondary_page: 1,
             split_secondary_zoom: 1.0,
@@ -1872,9 +1883,44 @@ impl Lapis {
             .insert(self.note_page, self.current_note.clone());
     }
 
-    let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+    let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
     self.note_is_dirty = false;
 }
+
+    /// Persist notes, annotations and sketches (after a change made in the Sketch tab).
+    fn save_sketch_data(&self) {
+        let _ = notes::save_doc_data(
+            &self.pdf_path,
+            &self.notes,
+            &self.annotations,
+            self.blank_pages.clone(),
+            &self.sketches,
+        );
+    }
+
+    /// Finish a text box that is still being typed in the Sketch tab (before the page
+    /// structure changes, the document is closed, ...).
+    fn finish_sketch_edit(&mut self) {
+        if self.sketch.commit_pending(&mut self.sketches) {
+            self.save_sketch_data();
+        }
+    }
+
+    /// Show the Sketch tab (opening the notes panel if needed), or go back to Edit.
+    fn toggle_sketch_tab(&mut self) {
+        if self.show_notes && self.note_mode == NoteMode::Sketch {
+            self.note_mode = NoteMode::Edit;
+            self.focus_note_editor = true;
+        } else {
+            self.show_notes = true;
+            self.note_mode = NoteMode::Sketch;
+        }
+    }
+
+    /// Ctrl+Z / Ctrl+Y act on the sketch when it was the last thing drawn on.
+    fn sketch_receives_undo(&self) -> bool {
+        self.show_notes && self.note_mode == NoteMode::Sketch && self.sketch.focus
+    }
 
     fn start_export(&mut self, ctx: &egui::Context) {
         if self.is_exporting {
@@ -1952,7 +1998,7 @@ impl Lapis {
                     .cloned()
                     .unwrap_or_default();
                 self.note_is_dirty = false;
-                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
 
                 self.show_notes = true;
 
@@ -2695,6 +2741,8 @@ fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.revealed_tapes.clear();
         self.laser_trail.clear();
         self.blank_pages = doc_data.blank_pages;
+        self.sketches = doc_data.sketches;
+        self.sketch.reset();
         let saved_entry = self.app_state.find_entry(&path).cloned();
         let start_page = saved_entry
             .as_ref()
@@ -2782,6 +2830,7 @@ fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
         if !self.has_pdf() {
             return;
         }
+        self.finish_sketch_edit();
         self.sync_and_save();
         self.save_session_state();
 
@@ -2807,6 +2856,8 @@ fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.render_rx = channel::<WorkerMsg>().1;
         self.notes.clear();
         self.annotations.clear();
+        self.sketches.clear();
+        self.sketch.reset();
         self.current_note.clear();
         self.selected_textbox = None;
         self.is_rendering = false;
@@ -4035,6 +4086,7 @@ fn render_page_textboxes(&mut self, ui: &mut egui::Ui, page: u32, page_rect: egu
             &self.notes,
             &self.annotations,
             self.blank_pages.clone(),
+            &self.sketches,
         );
     }
 }
@@ -4377,6 +4429,7 @@ fn handle_slide_annotations(
                                 &self.notes,
                                 &self.annotations,
                                 self.blank_pages.clone(),
+                                &self.sketches,
                             );
                         }
                     }
@@ -4520,6 +4573,7 @@ fn handle_slide_annotations(
                             &self.notes,
                             &self.annotations,
                             self.blank_pages.clone(),
+                            &self.sketches,
                         );
                     }
                 }
@@ -6420,6 +6474,7 @@ fn handle_slide_annotations(
             ("mode_toggle_cont_single", "󰍜  Toggle Continuous / Single Page [C]", "View"),
             ("mode_slideshow", "󰐨  Enter Presentation / Slideshow Mode", "View"),
             ("toggle_fullscreen", "󰊓  Toggle Fullscreen [F11]", "View"),
+            ("toggle_sketch", "󰠱  Toggle Sketch (page scratchpad) [Alt+S]", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             ("insert_blank", "󰐕  Insert Blank Ruled Page After Current Slide", "Document"),
             ("delete_page", "󰆴  Delete Current Page from PDF", "Document"),
@@ -6591,6 +6646,7 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
                 }
             }
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
+            "toggle_sketch" => self.toggle_sketch_tab(),
             "toggle_fullscreen" => {
                 if !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
                     self.user_fullscreen = !self.user_fullscreen;
@@ -9379,6 +9435,7 @@ fn insert_blank_page_after(&mut self, after_page: u32, style: notes::BlankPageSt
         if !self.has_pdf() {
             return;
         }
+        self.finish_sketch_edit();
         self.sync_and_save();
         // Release worker file handles before rewriting the PDF.
         self.render_tx = channel::<RenderRequest>().0;
@@ -9390,8 +9447,10 @@ fn insert_blank_page_after(&mut self, after_page: u32, style: notes::BlankPageSt
                     &mut self.notes,
                     &mut self.annotations,
                     &mut self.blank_pages,
+                    &mut self.sketches,
                     new_page_num,
                 );
+                self.sketch.reset();
                 if !self.blank_pages.contains(&new_page_num) {
                     self.blank_pages.insert(new_page_num);
                 }
@@ -9427,6 +9486,7 @@ fn insert_blank_page_after(&mut self, after_page: u32, style: notes::BlankPageSt
                     &updated_notes,
                     &updated_annotations,
                     updated_blank_pages.clone(),
+                    &self.sketches,
                 );
                 self.save_session_state();
 
@@ -9438,6 +9498,7 @@ fn insert_blank_page_after(&mut self, after_page: u32, style: notes::BlankPageSt
                     &self.notes,
                     &self.annotations,
                     self.blank_pages.clone(),
+                    &self.sketches,
                 );
                 if self.current_page >= new_page_num { self.current_page += 1; }
                 if self.target_page >= new_page_num { self.target_page += 1; }
@@ -9500,6 +9561,7 @@ fn delete_pdf_page_and_shift_data(&mut self, page_to_del: u32, ctx: &egui::Conte
         return;
     }
 
+    self.finish_sketch_edit();
     self.sync_and_save();
     // Close worker channels that may still hold the PDF open.
     self.render_tx = channel::<RenderRequest>().0;
@@ -9522,6 +9584,9 @@ fn delete_pdf_page_and_shift_data(&mut self, page_to_del: u32, ctx: &egui::Conte
             self.annotations = std::mem::take(&mut self.annotations).into_iter()
                 .filter_map(|(p, v)| shift(p).map(|np| (np, v))).collect();
             self.blank_pages = self.blank_pages.iter().copied().filter_map(shift).collect();
+            self.sketches = std::mem::take(&mut self.sketches).into_iter()
+                .filter_map(|(p, v)| shift(p).map(|np| (np, v))).collect();
+            self.sketch.reset();
             self.hidden_pages = self.hidden_pages.iter().copied().filter_map(shift).collect();
             self.user_bookmarks.retain_mut(|bm| match shift(bm.page) {
                 Some(np) => { bm.page = np; true }, None => false,
@@ -9556,7 +9621,7 @@ fn delete_pdf_page_and_shift_data(&mut self, page_to_del: u32, ctx: &egui::Conte
             self.revealed_tapes.clear();
             self.selected_image = None;
             self.pending_delete_page = None;
-            let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+            let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
             self.refresh_pdf_after_page_structure_change(ctx);
             self.toast_message = Some((format!("󰆴 Deleted page {}", page_to_del), std::time::Instant::now()));
         }
@@ -9571,6 +9636,7 @@ fn reorder_pdf_page(&mut self, from_page: u32, to_page: u32, ctx: &egui::Context
     if !self.has_pdf() || from_page == to_page || from_page == 0 || to_page == 0
         || from_page > self.total_pages || to_page > self.total_pages { return; }
 
+    self.finish_sketch_edit();
     self.sync_and_save();
     self.render_tx = channel::<RenderRequest>().0;
     self.thumb_tx = channel::<RenderRequest>().0;
@@ -9587,6 +9653,8 @@ fn reorder_pdf_page(&mut self, from_page: u32, to_page: u32, ctx: &egui::Context
             self.notes = std::mem::take(&mut self.notes).into_iter().map(|(p,v)| (remap(p),v)).collect();
             self.annotations = std::mem::take(&mut self.annotations).into_iter().map(|(p,v)| (remap(p),v)).collect();
             self.blank_pages = self.blank_pages.iter().copied().map(remap).collect();
+            self.sketches = std::mem::take(&mut self.sketches).into_iter().map(|(p,v)| (remap(p),v)).collect();
+            self.sketch.reset();
             self.hidden_pages = self.hidden_pages.iter().copied().map(remap).collect();
             for bm in &mut self.user_bookmarks { bm.page = remap(bm.page); }
             self.audio_index.for_each_page_mut(|p| *p = remap(*p));
@@ -9612,7 +9680,7 @@ fn reorder_pdf_page(&mut self, from_page: u32, to_page: u32, ctx: &egui::Context
             if let Some((p, a, b)) = self.active_snip_rect { self.active_snip_rect = Some((remap(p), a, b)); }
             self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
             self.note_is_dirty = false;
-            let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+            let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
             self.save_session_state();
             self.refresh_pdf_after_page_structure_change(ctx);
             self.toast_message = Some((format!("󰄬 Moved page {from_page} to position {to_page}"), std::time::Instant::now()));
@@ -9677,6 +9745,8 @@ fn refresh_pdf_after_page_structure_change(&mut self, ctx: &egui::Context) {
 }
 
 fn push_undo_snapshot(&mut self, page: u32) {
+        // A slide annotation is now the last thing drawn on: Ctrl+Z goes back to the slides.
+        self.sketch.focus = false;
         let current_state = self.annotations.get(&page).cloned().unwrap_or_default();
         let stack = self.undo_stack.entry(page).or_default();
         // Cap history to 40 steps per page to keep RAM negligible
@@ -9689,6 +9759,13 @@ fn push_undo_snapshot(&mut self, page: u32) {
     }
 
     fn undo_annotation(&mut self, page: u32) {
+        if self.sketch_receives_undo() {
+            if self.sketch.undo(self.note_page, &mut self.sketches) {
+                self.save_sketch_data();
+                self.toast_message = Some(("󰕌 Undo sketch".to_string(), std::time::Instant::now()));
+            }
+            return;
+        }
         if let Some(stack) = self.undo_stack.get_mut(&page) {
             if let Some(prev_state) = stack.pop() {
                 let current_state = self.annotations.get(&page).cloned().unwrap_or_default();
@@ -9699,7 +9776,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                     self.annotations.insert(page, prev_state);
                 }
                 self.selected_textbox = None;
-                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
                 self.toast_message = Some((
                     "󰕌 Undo annotation".to_string(),
                     std::time::Instant::now(),
@@ -9709,13 +9786,20 @@ fn push_undo_snapshot(&mut self, page: u32) {
     }
 
     fn redo_annotation(&mut self, page: u32) {
+        if self.sketch_receives_undo() {
+            if self.sketch.redo(self.note_page, &mut self.sketches) {
+                self.save_sketch_data();
+                self.toast_message = Some(("󰑎 Redo sketch".to_string(), std::time::Instant::now()));
+            }
+            return;
+        }
         if let Some(stack) = self.redo_stack.get_mut(&page) {
             if let Some(next_state) = stack.pop() {
                 let current_state = self.annotations.get(&page).cloned().unwrap_or_default();
                 self.undo_stack.entry(page).or_default().push(current_state);
                 self.annotations.insert(page, next_state);
                 self.selected_textbox = None;
-                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone());
+                let _ = notes::save_doc_data(&self.pdf_path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches);
                 self.toast_message = Some((
                     "󰑎 Redo annotation".to_string(),
                     std::time::Instant::now(),
@@ -10568,6 +10652,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                                 &self.notes,
                                                 &self.annotations,
                                                 self.blank_pages.clone(),
+                                                &self.sketches,
                                             );
                                         }
 
@@ -11179,6 +11264,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
             &self.notes,
             &self.annotations,
             self.blank_pages.clone(),
+            &self.sketches,
         );
         self.toast_message = Some((
             format!("Screenshot added to page {page}"),
@@ -11489,6 +11575,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                         &self.notes,
                         &self.annotations,
                         self.blank_pages.clone(),
+                        &self.sketches,
                     );
                 }
             }
@@ -11522,6 +11609,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     &self.notes,
                     &self.annotations,
                     self.blank_pages.clone(),
+                    &self.sketches,
                 );
             }
         }
@@ -11809,15 +11897,17 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
 
             // Responsive 22 px toolbar: navigation left, Edit and Preview right.
             let avail_w = notes_rect.width();
-            let compact_mode = avail_w < 257.0; // Show icons only in compact mode.
+            let compact_mode = avail_w < 300.0; // Show icons only in compact mode.
             let ultra_narrow = avail_w < 171.0; // Hide page arrows in narrow mode.
+            let tiny = avail_w < 150.0; // Also hide the lock and use slimmer tab buttons.
+            let tab_icon_w = if tiny { 20.0 } else { 24.0 };
 
             ui.horizontal(|ui| {
                 ui.set_height(22.0);
                 ui.spacing_mut().item_spacing.x = 3.0;
 
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
-                if ui
+                if !tiny && ui
                     .add_sized(
                         [22.0, 20.0],
                         egui::Button::new(egui::RichText::new(lock_icon).size(12.0))
@@ -11875,8 +11965,27 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
 
+                    // Tabs from right to left: Sketch, Preview, Edit.
+                    let (sketch_label, sketch_w) = if compact_mode {
+                        ("󰠱", tab_icon_w)
+                    } else {
+                        ("󰠱 Sketch", 66.0)
+                    };
+
+                    if ui
+                        .add_sized(
+                            [sketch_w, 20.0],
+                            egui::Button::new(egui::RichText::new(sketch_label).size(11.5))
+                                .selected(self.note_mode == NoteMode::Sketch),
+                        )
+                        .on_hover_text("Sketch: a scratchpad for this page")
+                        .clicked()
+                    {
+                        self.note_mode = NoteMode::Sketch;
+                    }
+
                     let (prev_label, prev_w) = if compact_mode {
-                        ("󰈈", 24.0)
+                        ("󰈈", tab_icon_w)
                     } else {
                         ("󰈈 Preview", 68.0)
                     };
@@ -11894,7 +12003,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     }
 
                     let (edit_label, edit_w) = if compact_mode {
-                        ("󰏫", 24.0)
+                        ("󰏫", tab_icon_w)
                     } else {
                         ("󰏫 Edit", 56.0)
                     };
@@ -11923,6 +12032,13 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     egui::Stroke::new(1.0, rgb(self.theme.border)),
                     egui::Margin::same(10),
                 )
+            } else if self.note_mode == NoteMode::Sketch {
+                // The sheet needs every pixel of a narrow panel.
+                (
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::NONE,
+                    egui::Margin::same(2),
+                )
             } else {
                 (
                     egui::Color32::TRANSPARENT,
@@ -11938,6 +12054,14 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 .corner_radius(egui::CornerRadius::same(self.theme.corner_radius))
                 .inner_margin(notes_margin)
                 .show(ui, |ui| {
+                    if self.note_mode == NoteMode::Sketch {
+                        let sketch_page = self.note_page;
+                        if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches) {
+                            self.save_sketch_data();
+                        }
+                        return;
+                    }
+
                     let scroll_id = ui.make_persistent_id("notes_scroll");
                     let anim_scroll_id = ui.make_persistent_id("notes_anim_scroll_target");
 
@@ -12281,6 +12405,9 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                 self.clipboard.set_text(&text);
                             }
                         }
+
+                        // Handled before the scroll area (the sheet has its own scrolling).
+                        NoteMode::Sketch => {}
 
                         NoteMode::Preview => {
                             if self.current_note.trim().is_empty() {
@@ -12867,11 +12994,21 @@ impl eframe::App for Lapis {
         let any_focused = ui.ctx().memory(|m| m.focused().is_some());
         let note_editor_focused = ui.ctx().memory(|m| m.has_focus(text_edit_id));
 
+        // Leaving the Sketch tab (or hiding the notes) finishes an open text box.
+        let sketch_visible = self.show_notes && self.note_mode == NoteMode::Sketch;
+        if !sketch_visible {
+            self.sketch.hovered = false;
+            self.finish_sketch_edit();
+        }
+        // Pinch / Ctrl + wheel over the sheet zooms the sheet, not the PDF.
+        let sketch_hover = sketch_visible && self.sketch.hovered;
+
         let mut act_prev_page = false;
         let mut act_next_page = false;
         let mut act_save = false;
         let mut act_toggle_notes = false;
         let mut act_toggle_mode = false;
+        let mut act_toggle_sketch = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
@@ -12880,7 +13017,9 @@ impl eframe::App for Lapis {
         ui.input_mut(|i| {
             // 1. Trackpad pinch or Ctrl + wheel zoom
             let z_delta = i.zoom_delta();
-            if (z_delta - 1.0).abs() > 1e-4 {
+            if sketch_hover {
+                // Handled by the sketch sheet.
+            } else if (z_delta - 1.0).abs() > 1e-4 {
                 self.enter_custom_zoom();
                 let old = self.zoom_scale;
                 self.zoom_scale = (self.zoom_scale * z_delta).clamp(0.3, 3.0);
@@ -12937,6 +13076,9 @@ impl eframe::App for Lapis {
                 }
             if sc.toggle_notes.consume(i) {
                     act_toggle_notes = true;
+                }
+            if sc.toggle_sketch.consume(i) {
+                    act_toggle_sketch = true;
                 }
             if sc.toggle_outline.consume(i) {
                     act_toggle_toc = true;
@@ -13111,10 +13253,13 @@ impl eframe::App for Lapis {
                 self.focus_note_editor = true;
             }
         }
+        if act_toggle_sketch {
+            self.toggle_sketch_tab();
+        }
         if act_toggle_mode && self.show_notes {
             self.note_mode = match self.note_mode {
                 NoteMode::Edit => NoteMode::Preview,
-                NoteMode::Preview => NoteMode::Edit,
+                NoteMode::Preview | NoteMode::Sketch => NoteMode::Edit,
             };
             if self.note_mode == NoteMode::Edit {
                 self.focus_note_editor = true;

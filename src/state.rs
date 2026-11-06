@@ -320,7 +320,7 @@ pub fn consume(&self, i: &mut egui::InputState) -> bool {
 
 }
 
-pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 16] {
+pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 17] {
     [
         ("Save notes", &mut cfg.save_notes),
         ("Toggle notes panel", &mut cfg.toggle_notes),
@@ -338,6 +338,7 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
         ("Radial tools menu", &mut cfg.radial_tools_menu),
         ("Toggle fullscreen", &mut cfg.toggle_fullscreen),
         ("Toggle Continuous / Single page", &mut cfg.toggle_continuous_single),
+        ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
     ]
 }
  
@@ -449,6 +450,7 @@ pub struct ShortcutsConfig {
     pub radial_tools_menu: ShortcutBinding,
     pub toggle_fullscreen: ShortcutBinding,
     pub toggle_continuous_single: ShortcutBinding,
+    pub toggle_sketch: ShortcutBinding,
 }
 
 impl Default for ShortcutsConfig {
@@ -470,6 +472,7 @@ impl Default for ShortcutsConfig {
             radial_tools_menu: ShortcutBinding::new(false, false, false, "Z"),
             toggle_fullscreen: ShortcutBinding::new(false, false, false, "F11"),
             toggle_continuous_single: ShortcutBinding::new(false, false, false, "C"),
+            toggle_sketch: ShortcutBinding::new(false, true, false, "S"),
         }
     }
 }

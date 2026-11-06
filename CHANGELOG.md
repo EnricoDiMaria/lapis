@@ -4,6 +4,19 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Sketch: a scratchpad for every page.** A new **Sketch** tab in the notes panel, next to Edit and
+  Preview, gives each PDF page its own page-like canvas (`Alt + S`, configurable, also in the Command
+  Palette). It has its own toolbar (pen, eraser, line, arrow, rectangle, circle, text, colors, sizes,
+  undo / redo) and a menu for the paper (blank, ruled, grid, dotted), portrait / landscape and zoom.
+  The sheet scales with the panel, so drawings look the same in a very narrow or a very wide panel;
+  `Ctrl + wheel` or pinch zooms the sheet. Sketches are saved with the document (notes data, backup and
+  PDF trailer) and follow their page when pages are inserted, deleted or reordered.
+
+
 ## [1.2.1] - 2026/11/06 
 
 ### Added
@@ -13,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wanted state changes, and changes made from outside (e.g. a Hyprland keybinding) are followed,
   so fullscreen works in tiling compositors.
 - Key `C` toggles between Continuous and Single Page view (configurable, also in the Command Palette).
-
 - **Syntax highlighting for many more languages** in fenced code blocks (C/C++, Java, Go, JavaScript,
   Python, Ruby, PHP, SQL, shell, Haskell, Lua, Scala, ... through syntect). Common aliases such as
   `ts`, `tsx`, `jsx`, `kotlin`, `zsh` or `postgres` map to the closest available syntax.

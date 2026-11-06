@@ -43,6 +43,50 @@ fn default_textbox_size() -> f32 {
 
 pub const DEFAULT_ANNOTATION_STROKE_WIDTH: f32 = 2.5;
 
+/// Height / width of a new sketch sheet (portrait, A4-like).
+pub const SKETCH_DEFAULT_ASPECT: f32 = 1.4142;
+
+fn default_sketch_aspect() -> f32 {
+    SKETCH_DEFAULT_ASPECT
+}
+
+fn default_sketch_paper() -> BlankPageStyle {
+    BlankPageStyle::Blank
+}
+
+/// Free-hand scratchpad attached to one PDF page, shown in the notes panel ("Sketch" tab).
+/// Strokes use the same normalized 0..1 coordinates as [`PageAnnotation`], relative to the
+/// sheet, so the drawing looks the same at any panel width.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SketchPage {
+    #[serde(default = "default_sketch_paper")]
+    pub paper: BlankPageStyle,
+    /// Sheet height / width.
+    #[serde(default = "default_sketch_aspect")]
+    pub aspect: f32,
+    #[serde(default)]
+    pub strokes: Vec<PageAnnotation>,
+}
+
+impl SketchPage {
+    pub fn new(paper: BlankPageStyle, aspect: f32) -> Self {
+        Self { paper, aspect, strokes: Vec::new() }
+    }
+
+    /// Nothing worth saving: no strokes and the default sheet.
+    pub fn is_default(&self) -> bool {
+        self.strokes.is_empty()
+            && self.paper == BlankPageStyle::Blank
+            && (self.aspect - SKETCH_DEFAULT_ASPECT).abs() < 0.01
+    }
+}
+
+impl Default for SketchPage {
+    fn default() -> Self {
+        Self::new(BlankPageStyle::Blank, SKETCH_DEFAULT_ASPECT)
+    }
+}
+
 fn default_annotation_stroke_width() -> f32 {
     DEFAULT_ANNOTATION_STROKE_WIDTH
 }
@@ -55,6 +99,9 @@ pub struct DocData {
     pub annotations: HashMap<u32, Vec<PageAnnotation>>,
     #[serde(default)] 
     pub blank_pages: std::collections::HashSet<u32>,
+    /// Per-page sketch sheets (notes panel "Sketch" tab).
+    #[serde(default)]
+    pub sketches: HashMap<u32, SketchPage>,
     #[serde(default)]
     pub source_path: Option<PathBuf>,
     /// Stable document identity (see docid.rs). Travels with the PDF.
@@ -490,6 +537,7 @@ pub fn parse_doc_data_bytes(bytes: &[u8]) -> Option<DocData> {
     
     data.notes.retain(|_, v| !v.trim().is_empty());
     data.annotations.retain(|_, v| !v.is_empty());
+    data.sketches.retain(|_, s| !s.is_default());
     
     Some(data)
 }
@@ -555,13 +603,16 @@ fn same_content(a: &DocData, b: &DocData) -> bool {
     a.blank_pages == b.blank_pages
         && serde_json::to_value(&a.notes).ok() == serde_json::to_value(&b.notes).ok()
         && serde_json::to_value(&a.annotations).ok() == serde_json::to_value(&b.annotations).ok()
+        && serde_json::to_value(&a.sketches).ok() == serde_json::to_value(&b.sketches).ok()
 }
 
 /// When one version wins over the other, the loser is kept (if different and not empty) as
 /// `notes/<id>.conflict-<ms>.bak` (newest 5 kept) so a wrong choice never loses data.
 /// The `.bak` extension keeps these files out of the storage manager list.
 fn stash_conflict(key: &str, lost: &DocData, kept: &DocData) {
-    if (lost.notes.is_empty() && lost.annotations.is_empty()) || same_content(lost, kept) {
+    if (lost.notes.is_empty() && lost.annotations.is_empty() && lost.sketches.is_empty())
+        || same_content(lost, kept)
+    {
         return;
     }
     let dir = get_backup_dir();
@@ -692,6 +743,7 @@ pub fn save_doc_data(
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
     blank_pages: std::collections::HashSet<u32>,
+    sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() {
         return Ok(());
@@ -706,11 +758,15 @@ pub fn save_doc_data(
     let mut clean_pages: HashSet<u32> = blank_pages.clone();
     clean_pages.retain(|&v| v != 0);
 
+    let mut clean_sketches = sketches.clone();
+    clean_sketches.retain(|&k, s| k != 0 && !s.is_default());
+
     let rev = next_rev(pdf_path);
     let data = DocData {
         notes: clean_notes,
         annotations: clean_anns,
         blank_pages: clean_pages,
+        sketches: clean_sketches,
         doc_id: Some(crate::docid::resolve_key(pdf_path)),
         rev,
         ..Default::default()
@@ -1368,6 +1424,7 @@ pub fn shift_doc_data_on_insert(
     notes: &mut HashMap<u32, String>,
     annotations: &mut HashMap<u32, Vec<PageAnnotation>>,
     blank_pages: &mut std::collections::HashSet<u32>,
+    sketches: &mut HashMap<u32, SketchPage>,
     inserted_page: u32,
 ) {
     let mut new_notes = HashMap::with_capacity(notes.len());
@@ -1381,6 +1438,12 @@ pub fn shift_doc_data_on_insert(
         new_anns.insert(if k >= inserted_page { k + 1 } else { k }, v);
     }
     *annotations = new_anns;
+
+    let mut new_sketches = HashMap::with_capacity(sketches.len());
+    for (k, v) in sketches.drain() {
+        new_sketches.insert(if k >= inserted_page { k + 1 } else { k }, v);
+    }
+    *sketches = new_sketches;
 
     let mut new_blanks = std::collections::HashSet::with_capacity(blank_pages.len() + 1);
     for k in blank_pages.drain() {
@@ -1832,6 +1895,40 @@ pub fn prepare_image_xobjects(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sketches_follow_pages_when_a_page_is_inserted() {
+        let mut notes = HashMap::new();
+        let mut anns = HashMap::new();
+        let mut blanks = HashSet::new();
+        let mut sketches = HashMap::new();
+        for p in [1u32, 2, 3] {
+            let mut sk = SketchPage::default();
+            sk.aspect = 1.0 + p as f32; // marker to recognise the sheet after the shift
+            sketches.insert(p, sk);
+        }
+        shift_doc_data_on_insert(&mut notes, &mut anns, &mut blanks, &mut sketches, 2);
+        let mut keys: Vec<u32> = sketches.keys().copied().collect();
+        keys.sort();
+        assert_eq!(keys, vec![1, 3, 4]);
+        assert_eq!(sketches[&1].aspect, 2.0);
+        assert_eq!(sketches[&3].aspect, 3.0);
+        assert_eq!(sketches[&4].aspect, 4.0);
+    }
+
+    #[test]
+    fn default_sketch_is_not_saved_but_a_drawn_one_is() {
+        let mut sk = SketchPage::default();
+        assert!(sk.is_default());
+        sk.paper = BlankPageStyle::Grid;
+        assert!(!sk.is_default());
+        let json = serde_json::to_string(&sk).unwrap();
+        let back: SketchPage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.paper, BlankPageStyle::Grid);
+        // Old files without the field still load.
+        let d: DocData = serde_json::from_str("{\"notes\":{}}").unwrap();
+        assert!(d.sketches.is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -1858,7 +1955,7 @@ mod tests {
         let mut notes = HashMap::new();
         notes.insert(1u32, "first".to_string());
         let _ = load_doc_data(&pdf_a);
-        save_doc_data(&pdf_a, &notes, &HashMap::new(), HashSet::new()).unwrap();
+        save_doc_data(&pdf_a, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         let id_a = crate::docid::resolve_key(&pdf_a);
         assert_eq!(read_trailing_doc_id(&pdf_a).as_deref(), Some(id_a.as_str()));
         assert!(load_local_backup(&pdf_a).unwrap().rev > 0);
@@ -1897,7 +1994,7 @@ mod tests {
         // 4) un salvataggio successivo ha sempre revisione maggiore di quella caricata
         let mut n2 = HashMap::new();
         n2.insert(1u32, "local edit".to_string());
-        save_doc_data(&pdf_b, &n2, &HashMap::new(), HashSet::new()).unwrap();
+        save_doc_data(&pdf_b, &n2, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         assert!(load_local_backup(&pdf_b).unwrap().rev > remote.rev);
 
         // 5) backup più recente del PDF (scrittura nel PDF fallita): il PDF viene riallineato
