@@ -2684,9 +2684,10 @@ mod tests {
         assert_eq!(sizes.len(), 3);
         assert_eq!(sizes[0], (612.0, 792.0), "page without notes keeps the original size");
         assert_eq!(sizes[2], (400.0, 300.0));
-        // page 2 is /Rotate 90 -> displayed 792 x 612; the slide keeps its height and takes 63% of the width
-        assert!((sizes[1].1 - 612.0).abs() < 0.6, "height = original slide height: {:?}", sizes[1]);
-        assert!((792.0 / sizes[1].0 - 0.63).abs() < 0.01, "slide ratio: {:?}", sizes[1]);
+        // page 2 is /Rotate 90 -> displayed 792 x 612; the page keeps its size and the slide is
+        // scaled to the configured share of the width (75 % by default)
+        assert!((sizes[1].0 - 792.0).abs() < 1.0, "width = original page width: {:?}", sizes[1]);
+        assert!((sizes[1].1 - 612.0).abs() < 0.6, "height = original page height: {:?}", sizes[1]);
 
         // untouched page 3 is pixel-identical to the original
         assert_eq!(render(&out, 2).3, render(&src, 2).3);
@@ -2707,22 +2708,19 @@ mod tests {
         let (tr, _, tb) = px(&p1, 459, 515);
         assert!(tr < 25 && tb > 230, "tape should cover the page: {tr},{tb}");
 
-        // page 2 composite: the slide is drawn at its original size (left part equals the original)
+        // page 2 composite: the slide (light-blue rectangle of 200 x 100 pt on the original) is
+        // drawn at 75 % of its size in the left part, nothing of it is in the notes column
         let comp = render(&out, 1);
-        let orig2 = render(&src, 1);
-        let mut diff = 0;
-        for y in 0..600 {
-            for x in 0..700 {
-                // the rect annotation (x 79..238, y 61..122, 6 pt wide) is drawn on the composite only
-                if (70..250).contains(&x) && (50..135).contains(&y) {
-                    continue;
-                }
-                if px(&comp, x, y) != px(&orig2, x, y) {
-                    diff += 1;
-                }
-            }
-        }
-        assert!(diff < 50, "slide region differs from the original in {diff} px");
+        let split = (792.0 * 0.75) as usize;
+        let is_blue = |p: (u8, u8, u8)| p.0 > 150 && p.0 < 210 && p.1 > 200 && p.1 < 240 && p.2 > 240;
+        let blue_left = (0..comp.1).flat_map(|y| (0..split - 4).map(move |x| (x, y))).filter(|&(x, y)| is_blue(px(&comp, x, y))).count();
+        let blue_right = (0..comp.1).flat_map(|y| (split + 4..comp.0).map(move |x| (x, y))).filter(|&(x, y)| is_blue(px(&comp, x, y))).count();
+        let expected = 200.0 * 100.0 * 0.75 * 0.75;
+        assert!(
+            (blue_left as f64 - expected).abs() < expected * 0.15,
+            "scaled slide: {blue_left} blue px, expected about {expected}"
+        );
+        assert_eq!(blue_right, 0, "the slide stays out of the notes column");
 
         // ── annotations only: notes are not exported, page 2 keeps its size and shows the annotation
         //    exactly where it belongs even though the page is rotated ──
