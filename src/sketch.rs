@@ -461,7 +461,6 @@ fn toolbar(
                         action = Some(Action::Zoom(ZoomRequest::Step(1.2)));
                     }
                 });
-                ui.weak("Ctrl + wheel / pinch also zooms.\nMove with the hand tool, the middle button or the wheel.");
 
                 ui.separator();
                 if ui

@@ -2281,7 +2281,7 @@ impl Lapis {
         let btn_size = if labeled { egui::vec2(200.0, sq_btn.y) } else { sq_btn };
             if ui
             .add(
-                egui::Button::new(if labeled { format!("{}  Annotation tools", "") } else { "".to_string() })
+                egui::Button::new(if labeled { format!("{}  Annotation tools", "") } else { " ".to_string() })
                     .selected(self.show_tools_rail)
                     .min_size(btn_size),
             )
@@ -2458,7 +2458,7 @@ impl Lapis {
         let btn_size = if labeled { egui::vec2(200.0, sq_btn.y) } else { sq_btn };
         if ui
             .add(
-                egui::Button::new(if labeled { format!("{} Search in notes", "") } else { "".to_string() })
+                egui::Button::new(if labeled { format!("{} Search in notes", "") } else { " ".to_string() })
                     .selected(self.show_search)
                     .min_size(btn_size),
             )
@@ -2484,7 +2484,7 @@ impl Lapis {
         let btn_size = if labeled { egui::vec2(200.0, sq_btn.y) } else { sq_btn };
             if ui
             .add(
-         egui::Button::new(if labeled { format!("{}  Flashcards", "󰘸") } else { "󰘸".to_string() })
+         egui::Button::new(if labeled { format!("{}  Flashcards", "󰘸") } else { "󰘸 ".to_string() })
              .selected(self.show_flashcards_modal)
              .min_size(btn_size),
             )
@@ -11691,8 +11691,13 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
         let note_font_sz = self.app_state.settings.note_font_size.clamp(10.0, 28.0);
 
         let scroll_out = scroll_area.show(ui, |ui| {
+            // Keep the Markdown viewport and any embedded images within the panel width
+            // on every frame while the side-panel splitter is moving.
+            let preview_width = ui.available_width().max(1.0);
+            ui.take_available_width();
             header_ui(ui);
             ui.scope(|ui| {
+                ui.take_available_width();
                 let style = ui.style_mut();
                 style.visuals.override_text_color = None;
                 style.visuals.widgets.noninteractive.fg_stroke =
@@ -11712,11 +11717,13 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 let pre_defs = notes::preprocess_definitions(md_source);
                 let rendered_md = notes::preprocess_markdown_view(&pre_defs);
 
-                egui_commonmark::CommonMarkViewer::new().show(
-                    ui,
-                    &mut self.commonmark_cache,
-                    &rendered_md,
-                );
+                egui_commonmark::CommonMarkViewer::new()
+                    .max_image_width(Some(preview_width.ceil() as usize))
+                    .show(
+                        ui,
+                        &mut self.commonmark_cache,
+                        &rendered_md,
+                    );
                 ui.add_space(28.0);
             });
 
@@ -11818,6 +11825,9 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
         text_edit_id: egui::Id,
         use_bottom: bool,
     ) {
+        // A resizable side panel must keep using its full assigned width; otherwise its
+        // contents can keep the previous frame's narrower min-rect while the splitter moves.
+        ui.take_available_width();
         let panel_bg = ui.visuals().panel_fill;
         let page = self.current_page;
         let media_dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
@@ -11926,8 +11936,9 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
             full_panel_rect.min,
             egui::vec2(full_panel_rect.width(), notes_max_h),
         );
-        // The Sketch canvas goes edge to edge; the audio widgets below keep a small side margin.
-        let side_pad = if self.note_mode == NoteMode::Sketch && self.sketch_enabled() { 8.0 } else { 0.0 };
+        // Keep the audio area anchored to the same panel edges in every notes mode.
+        // The audio controls apply their own inset, so Sketch must not shrink this rect.
+        let side_pad = 0.0;
         let bottom_rect = egui::Rect::from_min_max(
             egui::pos2(full_panel_rect.left() + side_pad, notes_rect.bottom()),
             egui::pos2(full_panel_rect.right() - side_pad, full_panel_rect.bottom()),
@@ -11945,47 +11956,28 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
 
         {
             let ui = &mut notes_ui;
+            ui.take_available_width();
 
-            // Responsive 22 px toolbar: page navigation on the left, Sketch / Edit / Preview on the
-            // right. Sketch is the secondary tab, so it shrinks to an icon first; then Edit and
-            // Preview follow, and finally the page arrows (and the lock) go if there is no room.
+            // A compact, frameless single row: page navigation on the left, mode controls fill the rest.
             let sk_on = self.sketch_enabled();
-            let sketch_open = self.note_mode == NoteMode::Sketch && sk_on;
-            let header_pad: i8 = if sketch_open { 6 } else { 0 }; // the Sketch canvas is edge to edge
-            let avail_w = notes_rect.width() - 2.0 * header_pad as f32;
-            let sp = 3.0_f32;
-            let digits = self.total_pages.max(1).to_string().len() as f32;
-            let page_btn_w = 6.6 * (2.0 + digits) + 8.0;
-            let left_nav = 18.0 + 28.0 + 6.0 + page_btn_w; // lock, two arrows, page label
-            let left_min = 18.0 + 2.0 + page_btn_w; // lock and page label
-            let gap = 14.0; // keep clear of the arrows
-            let (w_sketch, w_edit, w_prev) = (66.0_f32, 56.0_f32, 68.0_f32);
-            let n_tabs = if sk_on { 3.0_f32 } else { 2.0 };
-            let right_full = w_edit + w_prev + sp + if sk_on { w_sketch + sp } else { 0.0 };
-            let right_sketch_icon = w_edit + w_prev + sp + if sk_on { 24.0 + sp } else { 0.0 };
-            let right_icons = n_tabs * 24.0 + (n_tabs - 1.0) * sp;
-            let sketch_compact = avail_w < left_nav + gap + right_full;
-            let edit_prev_compact = avail_w < left_nav + gap + right_sketch_icon;
-            let ultra_narrow = avail_w < left_nav + gap + right_icons; // Hide page arrows.
-            let tab_icon_w = if avail_w < left_min + gap + right_icons { 20.0 } else { 24.0 };
-            let tiny = avail_w < left_min + gap + n_tabs * 20.0 + (n_tabs - 1.0) * sp; // Hide the lock.
+            let button_radius = egui::CornerRadius::same(self.theme.corner_radius.saturating_sub(1));
 
-            egui::Frame::NONE
-                .inner_margin(egui::Margin::symmetric(header_pad, 0))
-                .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.set_height(22.0);
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
+                ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+                let full_width = ui.available_width();
+                let compact = full_width < 320.0;
 
+                // Page navigation stays compact and left aligned.
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
-                if !tiny && ui
+                if ui
                     .add_sized(
-                        [18.0, 20.0],
+                        [18.0, 23.0],
                         egui::Button::new(egui::RichText::new(lock_icon).size(11.0))
-                            .selected(self.lock_note_page),
+                            .selected(self.lock_note_page)
+                            .corner_radius(button_radius),
                     )
-                    .on_hover_text("Lock/Unlock note page from PDF scrolling")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Lock or unlock the note page while scrolling the PDF")
                     .clicked()
                 {
                     self.lock_note_page = !self.lock_note_page;
@@ -11994,114 +11986,132 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     }
                 }
 
-                if !ultra_narrow {
-                    if ui
-                        .add_enabled(
-                            self.note_page > 1,
-                            egui::Button::new(egui::RichText::new("\u{F438}").size(10.5))
-                                .min_size(egui::vec2(14.0, 20.0)),
-                        )
-                        .clicked()
-                    {
-                        self.lock_note_page = true;
-                        self.switch_note_page(self.note_page - 1);
-                    }
+                if ui
+                    .add_enabled(
+                        self.note_page > 1,
+                        egui::Button::new(egui::RichText::new("\u{F438}").size(11.0))
+                            .min_size(egui::vec2(17.0, 23.0))
+                            .corner_radius(button_radius),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Previous notes page")
+                    .clicked()
+                {
+                    self.lock_note_page = true;
+                    self.switch_note_page(self.note_page - 1);
                 }
 
-                let target_np = self.note_page;
-                let button_text = format!("p.{}", target_np);
+                let page_label = if compact {
+                    self.note_page.to_string()
+                } else {
+                    format!("p. {}", self.note_page)
+                };
                 if ui
-                    .add(egui::Button::new(egui::RichText::new(button_text).size(11.5)).frame(true))
-                    .on_hover_text("Note page (click to reset to current document page)")
+                    .add_sized(
+                        [if compact { 23.0 } else { 35.0 }, 23.0],
+                        egui::Button::new(egui::RichText::new(page_label).size(10.0).strong())
+                            .corner_radius(button_radius),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Return notes to the current PDF page")
                     .clicked()
                 {
                     self.note_page = self.current_page;
                     self.lock_note_page = false;
                 }
 
-                if !ultra_narrow {
+                if ui
+                    .add_enabled(
+                        self.note_page < self.total_pages,
+                        egui::Button::new(egui::RichText::new("\u{F44A}").size(11.0))
+                            .min_size(egui::vec2(17.0, 23.0))
+                            .corner_radius(button_radius),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Next notes page")
+                    .clicked()
+                {
+                    self.lock_note_page = true;
+                    self.switch_note_page(self.note_page + 1);
+                }
+
+                ui.add_space(3.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Sketch stays a small icon tab. Edit and Preview divide the remaining row.
+                // Switch to icon-only controls while there is still room, rather than letting
+                // the Preview label become squeezed or clipped at narrow panel widths.
+                let mode_available = ui.available_width().max(0.0);
+                let sketch_width = if sk_on { 23.0 } else { 0.0 };
+                let mode_gap_total = if sk_on { 4.0 } else { 2.0 };
+                let primary_width = ((mode_available - sketch_width - mode_gap_total) / 2.0)
+                    .max(18.0);
+                let show_labels = primary_width >= 84.0;
+                let edit_label = if show_labels { "󰏫  Edit" } else { "󰏫" };
+                let preview_label = if show_labels { "󰈈  Preview" } else { "󰈈" };
+                let mode_font_size = if show_labels { 10.0 } else { 11.0 };
+
+                if sk_on {
                     if ui
-                        .add_enabled(
-                            self.note_page < self.total_pages,
-                            egui::Button::new(egui::RichText::new("\u{F44A}").size(10.5))
-                                .min_size(egui::vec2(14.0, 20.0)),
+                        .add_sized(
+                            [sketch_width, 22.0],
+                            egui::Button::new(egui::RichText::new("󰠱").size(11.0).strong())
+                                .selected(self.note_mode == NoteMode::Sketch)
+                                .corner_radius(button_radius),
                         )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Sketch: a separate scratchpad for this page (Alt+S)")
                         .clicked()
                     {
-                        self.lock_note_page = true;
-                        self.switch_note_page(self.note_page + 1);
+                        self.note_mode = NoteMode::Sketch;
                     }
                 }
 
-                // Tabs on the right, from right to left: Preview, Edit, Sketch.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = sp;
+                if ui
+                    .add_sized(
+                        [primary_width, 22.0],
+                        egui::Button::new(egui::RichText::new(edit_label).size(mode_font_size).strong())
+                            .selected(self.note_mode == NoteMode::Edit)
+                            .corner_radius(button_radius),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Edit your Markdown and LaTeX notes")
+                    .clicked()
+                {
+                    self.note_mode = NoteMode::Edit;
+                    self.focus_note_editor = true;
+                }
 
-                    let (prev_label, prev_w) = if edit_prev_compact {
-                        ("󰈈", tab_icon_w)
-                    } else {
-                        ("󰈈 Preview", w_prev)
-                    };
-                    if ui
-                        .add_sized(
-                            [prev_w, 20.0],
-                            egui::Button::new(egui::RichText::new(prev_label).size(11.5))
-                                .selected(self.note_mode == NoteMode::Preview),
-                        )
-                        .on_hover_text("Preview mode")
-                        .clicked()
-                    {
-                        self.note_mode = NoteMode::Preview;
-                    }
-
-                    let (edit_label, edit_w) = if edit_prev_compact {
-                        ("󰏫", tab_icon_w)
-                    } else {
-                        ("󰏫 Edit", w_edit)
-                    };
-                    if ui
-                        .add_sized(
-                            [edit_w, 20.0],
-                            egui::Button::new(egui::RichText::new(edit_label).size(11.5))
-                                .selected(self.note_mode == NoteMode::Edit),
-                        )
-                        .on_hover_text("Edit mode")
-                        .clicked()
-                    {
-                        self.note_mode = NoteMode::Edit;
-                        self.focus_note_editor = true;
-                    }
-
-                    if sk_on {
-                        let (sketch_label, sketch_w) = if sketch_compact {
-                            ("󰠱", tab_icon_w)
-                        } else {
-                            ("󰠱 Sketch", w_sketch)
-                        };
-                        if ui
-                            .add_sized(
-                                [sketch_w, 20.0],
-                                egui::Button::new(egui::RichText::new(sketch_label).size(11.5))
-                                    .selected(self.note_mode == NoteMode::Sketch),
-                            )
-                            .on_hover_text("Sketch: a scratchpad for this page (Alt+S)")
-                            .clicked()
-                        {
-                            self.note_mode = NoteMode::Sketch;
-                        }
-                    }
-                });
+                if ui
+                    .add_sized(
+                        [primary_width, 22.0],
+                        egui::Button::new(egui::RichText::new(preview_label).size(mode_font_size).strong())
+                            .selected(self.note_mode == NoteMode::Preview)
+                            .corner_radius(button_radius),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Preview the formatted notes")
+                    .clicked()
+                {
+                    self.note_mode = NoteMode::Preview;
+                }
             });
-                });
-            ui.add_space(3.0);
+
+            let sketch_open = self.note_mode == NoteMode::Sketch && sk_on;
+            ui.add_space(8.0);
 
             let is_edit = matches!(self.note_mode, NoteMode::Edit);
 
+            // Keep the text origin and usable width identical in Edit and Preview.
+            // The Edit field has zero internal margin, so this shared frame inset is
+            // also the exact origin used by the Markdown viewer.
+            let text_content_margin = egui::Margin::symmetric(14, 8);
             let (notes_bg, notes_stroke, notes_margin) = if is_edit {
                 (
                     rgb(self.theme.bg_widget),
                     egui::Stroke::new(1.0, rgb(self.theme.border)),
-                    egui::Margin::same(10),
+                    text_content_margin,
                 )
             } else if sketch_open {
                 // The canvas fills the whole panel below the toolbar.
@@ -12111,10 +12121,11 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     egui::Margin::ZERO,
                 )
             } else {
+                // Preview sits directly on the notes panel background, without a card surface.
                 (
                     egui::Color32::TRANSPARENT,
                     egui::Stroke::NONE,
-                    egui::Margin::symmetric(14, 8),
+                    text_content_margin,
                 )
             };
             // Main Notes Area
@@ -12124,6 +12135,9 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 .corner_radius(egui::CornerRadius::same(self.theme.corner_radius))
                 .inner_margin(notes_margin)
                 .show(ui, |ui| {
+                    // Reclaim the panel's current width after a live resize; do not keep a
+                    // narrower min-rect from the previous frame.
+                    ui.take_available_width();
                     if self.note_mode == NoteMode::Sketch {
                         let sketch_page = self.note_page;
                         if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches) {
@@ -12139,9 +12153,12 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                         d.get_temp::<f32>(scroll_id.with("last_offset")).unwrap_or(0.0)
                     });
 
+                    let preview_view_width = ui.available_width().max(1.0);
+                    ui.take_available_width();
                     let mut scroll_area = egui::ScrollArea::vertical()
                         .id_salt("notes_scroll")
-                        .auto_shrink([false, false]);
+                        .auto_shrink([false, false])
+                        .max_width(preview_view_width);
 
                     if let Some(target) = ui.data(|d| d.get_temp::<f32>(anim_scroll_id)) {
                         let diff = target - current_offset_y;
@@ -12285,12 +12302,19 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                             );
                             let checker_ref = &self.spellchecker;
 
+                            // A finite desired width is essential here: INFINITY disables
+                            // automatic wrapping and causes the editor to be clipped when the
+                            // resizable panel becomes narrower.
+                            let editor_width = ui.available_width().max(1.0);
+
                             let mut layouter =
                                 |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
                                     let s = text.as_str();
                                     let mut job = egui::text::LayoutJob::default();
-                                    job.wrap.max_width = wrap_width;
-                                    let font_id = egui::FontId::monospace(note_font_sz);
+                                    job.wrap.max_width = wrap_width.max(1.0);
+                                    // Match Preview's proportional body font so ordinary
+                                    // paragraphs wrap at nearly the same points in both modes.
+                                    let font_id = egui::FontId::proportional(note_font_sz);
 
                                     let mut last_end = 0;
                                     for (idx, ch) in s.char_indices() {
@@ -12349,11 +12373,13 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
 
                             let text_edit = egui::TextEdit::multiline(&mut self.current_note)
                                 .id(text_edit_id)
-                                .desired_width(f32::INFINITY)
+                                .desired_width(editor_width)
                                 .desired_rows(4)
                                 .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
                                 .layouter(&mut layouter)
-                                .code_editor()
+                                .font(egui::FontId::proportional(note_font_sz))
+                                .lock_focus(true)
                                 .hint_text("Write your Markdown & $LaTeX$ notes here...");
 
                             let output = text_edit.show(ui);
@@ -12530,6 +12556,10 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                     );
                                 });
                             } else {
+                                // Reflow Markdown and scale embedded images to the live panel
+                                // width so they do not retain a wider layout while resizing.
+                                let preview_width = ui.available_width().max(1.0);
+                                ui.take_available_width();
                                 ui.scope(|ui| {
                                     let style = ui.style_mut();
                                     style.visuals.override_text_color = None;
@@ -12559,11 +12589,13 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                     let pre_defs = notes::preprocess_definitions(&self.current_note);
                                     let rendered_md = notes::preprocess_markdown_view(&pre_defs);
 
-                                    egui_commonmark::CommonMarkViewer::new().show(
-                                        ui,
-                                        &mut self.commonmark_cache,
-                                        &rendered_md,
-                                    );
+                                    egui_commonmark::CommonMarkViewer::new()
+                                        .max_image_width(Some(preview_width.ceil() as usize))
+                                        .show(
+                                            ui,
+                                            &mut self.commonmark_cache,
+                                            &rendered_md,
+                                        );
 
                                     ui.add_space(28.0);
                                 });
@@ -12778,29 +12810,64 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
         ui.allocate_rect(panel_rect, egui::Sense::hover());
     }
 
-    fn render_slideshow_notes_contents(&mut self, ui: &mut egui::Ui, active_slide_note: String){
-                    // Top Header: Slide counter + Lock toggle
-                    ui.horizontal(|ui| {
+    fn render_slideshow_notes_contents(&mut self, ui: &mut egui::Ui, active_slide_note: String) {
+        ui.take_available_width();
+        egui::Frame::NONE
+            .fill(rgb(self.theme.bg_elevated))
+            .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+            .corner_radius(egui::CornerRadius::same(self.theme.corner_radius.saturating_add(2)))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("SLIDE NOTES")
+                            .size(11.5)
+                            .strong()
+                            .color(rgb(self.theme.fg_muted)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
+                        let lock_button = egui::Button::new(
+                            egui::RichText::new(lock_icon).size(11.5),
+                        )
+                        .selected(self.lock_note_page)
+                        .fill(if self.lock_note_page {
+                            rgb(self.theme.bg_active)
+                        } else {
+                            rgb(self.theme.bg_widget)
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if self.lock_note_page {
+                                rgb(self.theme.accent)
+                            } else {
+                                rgb(self.theme.border)
+                            },
+                        ))
+                        .corner_radius(egui::CornerRadius::same(
+                            self.theme.corner_radius.saturating_sub(1),
+                        ));
                         if ui
-                            .add(
-                                egui::Button::new(lock_icon)
-                                    .selected(self.lock_note_page)
-                                    .small(),
-                            )
-                            .on_hover_text("Pin/Lock current note while browsing slides")
+                            .add_sized([28.0, 27.0], lock_button)
+                            .on_hover_text("Pin or unpin the current note while browsing slides")
                             .clicked()
                         {
                             self.lock_note_page = !self.lock_note_page;
                         }
-
-                        ui.heading(format!(
-                            "  Slide {} / {}",
-                            self.current_page, self.total_pages
-                        ));
-
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} / {}",
+                                self.current_page, self.total_pages
+                            ))
+                            .size(12.5)
+                            .strong()
+                            .color(rgb(self.theme.fg_primary)),
+                        );
                     });
-                    ui.separator();
+                });
+            });
+        ui.add_space(8.0);
 
                     // Case 1: pinned note.
                     if self.lock_note_page && !self.current_note.trim().is_empty() {
@@ -13431,11 +13498,12 @@ impl eframe::App for Lapis {
         if !in_slideshow && self.has_pdf(){    
         egui::Panel::top("top_panel")
             .frame(
-                egui::Frame::side_top_panel(&ui.style())
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
+                egui::Frame::NONE
+                    .fill(rgb(self.theme.bg_panel))
+                    .inner_margin(egui::Margin::symmetric(8, 3)),
             )
             .show(ui, |ui| {
-                const BAR_H: f32 = 26.0;
+                const BAR_H: f32 = 27.0;
                 let sq_btn = egui::vec2(BAR_H, BAR_H);
 
 
@@ -13573,7 +13641,11 @@ impl eframe::App for Lapis {
                             ui.set_min_width(200.0);
                             if stage >= 4 {
                                 // At minimum width, the File menu moves here.
-                                if ui.button("󰈦  File…").clicked() {
+                                if ui
+                                    .button("󰈦  File…")
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
                                     ui.data_mut(|d| {
                                         d.insert_temp(menu_id, true);
                                         d.insert_temp(ui.make_persistent_id("file_menu_skip_outside"), true);
@@ -13598,13 +13670,14 @@ impl eframe::App for Lapis {
                         .max_rect(row_rect)
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
                     |ui| {
- 
- 
-                        //Notes
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+
+                        // Notes
                         let page_has_note = self.notes.get(&self.current_page).map(|s| !s.trim().is_empty()).unwrap_or(false) || !self.current_note.trim().is_empty();
  
                         let notes_arrow = if self.show_notes { "" } else { "" };
-                        let notes_btn = egui::Button::new(format!("{} 󰠮", notes_arrow))
+                        let notes_btn = egui::Button::new(format!("{} 󰠮 ", notes_arrow))
                             .selected(self.show_notes)
                             .min_size(egui::vec2(44.0, BAR_H));
  
@@ -13719,8 +13792,8 @@ impl eframe::App for Lapis {
                 let mut is_open = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(menu_id));
                 let arrow = if is_open { "▴" } else { "▾" };
  
-                let font_id = egui::FontId::proportional(14.0);
-                let make_label = |title: &str, arrow: &str| format!(" {} {}", title, arrow);
+                let font_id = egui::FontId::proportional(13.0);
+                let make_label = |title: &str, arrow: &str| format!("  {}  {}", title, arrow);
                 let label_w = |s: &str| -> f32 {
                     (ui.painter()
                         .layout_no_wrap(s.to_owned(), font_id.clone(), ui.visuals().text_color())
@@ -13836,9 +13909,13 @@ impl eframe::App for Lapis {
                             .add_sized(
                                 total_size,
                                 egui::Button::new(egui::RichText::new(menu_label).font(font_id))
-                                    .selected(is_open),
+                                    .selected(is_open)
+                                    .corner_radius(egui::CornerRadius::same(
+                                        self.theme.corner_radius,
+                                    )),
                             )
-                            .on_hover_text(format!("\"{}\"", self.pdf_path.to_string_lossy()));
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("File actions and settings\n{}", self.pdf_path.to_string_lossy()));
 
                         button_rect = btn_resp.rect;
 
@@ -13870,19 +13947,49 @@ impl eframe::App for Lapis {
                             egui::Frame::menu(ui.style())
                                 .inner_margin(egui::Margin::symmetric(6, 6))
                                 .show(ui, |ui| {
-                                    let menu_width = 230.0;
+                                    let menu_width = 232.0;
+                                    let menu_text_muted = rgb(self.theme.fg_muted);
+                                    let menu_radius = egui::CornerRadius::same(
+                                        self.theme.corner_radius.saturating_sub(1),
+                                    );
                                     ui.set_width(menu_width);
- 
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+
+                                    let menu_heading = |ui: &mut egui::Ui, label: &str| {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(label)
+                                                .size(10.0)
+                                                .strong()
+                                                .color(menu_text_muted),
+                                        );
+                                        ui.add_space(3.0);
+                                    };
                                     let menu_item = |ui: &mut egui::Ui,
                                                      label: &str,
                                                      enabled: bool|
                                      -> egui::Response {
-                                        let btn = egui::Button::new(label)
-                                            .frame(false)
-                                            .min_size(egui::vec2(menu_width, 26.0));
+                                        let btn = egui::Button::new(
+                                            egui::RichText::new(label).size(11.8),
+                                        )
+                                        .min_size(egui::vec2(menu_width, 26.0))
+                                        .corner_radius(menu_radius);
                                         ui.add_enabled(enabled, btn)
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     };
- 
+
+                                    menu_heading(ui, "PREFERENCES");
+                                    if menu_item(ui, "󰒓  Settings & customization...", true)
+                                        .on_hover_text("Themes, export preferences and keyboard shortcuts")
+                                        .clicked()
+                                    {
+                                        self.show_settings = true;
+                                        self.rebinding_action = None;
+                                        close_requested = true;
+                                    }
+
+                                    ui.separator();
+                                    menu_heading(ui, "DOCUMENT");
                                     if menu_item(ui, "󰈦  Open PDF...", true).clicked() {
                                         self.dialogs.open(
                                             ui.ctx(),
@@ -13891,15 +13998,15 @@ impl eframe::App for Lapis {
                                         );
                                         close_requested = true;
                                     }
- 
-                                    if menu_item(ui, "󰅖  Close PDF (Home)", self.has_pdf())
-                                     .on_hover_text("Close current document and return to Welcome Screen")
-                                     .clicked()
+
+                                    if menu_item(ui, "󰅖  Close PDF · Return to Home", self.has_pdf())
+                                        .on_hover_text("Close current document and return to Welcome Screen")
+                                        .clicked()
                                     {
-                                     self.close_pdf();
-                                     close_requested = true;
+                                        self.close_pdf();
+                                        close_requested = true;
                                     }
- 
+
                                     if menu_item(ui, "󰆓  Save Notes", true)
                                         .on_hover_text("Save notes on disk")
                                         .clicked()
@@ -13911,47 +14018,35 @@ impl eframe::App for Lapis {
                                         ));
                                         close_requested = true;
                                     }
-                                    ui.separator();
-                                    if menu_item(ui, "󰇚  Original PDF", true)
-                                        .on_hover_text("Download / Save original unmodified PDF document")
+
+                                    if menu_item(ui, "󰇚  Save Original PDF...", true)
+                                        .on_hover_text("Save a copy of the original, unmodified PDF")
                                         .clicked()
                                     {
                                         self.prompt_download_original_pdf(ui.ctx());
                                         close_requested = true;
                                     }
- 
+
                                     ui.separator();
- 
-                                    if menu_item(ui, "󰈦  Import Notes (.txt/.md)...", true)
-                                        .on_hover_text(
-                                            "Import notes mapped by slide headers (e.g. # Slide 1)",
-                                        )
+                                    menu_heading(ui, "NOTES & STUDY");
+                                    if menu_item(ui, "󰈦  Import Notes (.txt / .md)...", true)
+                                        .on_hover_text("Import notes mapped by slide headers (e.g. # Slide 1)")
                                         .clicked()
                                     {
                                         self.import_notes_dialog(ui.ctx());
                                         close_requested = true;
                                     }
- 
+
                                     if menu_item(ui, "󰚥  Export Raw Notes (.md)", true)
-                                        .on_hover_text(
-                                            "Export all notes into a single Markdown file",
-                                        )
+                                        .on_hover_text("Export all notes into a single Markdown file")
                                         .clicked()
                                     {
                                         self.export_raw_notes_dialog(ui.ctx());
                                         close_requested = true;
                                     }
- 
+
                                     ui.separator();
-                                    if menu_item(ui, "󰘸  Study Flashcards / Export to Anki...", true)
-                                        .clicked()
-                                    {
-                                        self.open_flashcards_trainer();
-                                        close_requested = true;
-                                    }
- 
-                                    ui.separator();
- 
+                                    menu_heading(ui, "EXPORT");
                                     let export_label = if self.is_exporting {
                                         "󱑚  Exporting...".to_string()
                                     } else {
@@ -13960,24 +14055,12 @@ impl eframe::App for Lapis {
                                             self.app_state.export_settings.content.short_label()
                                         )
                                     };
- 
+
                                     if menu_item(ui, &export_label, !self.is_exporting).clicked() {
                                         self.start_export(ui.ctx());
                                         close_requested = true;
                                     }
- 
-                                    ui.separator();
- 
-                                    if menu_item(ui, "󰒓  Advanced Settings...", true)
-                                        .on_hover_text("Configure Suite Theme, PDF Export and Keyboard Shortcuts")
-                                        .clicked()
-                                    {
-                                        self.show_settings = true;
-                                        self.rebinding_action = None;
-                                        close_requested = true;
-                                    }
- 
-                                    
+
                                 });
                         });
  
@@ -14761,15 +14844,17 @@ impl eframe::App for Lapis {
         } else if self.show_notes && !in_slideshow {
             if use_bottom_notes {
             let max_panel_h = (win_rect.height() * 0.75).max(220.0);
-            let mut notes_panel = egui::Panel::bottom("notes_panel_bottom")
+            let notes_panel = egui::Panel::bottom("notes_panel_bottom")
                 .resizable(true)
                 .default_size((win_rect.height() * 0.36).clamp(180.0, 420.0))
-                .size_range(120.0..=max_panel_h);
-            if self.note_mode == NoteMode::Sketch && self.sketch_enabled() {
-                // No padding: the Sketch canvas takes the whole panel.
-                notes_panel = notes_panel
-                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO));
-            }
+                .size_range(120.0..=max_panel_h)
+                // Keep the same frame in Edit, Preview, and Sketch so switching modes
+                // never shifts the panel contents or changes its apparent height. Restore
+                // a modest horizontal inset so content does not sit against the panel edges.
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .inner_margin(egui::Margin::symmetric(6, 0)),
+                );
             notes_panel
                 .show(ui, |ui| {
                     self.render_notes_panel_contents(
@@ -14779,14 +14864,16 @@ impl eframe::App for Lapis {
                     );
                 });
         } else {
-            let mut notes_panel = egui::Panel::right("notes_panel")
+            let notes_panel = egui::Panel::right("notes_panel")
                 .resizable(true)
-                .default_size(320.0);
-            if self.note_mode == NoteMode::Sketch && self.sketch_enabled() {
-                // No padding: the Sketch canvas takes the whole panel.
-                notes_panel = notes_panel
-                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO));
-            }
+                .default_size(350.0)
+                .size_range(250.0..=520.0)
+                // Match the bottom-panel treatment: a stable frame across all note modes,
+                // with a modest horizontal inset around the notes content.
+                .frame(
+                    egui::Frame::side_top_panel(ui.style())
+                        .inner_margin(egui::Margin::symmetric(6, 0)),
+                );
             notes_panel
                 .show(ui, |ui| {
                     self.render_notes_panel_contents(
@@ -16498,12 +16585,12 @@ impl eframe::App for Lapis {
                     ("󰋼", msg.as_str(), rgb(self.theme.warning))
                 };
 
-                let bg_color = rgb(self.theme.bg_elevated).gamma_multiply(smooth_alpha * 0.96);
+                let bg_color = rgb(self.theme.bg_panel).gamma_multiply(smooth_alpha * 0.98);
                 let accent_color = accent_rgb.gamma_multiply(smooth_alpha);
                 let badge_bg = accent_rgb.gamma_multiply(smooth_alpha * 0.16);
-                let border_color = accent_rgb.gamma_multiply(smooth_alpha * 0.35);
+                let border_color = rgb(self.theme.border).gamma_multiply(smooth_alpha);
                 let text_color = rgb(self.theme.fg_primary).gamma_multiply(smooth_alpha);
-                let shadow_color = egui::Color32::from_black_alpha(120).gamma_multiply(smooth_alpha);
+                let shadow_color = egui::Color32::from_black_alpha(88).gamma_multiply(smooth_alpha);
 
                 // Slide-up in entrata e leggero slide-down in uscita
                 let y_offset = -24.0 + (1.0 - smooth_alpha) * 12.0;
@@ -16516,11 +16603,11 @@ impl eframe::App for Lapis {
                         let frame_resp = egui::Frame::NONE
                             .fill(bg_color)
                             .stroke(egui::Stroke::new(1.0, border_color))
-                            .corner_radius(egui::CornerRadius::same(14))
-                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .corner_radius(egui::CornerRadius::same(self.theme.corner_radius.saturating_add(3)))
+                            .inner_margin(egui::Margin::symmetric(14, 9))
                             .shadow(egui::epaint::Shadow {
                                 spread: 0,
-                                blur: 20,
+                                blur: 16,
                                 color: shadow_color,
                                 offset: [0, 6],
                             })

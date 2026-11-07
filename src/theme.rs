@@ -326,9 +326,13 @@ pub fn dark_presets() -> Vec<Self> {
         let radius = egui::CornerRadius::same(self.corner_radius);
         let is_light = self.is_light();
 
-        style.spacing.button_padding =
-            egui::vec2(self.button_padding[0], self.button_padding[1]);
-        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+        // Keep controls compact across the app while respecting themes that request
+        // even tighter spacing.
+        style.spacing.button_padding = egui::vec2(
+            self.button_padding[0].min(6.0),
+            self.button_padding[1].min(3.0),
+        );
+        style.spacing.item_spacing = egui::vec2(5.0, 4.0);
 
         let accent = rgb(self.accent);
         let fg_primary = rgb(self.fg_primary);
@@ -364,32 +368,43 @@ pub fn dark_presets() -> Vec<Self> {
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
         v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, fg_primary);
         v.widgets.noninteractive.corner_radius = radius;
+        v.widgets.noninteractive.expansion = 0.0;
 
-        v.widgets.inactive.bg_fill = bg_widget;
-        v.widgets.inactive.weak_bg_fill = bg_widget;
-        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+        // Middle ground between frameless controls and heavy button boxes: a light
+        // surface tint and hairline edge at rest, with a clear filled hover state.
+        let idle_button_fill = egui::Color32::from_rgba_unmultiplied(
+            bg_widget.r(), bg_widget.g(), bg_widget.b(), 112,
+        );
+        let idle_button_border = egui::Color32::from_rgba_unmultiplied(
+            border.r(), border.g(), border.b(), 128,
+        );
+        v.widgets.inactive.bg_fill = idle_button_fill;
+        v.widgets.inactive.weak_bg_fill = idle_button_fill;
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(0.8, idle_button_border);
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, fg_primary);
         v.widgets.inactive.corner_radius = radius;
+        v.widgets.inactive.expansion = 0.0;
 
         v.widgets.hovered.bg_fill = bg_hover;
         v.widgets.hovered.weak_bg_fill = bg_hover;
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(0.8, accent);
         v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, fg_primary);
         v.widgets.hovered.corner_radius = radius;
         v.widgets.hovered.expansion = 0.0;
 
         v.widgets.active.bg_fill = bg_active;
         v.widgets.active.weak_bg_fill = bg_active;
-        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+        v.widgets.active.bg_stroke = egui::Stroke::new(0.8, accent);
         v.widgets.active.fg_stroke = egui::Stroke::new(1.0, fg_primary);
         v.widgets.active.corner_radius = radius;
         v.widgets.active.expansion = 0.0;
 
         v.widgets.open.bg_fill = bg_active;
         v.widgets.open.weak_bg_fill = bg_active;
-        v.widgets.open.bg_stroke = egui::Stroke::new(1.0, border);
+        v.widgets.open.bg_stroke = egui::Stroke::new(0.8, border);
         v.widgets.open.fg_stroke = egui::Stroke::new(1.0, fg_primary);
         v.widgets.open.corner_radius = radius;
+        v.widgets.open.expansion = 0.0;
 
         ctx.set_style_of(egui::Theme::Dark, style.clone());
         ctx.set_style_of(egui::Theme::Light, style);

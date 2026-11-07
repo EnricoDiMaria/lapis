@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **UI/UX redesign and visual polish:** Reworked the application’s visual language to create a more consistent, compact and polished experience. Refined the topbar, spacing, surfaces, borders, hover feedback and toast notifications, while preserving existing functionality.
+  - **Topbar and file menu:** Removed the enclosing topbar frame, improved button spacing and interaction feedback, and reorganized the File dropdown into clearer sections. Made the central File button and menu actions more obviously clickable, with improved hover states and a clearer Settings entry.
+  - **Right panel layout:** Reorganized the notes panel controls into a compact inline toolbar spanning the available width. Positioned **Sketch** to the left of **Edit**, keeping it compact while allowing Edit and Preview to expand and receive greater visual prominence.
+  - **Responsive notes panel:** Improved the panel's resizing behavior, introducing earlier responsive collapsing to prevent controls and content from becoming squeezed or cropped. Restored slightly reduced horizontal padding and ensured the toolbar remains stable when switching between modes.
+  - **Edit and Preview alignment:** Standardized text positioning, insets and available width between Edit and Preview to minimize visual movement when switching modes. Improved text wrapping during resizing and removed the unwanted Preview outline, restoring its background to match the surrounding panel.
+  - **Sketch mode consistency:** Prevented the right panel from shifting vertically when selecting Sketch and corrected the horizontal alignment of the bottom audio controls so they remain in the same position across modes.
+  - **Button styling:** Refined the button appearance to balance the frameless look with clear interactive affordances. Added subtle resting-state boundaries and distinct hover feedback without changing button dimensions.
+  - **Toast notifications:** Updated toast backgrounds, borders, shadows and corner radii to better integrate with the application's overall theme.
+
 - **Note Editor**: Added dynamic scrolloff behavior to the notes editor, automatically keeping a 2.5-line visual margin
   around the cursor during typing and keyboard navigation.Added adaptive bottom padding to the TextEdit to maintain proper
   scrolling clearance on the final line and fixed a 1-frame flash artifact on the scroll indicator pill.

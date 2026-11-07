@@ -132,9 +132,9 @@ impl ExportContent {
     /// Short text for the FILE menu button.
     pub fn short_label(self) -> &'static str {
         match self {
-            ExportContent::Annotations => "annotations",
+            ExportContent::Annotations => "annot.",
             ExportContent::Notes => "notes",
-            ExportContent::AnnotationsAndNotes => "annotations + notes",
+            ExportContent::AnnotationsAndNotes => "annot. + notes",
         }
     }
 
