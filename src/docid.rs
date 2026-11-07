@@ -165,7 +165,8 @@ pub fn resolve_key(pdf_path: &Path) -> String {
             None => new_id(),
         };
         idx.paths.insert(norm, id.clone());
-        idx.ids.insert(id.clone(), canon.to_string_lossy().into_owned());
+        idx.ids
+            .insert(id.clone(), canon.to_string_lossy().into_owned());
         migrate_legacy(&canon, &id);
         save_index(&idx);
         id
@@ -243,8 +244,12 @@ fn find_legacy_by_source(dir: &Path, canon: &Path, media: bool) -> Option<PathBu
         if !is_legacy_name(stem.and_then(|s| s.to_str()).unwrap_or("")) {
             continue;
         }
-        let Ok(bytes) = fs::read(&json_path) else { continue };
-        let Ok(src) = serde_json::from_slice::<SourceOnly>(&bytes) else { continue };
+        let Ok(bytes) = fs::read(&json_path) else {
+            continue;
+        };
+        let Ok(src) = serde_json::from_slice::<SourceOnly>(&bytes) else {
+            continue;
+        };
         if src.source_path.map(|sp| norm_path(&sp)).as_deref() == Some(want.as_str()) {
             return Some(p);
         }
@@ -261,17 +266,19 @@ fn migrate_legacy(canon: &Path, id: &str) {
     let orig_dir = crate::paths::data_dir().join("originals");
 
     let new_note = notes_dir.join(format!("{id}.json"));
-    if !move_if_absent(&notes_dir.join(format!("{legacy}.json")), &new_note) && !new_note.exists() {
-        if let Some(src) = find_legacy_by_source(&notes_dir, canon, false) {
-            move_if_absent(&src, &new_note);
-        }
+    if !move_if_absent(&notes_dir.join(format!("{legacy}.json")), &new_note)
+        && !new_note.exists()
+        && let Some(src) = find_legacy_by_source(&notes_dir, canon, false)
+    {
+        move_if_absent(&src, &new_note);
     }
 
     let new_media = media_root.join(id);
-    if !move_if_absent(&media_root.join(&legacy), &new_media) && !new_media.exists() {
-        if let Some(src) = find_legacy_by_source(&media_root, canon, true) {
-            move_if_absent(&src, &new_media);
-        }
+    if !move_if_absent(&media_root.join(&legacy), &new_media)
+        && !new_media.exists()
+        && let Some(src) = find_legacy_by_source(&media_root, canon, true)
+    {
+        move_if_absent(&src, &new_media);
     }
 
     // `<hash>_<nome>.orig` -> `<id>_<nome>.orig`
@@ -352,7 +359,11 @@ mod tests {
 
         let id1 = resolve_key(&pdf1);
         assert_eq!(id1.len(), 32);
-        assert_eq!(resolve_key(&pdf1), id1, "la risoluzione deve essere stabile");
+        assert_eq!(
+            resolve_key(&pdf1),
+            id1,
+            "la risoluzione deve essere stabile"
+        );
         assert_eq!(lookup_key(&pdf1), id1);
         // migrazione eseguita
         assert!(media_root.join(&id1).join("lecture.wav").exists());
@@ -371,7 +382,11 @@ mod tests {
         let body = serde_json::json!({ "source_path": canon2 }).to_string();
         fs::write(notes_dir.join("deadbeefdeadbeef.json"), &body).unwrap();
         fs::create_dir_all(media_root.join("deadbeefdeadbeef")).unwrap();
-        fs::write(media_root.join("deadbeefdeadbeef").join("audio_index.json"), &body).unwrap();
+        fs::write(
+            media_root.join("deadbeefdeadbeef").join("audio_index.json"),
+            &body,
+        )
+        .unwrap();
         let id2 = resolve_key(&pdf2);
         assert_ne!(id2, id1);
         assert!(notes_dir.join(format!("{id2}.json")).exists());

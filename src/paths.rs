@@ -1,4 +1,3 @@
-
 //!
 //! Linux  : XDG_CONFIG_HOME|~/.config, XDG_DATA_HOME|~/.local/share
 //! Windows: config -> %APPDATA%\lapis  (Roaming)
@@ -9,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 fn ensure(p: PathBuf) -> PathBuf {
@@ -70,7 +71,9 @@ pub fn notes_backup_dir() -> PathBuf {
 fn migrate_legacy_notes(new_dir: &Path) {
     let legacy_root = data_base().join("lapispdf");
     let legacy_notes = legacy_root.join("notes");
-    let Ok(rd) = fs::read_dir(&legacy_notes) else { return };
+    let Ok(rd) = fs::read_dir(&legacy_notes) else {
+        return;
+    };
     for entry in rd.flatten() {
         let from = entry.path();
         if !from.is_file() {
@@ -126,13 +129,18 @@ mod tests {
             "file:///C:/Users/me/AppData/Local/lapis/media/abc/screenshots/shot_1.png"
         );
         assert_eq!(windows_file_uri(r"D:\a b\c.png"), "file:///D:/a b/c.png");
-        assert_eq!(windows_file_uri(r"\\server\share\x.png"), "file://server/share/x.png");
+        assert_eq!(
+            windows_file_uri(r"\\server\share\x.png"),
+            "file://server/share/x.png"
+        );
     }
 
     #[cfg(not(windows))]
     #[test]
     fn unix_uri_is_unchanged() {
-        assert_eq!(file_uri(Path::new("/home/me/a b.png")), "file:///home/me/a b.png");
+        assert_eq!(
+            file_uri(Path::new("/home/me/a b.png")),
+            "file:///home/me/a b.png"
+        );
     }
- }
-
+}

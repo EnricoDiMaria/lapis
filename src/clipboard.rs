@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::OnceLock;
 
 /// qdbus / wl-paste / wl-copy / xclip exist only on Linux/BSD desktops.
 /// On Windows and macOS only `arboard` is used.
@@ -27,16 +27,16 @@ pub fn clip_read_method(cb: Option<&mut arboard::Clipboard>, m: u8) -> Option<St
         ),
         4 => clip_run_capture(4, "wl-paste", &["--no-newline", "--type", "text/plain"]),
         5 => None, // Non usare wl-paste senza --type: potrebbe restituire byte immagine.
-        6 => clip_run_capture(6, "xclip", &["-selection", "clipboard", "-t", "UTF8_STRING", "-o"]),
+        6 => clip_run_capture(
+            6,
+            "xclip",
+            &["-selection", "clipboard", "-t", "UTF8_STRING", "-o"],
+        ),
         _ => None,
     }?;
 
     let text = raw.replace("\r\n", "\n");
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 pub fn clip_dead(bit: u32) -> bool {

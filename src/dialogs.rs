@@ -7,7 +7,7 @@
 
 use eframe::egui;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 /// Operation to be re-initiated after the user has selected the ASR model folder.
 #[derive(Clone, Debug)]
@@ -79,8 +79,10 @@ impl DialogSpec {
     }
 
     pub fn filter(mut self, name: &str, exts: &[&str]) -> Self {
-        self.filters
-            .push((name.to_string(), exts.iter().map(|s| s.to_string()).collect()));
+        self.filters.push((
+            name.to_string(),
+            exts.iter().map(|s| s.to_string()).collect(),
+        ));
         self
     }
 

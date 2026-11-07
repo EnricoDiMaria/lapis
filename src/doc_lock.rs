@@ -14,7 +14,7 @@ pub struct DocLock {
 #[derive(Debug)]
 pub enum LockError {
     Busy,
-    Io(#[allow(dead_code)]io::Error),
+    Io(#[allow(dead_code)] io::Error),
 }
 
 pub fn canonical(path: &Path) -> PathBuf {
@@ -31,9 +31,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 fn lock_file_for(canon: &Path) -> PathBuf {
-    crate::paths::data_dir()
-        .join("locks")
-        .join(format!("{:016x}.lock", fnv1a(canon.to_string_lossy().as_bytes())))
+    crate::paths::data_dir().join("locks").join(format!(
+        "{:016x}.lock",
+        fnv1a(canon.to_string_lossy().as_bytes())
+    ))
 }
 
 pub fn acquire(path: &Path) -> Result<DocLock, LockError> {

@@ -21,14 +21,25 @@ pub fn ffmpeg() -> Command {
 }
 
 fn ffmpeg_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LAPIS_FFMPEG").map(PathBuf::from) {
-        if p.is_file() {
-            return p;
-        }
+    if let Some(p) = std::env::var_os("LAPIS_FFMPEG").map(PathBuf::from)
+        && p.is_file()
+    {
+        return p;
     }
-    let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-        for c in [dir.join(exe), dir.join("ffmpeg").join(exe), dir.join("bin").join(exe)] {
+    let exe = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        for c in [
+            dir.join(exe),
+            dir.join("ffmpeg").join(exe),
+            dir.join("bin").join(exe),
+        ] {
             if c.is_file() {
                 return c;
             }

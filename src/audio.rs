@@ -72,7 +72,6 @@ fn default_next_lecture_id() -> usize {
 }
 
 impl AudioDocIndex {
-
     pub fn media_root() -> PathBuf {
         crate::paths::data_dir().join("media")
     }
@@ -88,14 +87,13 @@ impl AudioDocIndex {
             return Self::default();
         }
 
-        let index_path = Self::media_dir_for_pdf(pdf_path)
-            .join("audio_index.json");
+        let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
 
-        if let Ok(content) = fs::read_to_string(index_path) {
-            if let Ok(mut idx) = serde_json::from_str::<Self>(&content) {
-                idx.ensure_lecture_ids();
-                return idx;
-            }
+        if let Ok(content) = fs::read_to_string(index_path)
+            && let Ok(mut idx) = serde_json::from_str::<Self>(&content)
+        {
+            idx.ensure_lecture_ids();
+            return idx;
         }
 
         let mut idx = Self::default();
@@ -108,17 +106,14 @@ impl AudioDocIndex {
             return;
         }
 
-        let index_path = Self::media_dir_for_pdf(pdf_path)
-            .join("audio_index.json");
+        let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
 
         let mut to_save = self.clone();
 
         to_save.ensure_lecture_ids();
 
-        to_save.source_path = Some(
-            dunce::canonicalize(pdf_path)
-                .unwrap_or_else(|_| pdf_path.to_path_buf()),
-        );
+        to_save.source_path =
+            Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
 
         if let Ok(json) = serde_json::to_string_pretty(&to_save) {
             let tmp = index_path.with_extension("json.tmp");
@@ -128,7 +123,6 @@ impl AudioDocIndex {
             }
         }
     }
-
 
     /// Returns which slide corresponds to a given playback timestamp in milliseconds.
     pub fn page_at_time(&self, pos_ms: u64) -> Option<u32> {
@@ -161,20 +155,35 @@ impl AudioDocIndex {
         let tl = &self.timeline;
         for s in &mut self.segments {
             let idx = tl.partition_point(|&(ts, _)| ts <= s.start_ms);
-            s.page = if tl.is_empty() { 0 } else { tl[idx.saturating_sub(1)].1 };
+            s.page = if tl.is_empty() {
+                0
+            } else {
+                tl[idx.saturating_sub(1)].1
+            };
         }
     }
 
     /// Allinea i segmenti già trascritti alle slide `range` (1-based, inclusivo).
     pub fn align_to_slides(&mut self, slide_texts: &[String], range: (u32, u32)) {
         let (lo, hi) = (range.0.max(1), range.1.min(slide_texts.len() as u32));
-        if hi < lo || self.segments.is_empty() { return; }
-        let raw: Vec<_> = self.segments.iter().map(|s| (s.start_ms, s.end_ms, s.text.clone())).collect();
+        if hi < lo || self.segments.is_empty() {
+            return;
+        }
+        let raw: Vec<_> = self
+            .segments
+            .iter()
+            .map(|s| (s.start_ms, s.end_ms, s.text.clone()))
+            .collect();
         let total = (self.lecture_duration_ms > 0).then_some(self.lecture_duration_ms);
-        let (mut segs, mut tl) = align_segments_to_slides(raw, &slide_texts[(lo - 1) as usize..hi as usize], total);
+        let (mut segs, mut tl) =
+            align_segments_to_slides(raw, &slide_texts[(lo - 1) as usize..hi as usize], total);
         let off = lo - 1;
-        for s in &mut segs { s.page += off; }
-        for (_, p) in &mut tl { *p += off; }
+        for s in &mut segs {
+            s.page += off;
+        }
+        for (_, p) in &mut tl {
+            *p += off;
+        }
         self.segments = segs;
         self.timeline = tl;
         self.timeline_is_live = false;
@@ -244,30 +253,56 @@ impl AudioDocIndex {
         }
     }
     pub fn fresh_wav_name(&self) -> String {
-        let used: HashSet<&str> = self.lecture_wav.iter().map(String::as_str)
-            .chain(self.other_lectures.iter().filter_map(|l| l.wav.as_deref())).collect();
-        if !used.contains("lecture.wav") { return "lecture.wav".into(); }
-        (2..).map(|n| format!("lecture_{n}.wav")).find(|n| !used.contains(n.as_str())).unwrap()
+        let used: HashSet<&str> = self
+            .lecture_wav
+            .iter()
+            .map(String::as_str)
+            .chain(self.other_lectures.iter().filter_map(|l| l.wav.as_deref()))
+            .collect();
+        if !used.contains("lecture.wav") {
+            return "lecture.wav".into();
+        }
+        (2..)
+            .map(|n| format!("lecture_{n}.wav"))
+            .find(|n| !used.contains(n.as_str()))
+            .unwrap()
     }
     pub fn active_covers(&self, page: u32) -> bool {
-        self.lecture_wav.is_some() && self.page_range.map_or(true, |(a, b)| (a..=b).contains(&page))
+        self.lecture_wav.is_some() && self.page_range.is_none_or(|(a, b)| (a..=b).contains(&page))
     }
     pub fn other_covering(&self, page: u32) -> Option<usize> {
-        if self.active_covers(page) { return None; }
-        self.other_lectures.iter().position(|l|
-            l.wav.is_some() && l.page_range.map_or(false, |(a, b)| (a..=b).contains(&page)))
+        if self.active_covers(page) {
+            return None;
+        }
+        self.other_lectures.iter().position(|l| {
+            l.wav.is_some() && l.page_range.is_some_and(|(a, b)| (a..=b).contains(&page))
+        })
     }
     /// Applica `f` a tutte le pagine di tutte le lezioni (inserimento/eliminazione/riordino pagine).
     pub fn for_each_page_mut(&mut self, mut f: impl FnMut(&mut u32)) {
         fn fix(r: &mut Option<(u32, u32)>, f: &mut impl FnMut(&mut u32)) {
-            if let Some((a, b)) = r { f(a); f(b); if *a > *b { std::mem::swap(a, b); } }
+            if let Some((a, b)) = r {
+                f(a);
+                f(b);
+                if *a > *b {
+                    std::mem::swap(a, b);
+                }
+            }
         }
-        for (_, p) in &mut self.timeline { f(p); }
-        for s in &mut self.segments { f(&mut s.page); }
+        for (_, p) in &mut self.timeline {
+            f(p);
+        }
+        for s in &mut self.segments {
+            f(&mut s.page);
+        }
         fix(&mut self.page_range, &mut f);
         for l in &mut self.other_lectures {
-            for (_, p) in &mut l.timeline { f(p); }
-            for s in &mut l.segments { f(&mut s.page); }
+            for (_, p) in &mut l.timeline {
+                f(p);
+            }
+            for s in &mut l.segments {
+                f(&mut s.page);
+            }
             fix(&mut l.page_range, &mut f);
         }
     }
@@ -408,11 +443,11 @@ impl AudioEngine {
     }
 
     pub fn current_pos_ms(&mut self) -> u64 {
-        if let Some(player) = &self.player {
-            if player.empty() {
-                self.last_resume_instant = None;
-                return self.total_duration_ms;
-            }
+        if let Some(player) = &self.player
+            && player.empty()
+        {
+            self.last_resume_instant = None;
+            return self.total_duration_ms;
         }
         let elapsed = self
             .last_resume_instant
@@ -505,14 +540,14 @@ impl AudioEngine {
                 .build_input_stream(
                     config.into(),
                     move |data: &[f32], _: &_| {
-                        if let Ok(mut guard) = writer_clone.lock() {
-                            if let Some(w) = guard.as_mut() {
-                                for frame in data.chunks(channels) {
-                                    let mono: f32 =
-                                        frame.iter().copied().sum::<f32>() / (channels as f32);
-                                    let amp = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                                    let _ = w.write_sample(amp);
-                                }
+                        if let Ok(mut guard) = writer_clone.lock()
+                            && let Some(w) = guard.as_mut()
+                        {
+                            for frame in data.chunks(channels) {
+                                let mono: f32 =
+                                    frame.iter().copied().sum::<f32>() / (channels as f32);
+                                let amp = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                                let _ = w.write_sample(amp);
                             }
                         }
                     },
@@ -524,12 +559,12 @@ impl AudioEngine {
                 .build_input_stream(
                     config.into(),
                     move |data: &[i16], _: &_| {
-                        if let Ok(mut guard) = writer_clone.lock() {
-                            if let Some(w) = guard.as_mut() {
-                                for frame in data.chunks(channels) {
-                                    let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-                                    let _ = w.write_sample((sum / channels as i32) as i16);
-                                }
+                        if let Ok(mut guard) = writer_clone.lock()
+                            && let Some(w) = guard.as_mut()
+                        {
+                            for frame in data.chunks(channels) {
+                                let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                                let _ = w.write_sample((sum / channels as i32) as i16);
                             }
                         }
                     },
@@ -553,10 +588,10 @@ impl AudioEngine {
     /// Stops recording, finalizes the WAV header and normalizes to 16kHz Mono for ASR.
     pub fn stop_recording(&mut self, final_wav_path: &Path) -> Option<(RecordingTarget, u64)> {
         self.rec_stream.take(); // Drops stream
-        if let Ok(mut guard) = self.rec_writer.lock() {
-            if let Some(writer) = guard.take() {
-                let _ = writer.finalize();
-            }
+        if let Ok(mut guard) = self.rec_writer.lock()
+            && let Some(writer) = guard.take()
+        {
+            let _ = writer.finalize();
         }
         let target = self.rec_target.take()?;
         let raw_path = self.rec_raw_path.take()?;
@@ -612,10 +647,10 @@ impl AudioEngine {
         Ok(())
     }
     fn request_stretch(&mut self, original: &Path, speed: f32) {
-        if let Some((s, _)) = &self.pending_stretch {
-            if (s - speed).abs() < 0.001 {
-                return;
-            }
+        if let Some((s, _)) = &self.pending_stretch
+            && (s - speed).abs() < 0.001
+        {
+            return;
         }
         let (tx, rx) = mpsc::channel();
         let path = original.to_path_buf();
@@ -721,17 +756,16 @@ impl AudioEngine {
         } else {
             clamped
         };
-        if let Some(player) = &self.player {
-            if player
+        if let Some(player) = &self.player
+            && player
                 .try_seek(Duration::from_millis(player_target))
                 .is_ok()
-            {
-                self.base_pos_ms = clamped;
-                if !player.is_paused() {
-                    self.last_resume_instant = Some(Instant::now());
-                }
-                return;
+        {
+            self.base_pos_ms = clamped;
+            if !player.is_paused() {
+                self.last_resume_instant = Some(Instant::now());
             }
+            return;
         }
         if let Some(path) = self.active_file.clone() {
             let lbl = self.playing_label.clone();
@@ -928,10 +962,10 @@ pub fn is_asr_model_dir(p: &Path) -> bool {
 }
 
 pub fn find_asr_model() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LAPIS_ASR_MODEL").map(PathBuf::from) {
-        if is_asr_model_dir(&p) {
-            return Some(p);
-        }
+    if let Some(p) = std::env::var_os("LAPIS_ASR_MODEL").map(PathBuf::from)
+        && is_asr_model_dir(&p)
+    {
+        return Some(p);
     }
 
     let models_dir = crate::paths::models_dir();
@@ -990,10 +1024,10 @@ fn get_asr(model_dir: &Path) -> Result<SharedAsr, String> {
         .lock()
         .map_err(|_| "ASR cache lock poisoned".to_string())?;
 
-    if let Some((cached, m)) = guard.as_ref() {
-        if cached == model_dir {
-            return Ok(m.clone());
-        }
+    if let Some((cached, m)) = guard.as_ref()
+        && cached == model_dir
+    {
+        return Ok(m.clone());
     }
 
     let model = ParakeetTDT::from_pretrained(model_dir, Some(asr_exec_config()?))
@@ -1251,15 +1285,42 @@ fn transcribe_chunks(
 
 /// Transcribes the lecture and aligns it to slides, emitting partial results after each chunk.
 /// `live_timeline`: recorded/pinned slide markers to trust instead of text alignment.
-pub fn transcribe_lecture(model_dir: &Path, wav_path: &Path, cancel: &AtomicBool, emit: &mut dyn FnMut(AsrJobResult)) {
+pub fn transcribe_lecture(
+    model_dir: &Path,
+    wav_path: &Path,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(AsrJobResult),
+) {
     let to_segs = |v: &[(u64, u64, String)]| -> Vec<TranscriptSegment> {
-        v.iter().map(|(a, b, t)| TranscriptSegment { start_ms: *a, end_ms: *b, page: 0, text: t.clone() }).collect()
+        v.iter()
+            .map(|(a, b, t)| TranscriptSegment {
+                start_ms: *a,
+                end_ms: *b,
+                page: 0,
+                text: t.clone(),
+            })
+            .collect()
     };
-    let res = transcribe_chunks(model_dir, wav_path, cancel, &mut |segs, done_ms, total_ms| {
-        emit(AsrJobResult::Lecture { segments: to_segs(segs), done_ms, total_ms, finished: false });
-    });
+    let res = transcribe_chunks(
+        model_dir,
+        wav_path,
+        cancel,
+        &mut |segs, done_ms, total_ms| {
+            emit(AsrJobResult::Lecture {
+                segments: to_segs(segs),
+                done_ms,
+                total_ms,
+                finished: false,
+            });
+        },
+    );
     emit(match res {
-        Ok((segs, total_ms)) => AsrJobResult::Lecture { segments: to_segs(&segs), done_ms: total_ms, total_ms, finished: true },
+        Ok((segs, total_ms)) => AsrJobResult::Lecture {
+            segments: to_segs(&segs),
+            done_ms: total_ms,
+            total_ms,
+            finished: true,
+        },
         Err(e) => e.into_job(),
     });
 }
@@ -1331,14 +1392,18 @@ const STOPWORDS: &[&str] = &[
     "quello", "quella", "come", "dove", "quando", "perché", "perche", "allora", "quindi", "cioè",
     "cioe", "ecco", "dunque", "però", "pero", "molto", "tutti", "tutto", "tutta", "ogni", "nella",
     "nelle", "sulla", "sulle", "dalla", "alla", "alle", "that", "this", "with", "from", "have",
-    "will", "what", "there", "their", "which", "about",
-    "che", "per", "con", "non", "una", "gli", "the", "and", "for",
+    "will", "what", "there", "their", "which", "about", "che", "per", "con", "non", "una", "gli",
+    "the", "and", "for",
 ];
 
 fn fold(c: char) -> char {
     match c {
-        'à'|'á'|'â'|'ä' => 'a', 'è'|'é'|'ê'|'ë' => 'e', 'ì'|'í'|'î'|'ï' => 'i',
-        'ò'|'ó'|'ô'|'ö' => 'o', 'ù'|'ú'|'û'|'ü' => 'u', c => c,
+        'à' | 'á' | 'â' | 'ä' => 'a',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'ò' | 'ó' | 'ô' | 'ö' => 'o',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        c => c,
     }
 }
 
@@ -1355,7 +1420,9 @@ fn extract_stems(text: &str) -> HashSet<String> {
         .split_whitespace()
         .filter(|w| {
             let n = w.chars().count();
-            (n >= 4 || (n >= 3 && w.chars().all(|c| c.is_ascii_alphanumeric())) || (n >= 2 && w.chars().any(|c| c.is_ascii_digit())))
+            (n >= 4
+                || (n >= 3 && w.chars().all(|c| c.is_ascii_alphanumeric()))
+                || (n >= 2 && w.chars().any(|c| c.is_ascii_digit())))
                 && !STOPWORDS.contains(w)
         })
         .map(|w| w.chars().take(6).collect::<String>())
@@ -1369,10 +1436,14 @@ fn despike(pages: &mut [u32], min_run: usize) {
     let mut i = 0;
     while i < pages.len() {
         let mut j = i;
-        while j < pages.len() && pages[j] == pages[i] { j += 1; }
+        while j < pages.len() && pages[j] == pages[i] {
+            j += 1;
+        }
         if j - i < min_run && i > 0 && j < pages.len() && pages[i - 1] == pages[j] {
             let v = pages[i - 1];
-            for x in &mut pages[i..j] { *x = v; }
+            for x in &mut pages[i..j] {
+                *x = v;
+            }
         }
         i = j;
     }
@@ -1435,7 +1506,9 @@ pub fn align_segments_to_slides(
         for t in &feats {
             if let Some(list) = inv.get(t.as_str()) {
                 let w = idf.get(t.as_str()).copied().unwrap_or(0.0);
-                for &p in list { raw_sim[k * n_slides + p] += w / norm; }
+                for &p in list {
+                    raw_sim[k * n_slides + p] += w / norm;
+                }
             }
         }
     }
@@ -1445,12 +1518,18 @@ pub fn align_segments_to_slides(
         let mut wsum = 0.0;
         for d in -W..=W {
             let j = k as isize + d;
-            if j < 0 || j >= k_segs as isize { continue; }
+            if j < 0 || j >= k_segs as isize {
+                continue;
+            }
             let w = 1.0 - (d.abs() as f32) / (W as f32 + 1.0);
             wsum += w;
-            for p in 0..n_slides { sim[k * n_slides + p] += w * raw_sim[j as usize * n_slides + p]; }
+            for p in 0..n_slides {
+                sim[k * n_slides + p] += w * raw_sim[j as usize * n_slides + p];
+            }
         }
-        for p in 0..n_slides { sim[k * n_slides + p] /= wsum; }
+        for p in 0..n_slides {
+            sim[k * n_slides + p] /= wsum;
+        }
     }
 
     let mut prev = vec![0.0f32; n_slides];

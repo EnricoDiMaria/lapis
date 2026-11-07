@@ -104,7 +104,7 @@ impl SpellChecker {
         }
         let aff = fs::read_to_string(aff_path).map_err(|e| e.to_string())?;
         let dic = fs::read_to_string(&dic_path).map_err(|e| e.to_string())?;
-        
+
         match spellbook::Dictionary::new(&aff, &dic) {
             Ok(d) => {
                 self.dict = Some(d);
@@ -157,11 +157,10 @@ impl SpellChecker {
             return true;
         }
         // Ignore ALL-CAPS acronyms (CPU, RAM, PDF...) or tokens with digits
-        if word.chars().all(|c| c.is_uppercase()) || raw_token.chars().any(|c| c.is_ascii_digit())
-        {
+        if word.chars().all(|c| c.is_uppercase()) || raw_token.chars().any(|c| c.is_ascii_digit()) {
             return true;
         }
-        
+
         match &self.dict {
             Some(d) => d.check(word),
             None => true, // Se il dizionario non è caricato, non segnalare errori
@@ -184,10 +183,10 @@ impl SpellChecker {
 
     pub fn ignore_word(&mut self, word: &str) {
         let clean = word.trim().to_lowercase();
-        if !clean.is_empty() {
-            if let Some(dict) = &mut self.dict {
-                let _ = dict.add(&clean);
-            }
+        if !clean.is_empty()
+            && let Some(dict) = &mut self.dict
+        {
+            let _ = dict.add(&clean);
         }
     }
 }
@@ -204,7 +203,7 @@ pub enum SpellAction {
 pub fn word_at_char_index(text: &str, idx: usize) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = text.chars().collect();
     let is_w = |c: char| c.is_alphabetic() || c == '\'';
- 
+
     let mut i = idx.min(chars.len());
     // Il cursore sta TRA due caratteri: scegli quello che appartiene a una parola
     if !(i < chars.len() && is_w(chars[i])) {
@@ -214,7 +213,7 @@ pub fn word_at_char_index(text: &str, idx: usize) -> Option<(usize, usize, Strin
             return None;
         }
     }
- 
+
     let mut s = i;
     while s > 0 && is_w(chars[s - 1]) {
         s -= 1;
@@ -237,7 +236,15 @@ pub fn word_at_char_index(text: &str, idx: usize) -> Option<(usize, usize, Strin
 }
 
 pub fn replace_char_range(text: &mut String, start: usize, end: usize, with: &str) {
-    let b0 = text.char_indices().nth(start).map(|(i, _)| i).unwrap_or(text.len());
-    let b1 = text.char_indices().nth(end).map(|(i, _)| i).unwrap_or(text.len());
+    let b0 = text
+        .char_indices()
+        .nth(start)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    let b1 = text
+        .char_indices()
+        .nth(end)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
     text.replace_range(b0..b1, with);
 }

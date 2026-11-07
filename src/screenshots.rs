@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Mutex, OnceLock};
 
 /// Non-premultiplied RGBA8 image.
@@ -35,11 +35,18 @@ impl Shot {
         if self.width <= max_width || self.width == 0 {
             return self;
         }
-        let nh = ((self.height as f64) * (max_width as f64) / (self.width as f64)).round().max(1.0) as u32;
+        let nh = ((self.height as f64) * (max_width as f64) / (self.width as f64))
+            .round()
+            .max(1.0) as u32;
         let Some(img) = image::RgbaImage::from_raw(self.width, self.height, self.rgba) else {
-            return Shot { width: 0, height: 0, rgba: Vec::new() };
+            return Shot {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+            };
         };
-        let small = image::imageops::resize(&img, max_width, nh, image::imageops::FilterType::Triangle);
+        let small =
+            image::imageops::resize(&img, max_width, nh, image::imageops::FilterType::Triangle);
         Shot {
             width: small.width(),
             height: small.height(),
@@ -48,7 +55,9 @@ impl Shot {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.width == 0 || self.height == 0 || self.rgba.len() < (self.width as usize) * (self.height as usize) * 4
+        self.width == 0
+            || self.height == 0
+            || self.rgba.len() < (self.width as usize) * (self.height as usize) * 4
     }
 }
 
@@ -78,7 +87,10 @@ pub fn prefetch_clipboard_image() -> bool {
 
 pub fn is_image_path(p: &Path) -> bool {
     matches!(
-        p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
         Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
     )
 }
@@ -87,25 +99,25 @@ pub fn is_image_path(p: &Path) -> bool {
 /// 1) arboard (X11 and, with the `wayland-data-control` feature, Wayland)
 /// 2) External commands, as you already do for text: wl-paste (Wayland) and xclip (X11)
 fn read_clipboard_image() -> Option<Shot> {
-    if let Ok(g) = shot_cache().lock() {
-        if let Some(cached) = g.as_ref() {
-            return Some(Shot {
-                width: cached.width,
-                height: cached.height,
-                rgba: cached.rgba.clone(),
-            });
-        }
+    if let Ok(g) = shot_cache().lock()
+        && let Some(cached) = g.as_ref()
+    {
+        return Some(Shot {
+            width: cached.width,
+            height: cached.height,
+            rgba: cached.rgba.clone(),
+        });
     }
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if let Ok(img) = cb.get_image() {
-            let shot = Shot {
-                width: img.width as u32,
-                height: img.height as u32,
-                rgba: img.bytes.into_owned(),
-            };
-            if !shot.is_empty() {
-                return Some(shot);
-            }
+    if let Ok(mut cb) = arboard::Clipboard::new()
+        && let Ok(img) = cb.get_image()
+    {
+        let shot = Shot {
+            width: img.width as u32,
+            height: img.height as u32,
+            rgba: img.bytes.into_owned(),
+        };
+        if !shot.is_empty() {
+            return Some(shot);
         }
     }
     read_clipboard_image_external()
@@ -116,7 +128,10 @@ fn read_clipboard_image() -> Option<Shot> {
 fn read_clipboard_image_external() -> Option<Shot> {
     let attempts: [(&str, &[&str]); 2] = [
         ("wl-paste", &["--type", "image/png"]),
-        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
     ];
     for (cmd, args) in attempts {
         let out = Command::new(cmd)
@@ -124,12 +139,12 @@ fn read_clipboard_image_external() -> Option<Shot> {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output();
-        if let Ok(out) = out {
-            if out.status.success() && !out.stdout.is_empty() {
-                if let Some(shot) = Shot::from_bytes(&out.stdout) {
-                    return Some(shot);
-                }
-            }
+        if let Ok(out) = out
+            && out.status.success()
+            && !out.stdout.is_empty()
+            && let Some(shot) = Shot::from_bytes(&out.stdout)
+        {
+            return Some(shot);
         }
     }
     None
@@ -183,7 +198,10 @@ pub fn is_image_placeholder(text: &str) -> bool {
     let rest = rest.trim();
     let mut it = rest.splitn(2, 'x');
     matches!(
-        (it.next().map(|a| a.trim().parse::<u32>()), it.next().map(|b| b.trim().parse::<u32>())),
+        (
+            it.next().map(|a| a.trim().parse::<u32>()),
+            it.next().map(|b| b.trim().parse::<u32>())
+        ),
         (Some(Ok(_)), Some(Ok(_)))
     )
 }
@@ -200,8 +218,14 @@ pub fn save_png(shot: &Shot, dir: &Path) -> io::Result<PathBuf> {
         path = dir.join(format!("shot_{millis}_{n}.png"));
         n += 1;
     }
-    image::save_buffer(&path, &shot.rgba, shot.width, shot.height, image::ColorType::Rgba8)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    image::save_buffer(
+        &path,
+        &shot.rgba,
+        shot.width,
+        shot.height,
+        image::ColorType::Rgba8,
+    )
+    .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(path)
 }
 

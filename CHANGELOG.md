@@ -37,17 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first, then Edit and Preview, and the page navigation (lock, arrows) is more compact.
 - **Complete Home Screen Redesign.** Redesigned *Open PDF* and *Blank Notebook* cards with stable borders, dedicated Nerd Font icons (`󰝰` and `󰎔`), and optimized click targets. **Grid & List Views:** Introduced toggle views for *Recent documents* (grid view with flush thumbnails, progress bars; and list view with full-row click targets).
 
-- 
+
 - **Active Recall & Flashcards Trainer ()**:
   - **Slide Sync & Peek Workflow**: Added a `󰈙 Go to Slide` action that jumps the PDF view to the card's source page and hides the modal so you can inspect the slide without losing your review progress.
   - **Persistent Session State**: Closing the flashcards modal (`Esc` or backdrop click) mid-review now preserves your current card position, queue order, and session stats, resuming right where you left off when re-opened.
   - **Document-Wide Flashcard Indicator**: Added an accent notification dot on the toolbar's Flashcards button whenever flashcards are detected anywhere in the open document.
-- **Fixed Flashcard Re-queuing Count (`Again [1]`)**: Re-queuing a missed card now rotates it to the back of the remaining queue in-place instead of appending duplicate clones, keeping total deck counts accurate and preventing duplicate entries in Anki exports.
-- **Fixed Flashcards Modal Header Layout**: Resolved an issue where the `Refresh`, `Export Anki`, and `Close` buttons could overlap the modal title, and added dedicated scroll containers for long Markdown questions and answers.
+  - **Fixed Flashcard Re-queuing Count (`Again [1]`)**: Re-queuing a missed card now rotates it to the back of the remaining queue in-place instead of appending duplicate clones, keeping total deck counts accurate and preventing duplicate entries in Anki exports.
+  - **Fixed Flashcards Modal Header Layout**: Resolved an issue where the `Refresh`, `Export Anki`, and `Close` buttons could overlap the modal title, and added dedicated scroll containers for long Markdown questions and answers.
 
 ### Fixed
 - Textboxes are now rendered on top of screenshots added in the PDF page.
 - Screenshots and snips are now correctly exported
+- Overall code improvement
 
 ## [1.2.1] - 2026/11/06 
 

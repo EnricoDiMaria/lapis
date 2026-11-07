@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::path::{Path, PathBuf};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AnnotationKind {
@@ -72,7 +72,11 @@ pub struct SketchPage {
 
 impl SketchPage {
     pub fn new(paper: BlankPageStyle) -> Self {
-        Self { paper, strokes: Vec::new(), legacy_aspect: None }
+        Self {
+            paper,
+            strokes: Vec::new(),
+            legacy_aspect: None,
+        }
     }
 
     /// Nothing worth saving: no strokes and the default background.
@@ -110,7 +114,7 @@ pub struct DocData {
     pub notes: HashMap<u32, String>,
     #[serde(default)]
     pub annotations: HashMap<u32, Vec<PageAnnotation>>,
-    #[serde(default)] 
+    #[serde(default)]
     pub blank_pages: std::collections::HashSet<u32>,
     /// Per-page sketch sheets (notes panel "Sketch" tab).
     #[serde(default)]
@@ -183,22 +187,31 @@ fn save_pdf_with_notes(
         let file = fs::File::create(&tmp_path)?;
         let mut w = BufWriter::with_capacity(1 << 20, file);
         doc.save_to(&mut w)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("lopdf save error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
         w.write_all(notes)?;
         w.flush()
     })();
-    res.and_then(|_| fs::rename(&tmp_path, pdf_path)).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        e
-    })
+    res.and_then(|_| fs::rename(&tmp_path, pdf_path))
+        .inspect_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+        })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlankPageStyle { Ruled, Dotted, Grid, Blank }
-impl Default for BlankPageStyle { fn default() -> Self { Self::Ruled } }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BlankPageStyle {
+    #[default]
+    Ruled,
+    Dotted,
+    Grid,
+    Blank,
+}
 
-pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, style: BlankPageStyle) -> io::Result<u32> {
-    use lopdf::{dictionary, Object, ObjectId, Stream};
+pub fn insert_blank_page_with_style_into_pdf(
+    pdf_path: &Path,
+    after_page: u32,
+    style: BlankPageStyle,
+) -> io::Result<u32> {
+    use lopdf::{Object, ObjectId, Stream, dictionary};
     use std::fmt::Write as _;
 
     ensure_original_pdf_backup(pdf_path)?;
@@ -267,8 +280,7 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
     }
 
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
-    let mut doc = load_lopdf(&clean, pdf_path, "ins")
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut doc = load_lopdf(&clean, pdf_path, "ins").map_err(|e| io::Error::other(e))?;
     drop(clean);
 
     let pages = doc.get_pages();
@@ -281,7 +293,7 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
         .catalog()
         .and_then(|cat| cat.get(b"Pages"))
         .and_then(|o| o.as_reference())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     let mut x0 = 0.0_f32;
     let mut y0 = 0.0_f32;
@@ -291,20 +303,19 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
     if let Some(id) = ref_id {
         let mb = find_inherited_array(&doc, id, b"CropBox")
             .or_else(|| find_inherited_array(&doc, id, b"MediaBox"));
-        if let Some(arr) = mb {
-            if arr.len() == 4 {
-                if let (Some(bx0), Some(by0), Some(bx1), Some(by1)) = (
-                    obj_to_f32(&arr[0]),
-                    obj_to_f32(&arr[1]),
-                    obj_to_f32(&arr[2]),
-                    obj_to_f32(&arr[3]),
-                ) {
-                    x0 = bx0.min(bx1);
-                    y0 = by0.min(by1);
-                    width = (bx1 - bx0).abs().max(72.0);
-                    height = (by1 - by0).abs().max(72.0);
-                }
-            }
+        if let Some(arr) = mb
+            && arr.len() == 4
+            && let (Some(bx0), Some(by0), Some(bx1), Some(by1)) = (
+                obj_to_f32(&arr[0]),
+                obj_to_f32(&arr[1]),
+                obj_to_f32(&arr[2]),
+                obj_to_f32(&arr[3]),
+            )
+        {
+            x0 = bx0.min(bx1);
+            y0 = by0.min(by1);
+            width = (bx1 - bx0).abs().max(72.0);
+            height = (by1 - by0).abs().max(72.0);
         }
         let rot = find_rotation(&doc, id);
         if rot == 90 || rot == 270 {
@@ -337,7 +348,7 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
     let line_w = (height / 650.0).clamp(0.25, 0.75);
     let mut grid_ops = String::with_capacity(4096);
     match style {
-        BlankPageStyle::Blank => {},
+        BlankPageStyle::Blank => {}
         BlankPageStyle::Ruled => {
             let step_y = usable_h / 18.0;
             let _ = write!(grid_ops, "q 0.86 0.89 0.94 RG {line_w:.2} w ");
@@ -345,7 +356,7 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
                 let y = (y0 + height - top_margin) - (i as f32) * step_y;
                 let _ = write!(grid_ops, "{x_start:.2} {y:.2} m {x_end:.2} {y:.2} l S ");
             }
-            grid_ops.push_str("Q");
+            grid_ops.push('Q');
         }
         BlankPageStyle::Grid => {
             // Keep the grid inside the page margins. The clip rectangle is inset by
@@ -359,7 +370,8 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
             let clip_y = y_bottom + clip_inset;
             let clip_w = (x_end - x_start - 2.0 * clip_inset).max(1.0);
             let clip_h = (y_top - y_bottom - 2.0 * clip_inset).max(1.0);
-            let _ = write!(grid_ops,
+            let _ = write!(
+                grid_ops,
                 "q 0.88 0.90 0.93 RG {line_w:.2} w {clip_x:.2} {clip_y:.2} {clip_w:.2} {clip_h:.2} re W n "
             );
             let mut x = x_start + step * 0.5;
@@ -372,7 +384,7 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
                 let _ = write!(grid_ops, "{x_start:.2} {y:.2} m {x_end:.2} {y:.2} l S ");
                 y += step;
             }
-            grid_ops.push_str("Q");
+            grid_ops.push('Q');
         }
         BlankPageStyle::Dotted => {
             let step = (width / 32.0).clamp(10.0, 24.0);
@@ -381,10 +393,18 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
             let mut y = y0 + bottom_margin;
             while y <= y0 + height - top_margin {
                 let mut x = x_start;
-                while x <= x_end { let _ = write!(grid_ops, "{:.2} {:.2} {dot:.2} {dot:.2} re f ", x - dot * 0.5, y - dot * 0.5); x += step; }
+                while x <= x_end {
+                    let _ = write!(
+                        grid_ops,
+                        "{:.2} {:.2} {dot:.2} {dot:.2} re f ",
+                        x - dot * 0.5,
+                        y - dot * 0.5
+                    );
+                    x += step;
+                }
                 y += step;
             }
-            grid_ops.push_str("Q");
+            grid_ops.push('Q');
         }
     }
 
@@ -400,11 +420,13 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
         "Resources" => dictionary! {},
     });
 
-    if let Ok(parent_dict) = doc.get_object_mut(target_parent_id).and_then(|o| o.as_dict_mut()) {
-        if let Ok(kids) = parent_dict.get_mut(b"Kids").and_then(|o| o.as_array_mut()) {
-            let pos = insert_pos.unwrap_or(kids.len()).min(kids.len());
-            kids.insert(pos, Object::Reference(new_page_id));
-        }
+    if let Ok(parent_dict) = doc
+        .get_object_mut(target_parent_id)
+        .and_then(|o| o.as_dict_mut())
+        && let Ok(kids) = parent_dict.get_mut(b"Kids").and_then(|o| o.as_array_mut())
+    {
+        let pos = insert_pos.unwrap_or(kids.len()).min(kids.len());
+        kids.insert(pos, Object::Reference(new_page_id));
     }
 
     let mut node = Some(target_parent_id);
@@ -424,7 +446,13 @@ pub fn insert_blank_page_with_style_into_pdf(pdf_path: &Path, after_page: u32, s
     let actual_new_page_num = doc
         .get_pages()
         .into_iter()
-        .find_map(|(p_num, oid)| if oid == new_page_id { Some(p_num) } else { None })
+        .find_map(|(p_num, oid)| {
+            if oid == new_page_id {
+                Some(p_num)
+            } else {
+                None
+            }
+        })
         .unwrap_or(ref_page_num + 1);
 
     save_pdf_with_notes(&mut doc, pdf_path, "ins", &notes)?;
@@ -435,8 +463,7 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
     ensure_original_pdf_backup(pdf_path)?;
 
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
-    let mut doc = load_lopdf(&clean, pdf_path, "del")
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut doc = load_lopdf(&clean, pdf_path, "del").map_err(|e| io::Error::other(e))?;
     drop(clean);
 
     let pages = doc.get_pages();
@@ -469,26 +496,32 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     }
     ensure_original_pdf_backup(pdf_path)?;
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
-    let mut doc = load_lopdf(&clean, pdf_path, "reorder")
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut doc = load_lopdf(&clean, pdf_path, "reorder").map_err(|e| io::Error::other(e))?;
     drop(clean);
 
     let pages_map = doc.get_pages();
     let total = pages_map.len() as u32;
     if from_page == 0 || to_page == 0 || from_page > total || to_page > total {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Page index out of range"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Page index out of range",
+        ));
     }
     let mut ordered: Vec<ObjectId> = (1..=total)
         .filter_map(|n| pages_map.get(&n).copied())
         .collect();
     drop(pages_map);
     if ordered.len() != total as usize {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid PDF page tree"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid PDF page tree",
+        ));
     }
     let moved = ordered.remove((from_page - 1) as usize);
     ordered.insert((to_page - 1) as usize, moved);
 
-    let root_id = doc.catalog()
+    let root_id = doc
+        .catalog()
         .and_then(|cat| cat.get(b"Pages"))
         .and_then(|o| o.as_reference())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -497,16 +530,20 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     const INHERITED: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
     for &page_id in &ordered {
         let mut inherited: Vec<(&'static [u8], Object)> = Vec::new();
-        let parent = doc.get_object(page_id)
+        let parent = doc
+            .get_object(page_id)
             .and_then(|o| o.as_dict())
             .ok()
             .and_then(|d| d.get(b"Parent").and_then(|o| o.as_reference()).ok());
         for key in INHERITED {
-            let present = doc.get_object(page_id)
+            let present = doc
+                .get_object(page_id)
                 .and_then(|o| o.as_dict())
                 .map(|d| d.has(key))
                 .unwrap_or(false);
-            if present { continue; }
+            if present {
+                continue;
+            }
             let mut cursor = parent;
             while let Some(id) = cursor {
                 let dict = match doc.get_object(id).and_then(|o| o.as_dict()) {
@@ -520,17 +557,24 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
                 cursor = dict.get(b"Parent").and_then(|o| o.as_reference()).ok();
             }
         }
-        let page_dict = doc.get_object_mut(page_id)
+        let page_dict = doc
+            .get_object_mut(page_id)
             .and_then(|o| o.as_dict_mut())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        for (key, value) in inherited { page_dict.set(key, value); }
+        for (key, value) in inherited {
+            page_dict.set(key, value);
+        }
         page_dict.set("Parent", Object::Reference(root_id));
     }
 
-    let root = doc.get_object_mut(root_id)
+    let root = doc
+        .get_object_mut(root_id)
         .and_then(|o| o.as_dict_mut())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    root.set("Kids", Object::Array(ordered.into_iter().map(Object::Reference).collect()));
+    root.set(
+        "Kids",
+        Object::Array(ordered.into_iter().map(Object::Reference).collect()),
+    );
     root.set("Count", Object::Integer(total as i64));
 
     save_pdf_with_notes(&mut doc, pdf_path, "reorder", &notes)
@@ -547,20 +591,20 @@ pub fn get_backup_path(pdf_path: &Path) -> PathBuf {
 
 pub fn parse_doc_data_bytes(bytes: &[u8]) -> Option<DocData> {
     let mut data: DocData = serde_json::from_slice(bytes).ok()?;
-    
+
     data.notes.retain(|_, v| !v.trim().is_empty());
     data.annotations.retain(|_, v| !v.is_empty());
     for sketch in data.sketches.values_mut() {
         sketch.migrate_legacy();
     }
     data.sketches.retain(|_, s| !s.is_default());
-    
+
     Some(data)
 }
 
 fn save_local_backup(pdf_path: &Path, data: &DocData) {
     if pdf_path.as_os_str().is_empty() {
-      return;
+        return;
     }
     let backup_path = get_backup_path(pdf_path);
     if data.notes.is_empty() && data.annotations.is_empty() {
@@ -568,14 +612,12 @@ fn save_local_backup(pdf_path: &Path, data: &DocData) {
         return;
     }
     let mut data = data.clone();
-    data.source_path = Some(
-        dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()),
-    );
+    data.source_path =
+        Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
     if let Ok(json) = serde_json::to_string_pretty(&data) {
         let _ = fs::write(backup_path, json);
     }
 }
-
 
 fn load_local_backup(pdf_path: &Path) -> Option<DocData> {
     if pdf_path.as_os_str().is_empty() {
@@ -644,7 +686,7 @@ fn stash_conflict(key: &str, lost: &DocData, kept: &DocData) {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with(&prefix))
+                .is_some_and(|n| n.starts_with(&prefix))
         })
         .collect();
     all.sort(); // timestamps with the same number of digits: lexicographic == chronological
@@ -771,7 +813,7 @@ pub fn save_doc_data(
     let mut clean_anns = annotations.clone();
     clean_anns.retain(|_, v| !v.is_empty());
 
-    let mut clean_pages: HashSet<u32> = blank_pages.clone();
+    let mut clean_pages: HashSet<u32> = blank_pages;
     clean_pages.retain(|&v| v != 0);
 
     let mut clean_sketches = sketches.clone();
@@ -847,8 +889,12 @@ fn parse_slide_header(line: &str) -> Option<(u32, Option<&str>)> {
     let prefixes = ["slide", "pagina", "page", "pag.", "pag", "sld", "p.", "p"];
 
     for kw in prefixes {
-        let Some(head) = core.get(..kw.len()) else { continue }; // None se non è char boundary
-        if core.len() <= kw.len() || !head.eq_ignore_ascii_case(kw) { continue; }
+        let Some(head) = core.get(..kw.len()) else {
+            continue;
+        }; // None se non è char boundary
+        if core.len() <= kw.len() || !head.eq_ignore_ascii_case(kw) {
+            continue;
+        }
         let after_kw = &core[kw.len()..];
 
         // Must be followed by whitespace, '#', '.', ':' or '-' (prevents matching words like "point")
@@ -879,7 +925,7 @@ fn parse_slide_header(line: &str) -> Option<(u32, Option<&str>)> {
 
         // If remainder only contains closing divider chars (e.g. "---"), ignore it
         let clean_rem = remainder
-            .trim_start_matches(|c: char| matches!(c, ':' | '-' | '—' | '–' | ')' | ']'))
+            .trim_start_matches([':', '-', '—', '–', ')', ']'])
             .trim();
 
         if clean_rem.is_empty() {
@@ -903,18 +949,26 @@ fn parse_slide_header(line: &str) -> Option<(u32, Option<&str>)> {
 }
 
 fn parse_lapis_header(line: &str) -> Option<u32> {
-    let rest = line.trim().strip_prefix('#')?.trim_start_matches('#').trim_start();
-    rest.strip_prefix("Slide ")?.trim().parse().ok().filter(|&n| n > 0)
+    let rest = line
+        .trim()
+        .strip_prefix('#')?
+        .trim_start_matches('#')
+        .trim_start();
+    rest.strip_prefix("Slide ")?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
 }
 
 /// Imports notes from a `.txt` or `.md` file, mapping each section to its slide number.
 /// `max_pages` bounds the page numbers so out-of-range slides are ignored safely.
-pub fn import_notes_from_file(
-    path: &Path,
-    max_pages: u32,
-) -> io::Result<HashMap<u32, String>> {
+pub fn import_notes_from_file(path: &Path, max_pages: u32) -> io::Result<HashMap<u32, String>> {
     let text = fs::read_to_string(path)?;
-    let strict = text.lines().next().map_or(false, |l| l.starts_with("<!-- Notes exported from Lapis"));
+    let strict = text
+        .lines()
+        .next()
+        .is_some_and(|l| l.starts_with("<!-- Notes exported from Lapis"));
 
     let mut imported: HashMap<u32, String> = HashMap::new();
     let mut current_page: Option<u32> = None;
@@ -936,7 +990,11 @@ pub fn import_notes_from_file(
     };
 
     for line in text.lines() {
-        let hdr = if strict { parse_lapis_header(line).map(|n| (n, None)) } else { parse_slide_header(line) };
+        let hdr = if strict {
+            parse_lapis_header(line).map(|n| (n, None))
+        } else {
+            parse_slide_header(line)
+        };
         if let Some((page_num, inline_text)) = hdr {
             flush_note(current_page, &mut current_buf, &mut imported);
             current_page = Some(page_num);
@@ -993,14 +1051,14 @@ pub fn format_latex_expr(expr: &str) -> String {
         if let Some(close_num) = after_num.find('}') {
             let num = &after_num[..close_num];
             let rest = &after_num[close_num + 1..];
-            if let Some(after_den) = rest.strip_prefix('{') {
-                if let Some(close_den) = after_den.find('}') {
-                    let den = &after_den[..close_den];
-                    let replacement = format!("({}/{})", num, den);
-                    let total_len = 6 + close_num + 1 + 1 + close_den + 1;
-                    s.replace_range(pos..pos + total_len, &replacement);
-                    continue;
-                }
+            if let Some(after_den) = rest.strip_prefix('{')
+                && let Some(close_den) = after_den.find('}')
+            {
+                let den = &after_den[..close_den];
+                let replacement = format!("({}/{})", num, den);
+                let total_len = 6 + close_num + 1 + 1 + close_den + 1;
+                s.replace_range(pos..pos + total_len, &replacement);
+                continue;
             }
         }
         break;
@@ -1061,95 +1119,241 @@ pub fn format_latex_expr(expr: &str) -> String {
 
     const LATEX_SYMBOLS: &[(&str, &str)] = &[
         // Insiemi numerici (Blackboard bold)
-        ("\\mathbb{R}", "ℝ"), ("\\mathbb{N}", "ℕ"), ("\\mathbb{Z}", "ℤ"),
-        ("\\mathbb{Q}", "ℚ"), ("\\mathbb{C}", "ℂ"), ("\\mathbb{P}", "ℙ"),
-        ("\\mathbb{E}", "𝔼"), ("\\mathbb{F}", "𝔽"), ("\\mathbb{1}", "𝟙"),
-        ("\\Re", "ℜ"), ("\\Im", "ℑ"), ("\\ell", "ℓ"), ("\\hbar", "ℏ"),
-        ("\\wp", "℘"), ("\\aleph", "ℵ"),
+        ("\\mathbb{R}", "ℝ"),
+        ("\\mathbb{N}", "ℕ"),
+        ("\\mathbb{Z}", "ℤ"),
+        ("\\mathbb{Q}", "ℚ"),
+        ("\\mathbb{C}", "ℂ"),
+        ("\\mathbb{P}", "ℙ"),
+        ("\\mathbb{E}", "𝔼"),
+        ("\\mathbb{F}", "𝔽"),
+        ("\\mathbb{1}", "𝟙"),
+        ("\\Re", "ℜ"),
+        ("\\Im", "ℑ"),
+        ("\\ell", "ℓ"),
+        ("\\hbar", "ℏ"),
+        ("\\wp", "℘"),
+        ("\\aleph", "ℵ"),
         // Frecce e logica
-        ("\\Longleftrightarrow", "⟺"), ("\\Leftrightarrow", "⇔"),
-        ("\\longrightarrow", "⟶"), ("\\Longrightarrow", "⟹"),
-        ("\\longleftarrow", "⟵"), ("\\Longleftarrow", "⟸"),
-        ("\\longmapsto", "⟼"), ("\\leftrightarrow", "↔"),
-        ("\\rightleftharpoons", "⇌"), ("\\hookrightarrow", "↪"),
-        ("\\hookleftarrow", "↩"), ("\\twoheadrightarrow", "↠"),
-        ("\\rightarrow", "→"), ("\\Rightarrow", "⇒"),
-        ("\\leftarrow", "←"), ("\\Leftarrow", "⇐"),
-        ("\\uparrow", "↑"), ("\\Uparrow", "⇑"),
-        ("\\downarrow", "↓"), ("\\Downarrow", "⇓"),
-        ("\\updownarrow", "↕"), ("\\nearrow", "↗"),
-        ("\\searrow", "↘"), ("\\swarrow", "↙"), ("\\nwarrow", "↖"),
-        ("\\mapsto", "↦"), ("\\implies", "⇒"), ("\\impliedby", "⇐"),
-        ("\\iff", "⇔"), ("\\to", "→"), ("\\gets", "←"),
+        ("\\Longleftrightarrow", "⟺"),
+        ("\\Leftrightarrow", "⇔"),
+        ("\\longrightarrow", "⟶"),
+        ("\\Longrightarrow", "⟹"),
+        ("\\longleftarrow", "⟵"),
+        ("\\Longleftarrow", "⟸"),
+        ("\\longmapsto", "⟼"),
+        ("\\leftrightarrow", "↔"),
+        ("\\rightleftharpoons", "⇌"),
+        ("\\hookrightarrow", "↪"),
+        ("\\hookleftarrow", "↩"),
+        ("\\twoheadrightarrow", "↠"),
+        ("\\rightarrow", "→"),
+        ("\\Rightarrow", "⇒"),
+        ("\\leftarrow", "←"),
+        ("\\Leftarrow", "⇐"),
+        ("\\uparrow", "↑"),
+        ("\\Uparrow", "⇑"),
+        ("\\downarrow", "↓"),
+        ("\\Downarrow", "⇓"),
+        ("\\updownarrow", "↕"),
+        ("\\nearrow", "↗"),
+        ("\\searrow", "↘"),
+        ("\\swarrow", "↙"),
+        ("\\nwarrow", "↖"),
+        ("\\mapsto", "↦"),
+        ("\\implies", "⇒"),
+        ("\\impliedby", "⇐"),
+        ("\\iff", "⇔"),
+        ("\\to", "→"),
+        ("\\gets", "←"),
         // Quantificatori e operatori logici
-        ("\\forall", "∀"), ("\\exists", "∃"), ("\\nexists", "∄"),
-        ("\\therefore", "∴"), ("\\because", "∵"),
-        ("\\land", "∧"), ("\\wedge", "∧"), ("\\bigwedge", "⋀"),
-        ("\\lor", "∨"), ("\\vee", "∨"), ("\\bigvee", "⋁"),
-        ("\\neg", "¬"), ("\\lnot", "¬"), ("\\top", "⊤"), ("\\bot", "⊥"),
-        ("\\vdash", "⊢"), ("\\models", "⊨"),
+        ("\\forall", "∀"),
+        ("\\exists", "∃"),
+        ("\\nexists", "∄"),
+        ("\\therefore", "∴"),
+        ("\\because", "∵"),
+        ("\\land", "∧"),
+        ("\\wedge", "∧"),
+        ("\\bigwedge", "⋀"),
+        ("\\lor", "∨"),
+        ("\\vee", "∨"),
+        ("\\bigvee", "⋁"),
+        ("\\neg", "¬"),
+        ("\\lnot", "¬"),
+        ("\\top", "⊤"),
+        ("\\bot", "⊥"),
+        ("\\vdash", "⊢"),
+        ("\\models", "⊨"),
         // Insiemi e relazioni
-        ("\\subseteq", "⊆"), ("\\supseteq", "⊇"),
-        ("\\subsetneq", "⊊"), ("\\supsetneq", "⊋"),
-        ("\\nsubseteq", "⊈"), ("\\nsupseteq", "⊉"),
-        ("\\subset", "⊂"), ("\\supset", "⊃"),
-        ("\\emptyset", "∅"), ("\\varnothing", "∅"),
-        ("\\notin", "∉"), ("\\in", "∈"), ("\\ni", "∋"),
-        ("\\bigcup", "⋃"), ("\\bigcap", "⋂"),
-        ("\\bigsqcup", "⨆"), ("\\bigoplus", "⨁"), ("\\bigotimes", "⨂"),
-        ("\\cup", "∪"), ("\\cap", "∩"), ("\\setminus", "∖"),
+        ("\\subseteq", "⊆"),
+        ("\\supseteq", "⊇"),
+        ("\\subsetneq", "⊊"),
+        ("\\supsetneq", "⊋"),
+        ("\\nsubseteq", "⊈"),
+        ("\\nsupseteq", "⊉"),
+        ("\\subset", "⊂"),
+        ("\\supset", "⊃"),
+        ("\\emptyset", "∅"),
+        ("\\varnothing", "∅"),
+        ("\\notin", "∉"),
+        ("\\in", "∈"),
+        ("\\ni", "∋"),
+        ("\\bigcup", "⋃"),
+        ("\\bigcap", "⋂"),
+        ("\\bigsqcup", "⨆"),
+        ("\\bigoplus", "⨁"),
+        ("\\bigotimes", "⨂"),
+        ("\\cup", "∪"),
+        ("\\cap", "∩"),
+        ("\\setminus", "∖"),
         // Analysis and calculation.
-        ("\\iiint", "∭"), ("\\iint", "∬"), ("\\oint", "∮"), ("\\int", "∫"),
-        ("\\sum", "∑"), ("\\prod", "∏"), ("\\coprod", "∐"),
-        ("\\partial", "∂"), ("\\nabla", "∇"), ("\\infty", "∞"),
-        ("\\infinity", "∞"), ("\\sqrt[3]", "∛"), ("\\sqrt[4]", "∜"), ("\\sqrt", "√"),
-        ("\\lim", "lim"), ("\\sup", "sup"), ("\\inf", "inf"),
-        ("\\max", "max"), ("\\min", "min"), ("\\det", "det"),
-        ("\\dim", "dim"), ("\\ker", "ker"), ("\\deg", "deg"),
-        ("\\sin", "sin"), ("\\cos", "cos"), ("\\tan", "tan"),
-        ("\\arcsin", "arcsin"), ("\\arccos", "arccos"), ("\\arctan", "arctan"),
-        ("\\sinh", "sinh"), ("\\cosh", "cosh"), ("\\tanh", "tanh"),
-        ("\\log", "log"), ("\\ln", "ln"), ("\\exp", "exp"),
+        ("\\iiint", "∭"),
+        ("\\iint", "∬"),
+        ("\\oint", "∮"),
+        ("\\int", "∫"),
+        ("\\sum", "∑"),
+        ("\\prod", "∏"),
+        ("\\coprod", "∐"),
+        ("\\partial", "∂"),
+        ("\\nabla", "∇"),
+        ("\\infty", "∞"),
+        ("\\infinity", "∞"),
+        ("\\sqrt[3]", "∛"),
+        ("\\sqrt[4]", "∜"),
+        ("\\sqrt", "√"),
+        ("\\lim", "lim"),
+        ("\\sup", "sup"),
+        ("\\inf", "inf"),
+        ("\\max", "max"),
+        ("\\min", "min"),
+        ("\\det", "det"),
+        ("\\dim", "dim"),
+        ("\\ker", "ker"),
+        ("\\deg", "deg"),
+        ("\\sin", "sin"),
+        ("\\cos", "cos"),
+        ("\\tan", "tan"),
+        ("\\arcsin", "arcsin"),
+        ("\\arccos", "arccos"),
+        ("\\arctan", "arctan"),
+        ("\\sinh", "sinh"),
+        ("\\cosh", "cosh"),
+        ("\\tanh", "tanh"),
+        ("\\log", "log"),
+        ("\\ln", "ln"),
+        ("\\exp", "exp"),
         // Confronti ed equivalenze
-        ("\\approxeq", "≊"), ("\\approx", "≈"), ("\\simeq", "≃"),
-        ("\\cong", "≅"), ("\\equiv", "≡"), ("\\not\\equiv", "≢"),
-        ("\\propto", "∝"), ("\\sim", "∼"), ("\\asymp", "≍"),
-        ("\\leqslant", "⩽"), ("\\geqslant", "⩾"),
-        ("\\leq", "≤"), ("\\geq", "≥"), ("\\le", "≤"), ("\\ge", "≥"),
-        ("\\neq", "≠"), ("\\ne", "≠"), ("\\ll", "≪"), ("\\gg", "≫"),
-        ("\\prec", "≺"), ("\\succ", "≻"), ("\\preceq", "≼"), ("\\succeq", "≽"),
-        ("\\perp", "⊥"), ("\\parallel", "∥"), ("\\mid", "∣"), ("\\nmid", "∤"),
+        ("\\approxeq", "≊"),
+        ("\\approx", "≈"),
+        ("\\simeq", "≃"),
+        ("\\cong", "≅"),
+        ("\\equiv", "≡"),
+        ("\\not\\equiv", "≢"),
+        ("\\propto", "∝"),
+        ("\\sim", "∼"),
+        ("\\asymp", "≍"),
+        ("\\leqslant", "⩽"),
+        ("\\geqslant", "⩾"),
+        ("\\leq", "≤"),
+        ("\\geq", "≥"),
+        ("\\le", "≤"),
+        ("\\ge", "≥"),
+        ("\\neq", "≠"),
+        ("\\ne", "≠"),
+        ("\\ll", "≪"),
+        ("\\gg", "≫"),
+        ("\\prec", "≺"),
+        ("\\succ", "≻"),
+        ("\\preceq", "≼"),
+        ("\\succeq", "≽"),
+        ("\\perp", "⊥"),
+        ("\\parallel", "∥"),
+        ("\\mid", "∣"),
+        ("\\nmid", "∤"),
         // Operatori binari e delimitatori
-        ("\\otimes", "⊗"), ("\\oplus", "⊕"), ("\\ominus", "⊖"),
-        ("\\odot", "⊙"), ("\\circ", "∘"), ("\\bullet", "∙"),
-        ("\\times", "×"), ("\\div", "÷"), ("\\cdot", "·"),
-        ("\\pm", "±"), ("\\mp", "∓"), ("\\star", "⋆"), ("\\ast", "∗"),
-        ("\\langle", "⟨"), ("\\rangle", "⟩"),
-        ("\\lceil", "⌈"), ("\\rceil", "⌉"),
-        ("\\lfloor", "⌊"), ("\\rfloor", "⌋"),
-        ("\\ldots", "…"), ("\\cdots", "⋯"), ("\\vdots", "⋮"), ("\\ddots", "⋱"),
-        ("\\prime", "′"), ("\\degree", "°"), ("\\circ", "°"),
-        ("\\triangle", "△"), ("\\square", "□"), ("\\diamond", "⋄"),
+        ("\\otimes", "⊗"),
+        ("\\oplus", "⊕"),
+        ("\\ominus", "⊖"),
+        ("\\odot", "⊙"),
+        ("\\circ", "∘"),
+        ("\\bullet", "∙"),
+        ("\\times", "×"),
+        ("\\div", "÷"),
+        ("\\cdot", "·"),
+        ("\\pm", "±"),
+        ("\\mp", "∓"),
+        ("\\star", "⋆"),
+        ("\\ast", "∗"),
+        ("\\langle", "⟨"),
+        ("\\rangle", "⟩"),
+        ("\\lceil", "⌈"),
+        ("\\rceil", "⌉"),
+        ("\\lfloor", "⌊"),
+        ("\\rfloor", "⌋"),
+        ("\\ldots", "…"),
+        ("\\cdots", "⋯"),
+        ("\\vdots", "⋮"),
+        ("\\ddots", "⋱"),
+        ("\\prime", "′"),
+        ("\\degree", "°"),
+        ("\\circ", "°"),
+        ("\\triangle", "△"),
+        ("\\square", "□"),
+        ("\\diamond", "⋄"),
         ("\\angle", "∠"),
         // Alfabeto greco
-        ("\\varepsilon", "ε"), ("\\epsilon", "ϵ"),
-        ("\\vartheta", "ϑ"), ("\\theta", "θ"), ("\\Theta", "Θ"),
-        ("\\varpi", "ϖ"), ("\\pi", "π"), ("\\Pi", "Π"),
-        ("\\varrho", "ϱ"), ("\\rho", "ρ"),
-        ("\\varsigma", "ς"), ("\\sigma", "σ"), ("\\Sigma", "Σ"),
-        ("\\varphi", "φ"), ("\\phi", "ϕ"), ("\\Phi", "Φ"),
-        ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\Gamma", "Γ"),
-        ("\\delta", "δ"), ("\\Delta", "Δ"), ("\\zeta", "ζ"), ("\\eta", "η"),
-        ("\\iota", "ι"), ("\\kappa", "κ"), ("\\lambda", "λ"), ("\\Lambda", "Λ"),
-        ("\\mu", "μ"), ("\\nu", "ν"), ("\\xi", "ξ"), ("\\Xi", "Ξ"),
-        ("\\tau", "τ"), ("\\upsilon", "υ"), ("\\Upsilon", "Υ"),
-        ("\\chi", "χ"), ("\\psi", "ψ"), ("\\Psi", "Ψ"),
-        ("\\omega", "ω"), ("\\Omega", "Ω"),
-        ("\\left(", "("), ("\\right)", ")"),
-        ("\\left[", "["), ("\\right]", "]"),
-        ("\\left\\{", "{"), ("\\right\\}", "}"),
-        ("\\left|", "|"), ("\\right|", "|"),
-        ("\\,", " "), ("\\;", " "), ("\\quad", "  "), ("\\qquad", "    "),
+        ("\\varepsilon", "ε"),
+        ("\\epsilon", "ϵ"),
+        ("\\vartheta", "ϑ"),
+        ("\\theta", "θ"),
+        ("\\Theta", "Θ"),
+        ("\\varpi", "ϖ"),
+        ("\\pi", "π"),
+        ("\\Pi", "Π"),
+        ("\\varrho", "ϱ"),
+        ("\\rho", "ρ"),
+        ("\\varsigma", "ς"),
+        ("\\sigma", "σ"),
+        ("\\Sigma", "Σ"),
+        ("\\varphi", "φ"),
+        ("\\phi", "ϕ"),
+        ("\\Phi", "Φ"),
+        ("\\alpha", "α"),
+        ("\\beta", "β"),
+        ("\\gamma", "γ"),
+        ("\\Gamma", "Γ"),
+        ("\\delta", "δ"),
+        ("\\Delta", "Δ"),
+        ("\\zeta", "ζ"),
+        ("\\eta", "η"),
+        ("\\iota", "ι"),
+        ("\\kappa", "κ"),
+        ("\\lambda", "λ"),
+        ("\\Lambda", "Λ"),
+        ("\\mu", "μ"),
+        ("\\nu", "ν"),
+        ("\\xi", "ξ"),
+        ("\\Xi", "Ξ"),
+        ("\\tau", "τ"),
+        ("\\upsilon", "υ"),
+        ("\\Upsilon", "Υ"),
+        ("\\chi", "χ"),
+        ("\\psi", "ψ"),
+        ("\\Psi", "Ψ"),
+        ("\\omega", "ω"),
+        ("\\Omega", "Ω"),
+        ("\\left(", "("),
+        ("\\right)", ")"),
+        ("\\left[", "["),
+        ("\\right]", "]"),
+        ("\\left\\{", "{"),
+        ("\\right\\}", "}"),
+        ("\\left|", "|"),
+        ("\\right|", "|"),
+        ("\\,", " "),
+        ("\\;", " "),
+        ("\\quad", "  "),
+        ("\\qquad", "    "),
     ];
 
     for &(cmd, sym) in LATEX_SYMBOLS {
@@ -1262,7 +1466,7 @@ pub fn format_latex_expr(expr: &str) -> String {
         i += 1;
     }
 
-    out.replace('{', "").replace('}', "").replace(':', "∶")
+    out.replace(['{', '}'], "").replace(':', "∶")
 }
 
 // Convert `Term :: Definition` lines into Markdown callouts.
@@ -1274,35 +1478,91 @@ pub fn preprocess_definitions(markdown: &str) -> String {
     let mut in_math_block = false;
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") { in_code_block = !in_code_block; out.push_str(line); out.push('\n'); continue; }
-        if trimmed.starts_with("$$") { if !trimmed[2..].contains("$$") { in_math_block = !in_math_block; } out.push_str(line); out.push('\n'); continue; }
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if trimmed.starts_with("$$") {
+            if !trimmed[2..].contains("$$") {
+                in_math_block = !in_math_block;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
         if !in_code_block && !in_math_block {
             let clean = trimmed.trim_start_matches(['-', '*', '+']).trim();
-            let q_start = clean.strip_prefix("Q:").or_else(|| clean.strip_prefix("**Q:**")).or_else(|| clean.strip_prefix("D:"));
+            let q_start = clean
+                .strip_prefix("Q:")
+                .or_else(|| clean.strip_prefix("**Q:**"))
+                .or_else(|| clean.strip_prefix("D:"));
             if let Some(q) = q_start {
-                let mut question = q.trim().to_string(); let mut answer = String::new(); let mut in_answer = false;
+                let mut question = q.trim().to_string();
+                let mut answer = String::new();
+                let mut in_answer = false;
                 while let Some(next) = lines.peek() {
                     let t = next.trim();
-                    if t.is_empty() && in_answer { break; }
-                    if t.starts_with("Q:") || t.starts_with("**Q:**") || t.starts_with("D:") || t.contains("::") { break; }
+                    if t.is_empty() && in_answer {
+                        break;
+                    }
+                    if t.starts_with("Q:")
+                        || t.starts_with("**Q:**")
+                        || t.starts_with("D:")
+                        || t.contains("::")
+                    {
+                        break;
+                    }
                     let consumed = lines.next().unwrap().trim();
-                    if let Some(a) = consumed.strip_prefix("A:").or_else(|| consumed.strip_prefix("**A:**")).or_else(|| consumed.strip_prefix("R:")) { in_answer = true; answer.push_str(a.trim()); }
-                    else if in_answer { if !answer.is_empty() { answer.push('\n'); } answer.push_str(consumed); }
-                    else if !consumed.is_empty() { if !question.is_empty() { question.push('\n'); } question.push_str(consumed); }
+                    if let Some(a) = consumed
+                        .strip_prefix("A:")
+                        .or_else(|| consumed.strip_prefix("**A:**"))
+                        .or_else(|| consumed.strip_prefix("R:"))
+                    {
+                        in_answer = true;
+                        answer.push_str(a.trim());
+                    } else if in_answer {
+                        if !answer.is_empty() {
+                            answer.push('\n');
+                        }
+                        answer.push_str(consumed);
+                    } else if !consumed.is_empty() {
+                        if !question.is_empty() {
+                            question.push('\n');
+                        }
+                        question.push_str(consumed);
+                    }
                 }
                 if !question.is_empty() && !answer.is_empty() {
-                    out.push_str(&format!("\n> **Domanda**  \n> {}  \n> **Risposta**  \n> {}\n\n", question.replace('\n', "  \n> "), answer.replace('\n', "  \n> ")));
+                    out.push_str(&format!(
+                        "\n> **Domanda**  \n> {}  \n> **Risposta**  \n> {}\n\n",
+                        question.replace('\n', "  \n> "),
+                        answer.replace('\n', "  \n> ")
+                    ));
                     continue;
                 }
-                out.push_str(line); out.push('\n'); continue;
+                out.push_str(line);
+                out.push('\n');
+                continue;
             }
             if let Some((term, def)) = clean.split_once("::") {
-                let t = term.trim(); let d = def.trim();
-                let valid = !t.is_empty() && !d.is_empty() && !t.contains('$') && !t.contains('`') && !t.contains('\\') && !t.starts_with('>');
-                if valid { out.push_str(&format!("\n> **{}**  \n> {}\n\n", t, d)); continue; }
+                let t = term.trim();
+                let d = def.trim();
+                let valid = !t.is_empty()
+                    && !d.is_empty()
+                    && !t.contains('$')
+                    && !t.contains('`')
+                    && !t.contains('\\')
+                    && !t.starts_with('>');
+                if valid {
+                    out.push_str(&format!("\n> **{}**  \n> {}\n\n", t, d));
+                    continue;
+                }
             }
         }
-        out.push_str(line); out.push('\n');
+        out.push_str(line);
+        out.push('\n');
     }
     out
 }
@@ -1365,13 +1625,21 @@ pub fn preprocess_markdown_view(markdown: &str) -> String {
     alias_code_fences(&preprocess_markdown_math(markdown))
 }
 
-// Convert display and inline math into styled Markdown for egui_commonmark. 
+// Convert display and inline math into styled Markdown for egui_commonmark.
 
-pub fn preprocess_markdown_math(markdown: &str) -> String { let mut result = String::with_capacity(markdown.len() + 64); let mut rem = markdown;      // 1. Process display math blocks. 
+pub fn preprocess_markdown_math(markdown: &str) -> String {
+    let mut result = String::with_capacity(markdown.len() + 64);
+    let mut rem = markdown; // 1. Process display math blocks. 
     while let Some(start) = rem.find("$$") {
         result.push_str(&rem[..start]);
         let after_start = &rem[start + 2..];
-        if let Some(end) = after_start.find("$$") { let expr = &after_start[..end]; let formatted = format_latex_expr(expr); result.push_str(&format!("\n\n**`{}`**\n\n", formatted)); rem = &after_start[end + 2..]; } else { result.push_str("$$");
+        if let Some(end) = after_start.find("$$") {
+            let expr = &after_start[..end];
+            let formatted = format_latex_expr(expr);
+            result.push_str(&format!("\n\n**`{}`**\n\n", formatted));
+            rem = &after_start[end + 2..];
+        } else {
+            result.push_str("$$");
             rem = after_start;
             break;
         }
@@ -1420,7 +1688,7 @@ pub fn preprocess_markdown_math(markdown: &str) -> String { let mut result = Str
         let is_blockquote = trimmed.starts_with('>');
         let next_is_blockquote = lines
             .get(line_idx + 1)
-            .map_or(false, |next| next.trim().starts_with('>'));
+            .is_some_and(|next| next.trim().starts_with('>'));
 
         if is_blockquote && !next_is_blockquote {
             final_out.push_str("\n\n");
@@ -1485,10 +1753,10 @@ pub fn smooth_freehand_points(raw: &[(f32, f32)]) -> Vec<(f32, f32)> {
             filtered.push(pt);
         }
     }
-    if let Some(&last) = raw.last() {
-        if filtered.last() != Some(&last) {
-            filtered.push(last);
-        }
+    if let Some(&last) = raw.last()
+        && filtered.last() != Some(&last)
+    {
+        filtered.push(last);
     }
     if filtered.len() <= 2 {
         return filtered;
@@ -1693,13 +1961,11 @@ fn escape_stray_in_text(text: &str) -> String {
     let mut matched = vec![false; runs.len()];
     let mut stack: Vec<usize> = Vec::new();
     for (ri, &(_, len, can_open, can_close)) in runs.iter().enumerate() {
-        if can_close {
-            if let Some(pos) = stack.iter().rposition(|&o| runs[o].1 == len) {
-                let o = stack.remove(pos);
-                matched[o] = true;
-                matched[ri] = true;
-                continue;
-            }
+        if can_close && let Some(pos) = stack.iter().rposition(|&o| runs[o].1 == len) {
+            let o = stack.remove(pos);
+            matched[o] = true;
+            matched[ri] = true;
+            continue;
         }
         if can_open {
             stack.push(ri);
@@ -1757,7 +2023,7 @@ pub fn export_flashcards_anki_tsv(
 }
 
 pub fn create_blank_study_notebook(dest_path: &Path) -> io::Result<()> {
-    use lopdf::{dictionary, Document as LoDoc, Object, Stream};
+    use lopdf::{Document as LoDoc, Object, Stream, dictionary};
 
     let mut doc = LoDoc::with_version("1.5");
     let pages_id = doc.new_object_id();
@@ -1767,7 +2033,7 @@ pub fn create_blank_study_notebook(dest_path: &Path) -> io::Result<()> {
     for y in (24..520).step_by(24) {
         grid_ops.push_str(&format!("20 {} m 940 {} l S ", y, y));
     }
-    grid_ops.push_str("Q");
+    grid_ops.push('Q');
     let content_id = doc.add_object(Stream::new(dictionary! {}, grid_ops.into_bytes()));
 
     let page_id = doc.add_object(dictionary! {
@@ -1794,7 +2060,7 @@ pub fn create_blank_study_notebook(dest_path: &Path) -> io::Result<()> {
     doc.trailer.set("Root", catalog_id);
 
     doc.save(dest_path)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(())
 }
 
@@ -1816,14 +2082,20 @@ pub fn original_backup_lookup(pdf_path: &Path) -> PathBuf {
 }
 
 fn original_backup_path_for(pdf_path: &Path, key: &str) -> PathBuf {
-    let fname = pdf_path.file_name().and_then(|n| n.to_str()).unwrap_or("document.pdf");
+    let fname = pdf_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document.pdf");
     original_storage_dir().join(format!("{key}_{fname}.orig"))
 }
 
 /// Legacy path used only to migrate older backups.
 fn legacy_original_backup_path(pdf_path: &Path) -> PathBuf {
     let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
-    let fname = pdf_path.file_name().and_then(|n| n.to_str()).unwrap_or("document.pdf");
+    let fname = pdf_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document.pdf");
     parent.join(format!(".{}.orig", fname))
 }
 
@@ -1835,7 +2107,9 @@ pub fn ensure_original_pdf_backup(pdf_path: &Path) -> io::Result<()> {
     let legacy = legacy_original_backup_path(pdf_path);
     if backup.exists() {
         // Remove any remaining duplicate beside the PDF.
-        if legacy.exists() { let _ = fs::remove_file(legacy); }
+        if legacy.exists() {
+            let _ = fs::remove_file(legacy);
+        }
         return Ok(());
     }
     if let Some(parent) = backup.parent() {
@@ -1856,7 +2130,9 @@ pub fn export_original_pdf(pdf_path: &Path, dest_path: &Path) -> io::Result<()> 
     let backup = original_backup_path(pdf_path);
     let legacy = legacy_original_backup_path(pdf_path);
     if !backup.exists() && legacy.exists() {
-        if let Some(parent) = backup.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = backup.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::copy(&legacy, &backup)?;
         let _ = fs::remove_file(&legacy);
     }
@@ -1867,11 +2143,14 @@ pub fn export_original_pdf(pdf_path: &Path, dest_path: &Path) -> io::Result<()> 
 
 // ════════════════════════════════════════════════════════════════════════════
 
-
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Valore ereditato dai nodi Pages (MediaBox, Rotate, Resources…), risalendo i Parent.
-pub(crate) fn page_inherited(doc: &lopdf::Document, mut id: lopdf::ObjectId, key: &[u8]) -> Option<lopdf::Object> {
+pub(crate) fn page_inherited(
+    doc: &lopdf::Document,
+    mut id: lopdf::ObjectId,
+    key: &[u8],
+) -> Option<lopdf::Object> {
     for _ in 0..16 {
         let dict = doc.get_object(id).ok()?.as_dict().ok()?;
         if let Ok(v) = dict.get(key) {
@@ -1885,21 +2164,24 @@ pub(crate) fn page_inherited(doc: &lopdf::Document, mut id: lopdf::ObjectId, key
 /// Resolve indirect references; return direct objects unchanged.
 pub(crate) fn resolve_obj(doc: &lopdf::Document, o: lopdf::Object) -> lopdf::Object {
     match o {
-        lopdf::Object::Reference(r) => doc.get_object(r).map(|x| x.clone()).unwrap_or(lopdf::Object::Null),
+        lopdf::Object::Reference(r) => doc.get_object(r).cloned().unwrap_or(lopdf::Object::Null),
         other => other,
     }
 }
 
 /// Create a Flate-compressed image XObject and return its object ID.
-pub(crate) fn add_image_xobject(doc: &mut lopdf::Document, shot: &crate::screenshots::Shot) -> lopdf::ObjectId {
-    use lopdf::{dictionary, Object, Stream};
+pub(crate) fn add_image_xobject(
+    doc: &mut lopdf::Document,
+    shot: &crate::screenshots::Shot,
+) -> lopdf::ObjectId {
+    use lopdf::{Object, Stream, dictionary};
 
     let (iw, ih) = (shot.width as i64, shot.height as i64);
     let n = (shot.width as usize) * (shot.height as usize);
     let mut rgb = Vec::with_capacity(n * 3);
     let mut alpha = Vec::with_capacity(n);
     let mut has_alpha = false;
-    for px in shot.rgba.chunks_exact(4).take(n) {
+    for px in shot.rgba.as_chunks::<4>().0.iter().take(n) {
         rgb.extend_from_slice(&px[..3]);
         alpha.push(px[3]);
         if px[3] != 255 {
@@ -1950,11 +2232,17 @@ pub(crate) fn register_xobject_on_page(
 ) -> Result<(), String> {
     use lopdf::{Dictionary, Object};
 
-    let mut res: Dictionary = match page_inherited(doc, page_id, b"Resources").map(|o| resolve_obj(doc, o)) {
-        Some(Object::Dictionary(d)) => d,
-        _ => Dictionary::new(),
-    };
-    let mut xobjects: Dictionary = match res.get(b"XObject").ok().cloned().map(|o| resolve_obj(doc, o)) {
+    let mut res: Dictionary =
+        match page_inherited(doc, page_id, b"Resources").map(|o| resolve_obj(doc, o)) {
+            Some(Object::Dictionary(d)) => d,
+            _ => Dictionary::new(),
+        };
+    let mut xobjects: Dictionary = match res
+        .get(b"XObject")
+        .ok()
+        .cloned()
+        .map(|o| resolve_obj(doc, o))
+    {
         Some(Object::Dictionary(d)) => d,
         _ => Dictionary::new(),
     };
@@ -2012,7 +2300,8 @@ pub fn prepare_image_xobjects(
         let id = match cache.get(&ann.text) {
             Some(id) => *id,
             None => {
-                let Some(shot) = crate::screenshots::Shot::from_file(&media_dir.join(&ann.text)) else {
+                let Some(shot) = crate::screenshots::Shot::from_file(&media_dir.join(&ann.text))
+                else {
                     continue; // Skip missing image files.
                 };
                 if shot.is_empty() {
@@ -2035,7 +2324,10 @@ mod tests {
     fn card_fronts(note: &str) -> Vec<String> {
         let mut m = HashMap::new();
         m.insert(1u32, note.to_string());
-        extract_flashcards_from_notes(&m).into_iter().map(|c| c.front).collect()
+        extract_flashcards_from_notes(&m)
+            .into_iter()
+            .map(|c| c.front)
+            .collect()
     }
 
     #[test]
@@ -2052,7 +2344,10 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(1u32, "**Q:** What is *p?\n**A:** a pointer".to_string());
         let c = extract_flashcards_from_notes(&m);
-        assert_eq!((c[0].front.as_str(), c[0].back.as_str()), ("What is *p?", "a pointer"));
+        assert_eq!(
+            (c[0].front.as_str(), c[0].back.as_str()),
+            ("What is *p?", "a pointer")
+        );
     }
 
     #[test]
@@ -2060,9 +2355,15 @@ mod tests {
         assert_eq!(escape_stray_asterisks("*args"), "\\*args");
         assert_eq!(escape_stray_asterisks("A*"), "A\\*");
         assert_eq!(escape_stray_asterisks("a * b"), "a \\* b");
-        assert_eq!(escape_stray_asterisks("**kwargs and *args"), "\\*\\*kwargs and \\*args");
+        assert_eq!(
+            escape_stray_asterisks("**kwargs and *args"),
+            "\\*\\*kwargs and \\*args"
+        );
         // Real emphasis, list markers and code spans are left alone.
-        assert_eq!(escape_stray_asterisks("a **bold** and *it* word"), "a **bold** and *it* word");
+        assert_eq!(
+            escape_stray_asterisks("a **bold** and *it* word"),
+            "a **bold** and *it* word"
+        );
         assert_eq!(escape_stray_asterisks("* item *x"), "* item \\*x");
         assert_eq!(escape_stray_asterisks("`a*b` and c*"), "`a*b` and c\\*");
     }
@@ -2126,7 +2427,6 @@ mod tests {
         assert!(!serde_json::to_string(&sk).unwrap().contains("aspect"));
     }
 
-
     #[test]
     fn header_multibyte_does_not_panic() {
         assert_eq!(parse_slide_header("### 󰗊 Lecture Transcript"), None);
@@ -2151,7 +2451,14 @@ mod tests {
         let mut notes = HashMap::new();
         notes.insert(1u32, "first".to_string());
         let _ = load_doc_data(&pdf_a);
-        save_doc_data(&pdf_a, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
+        save_doc_data(
+            &pdf_a,
+            &notes,
+            &HashMap::new(),
+            HashSet::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         let id_a = crate::docid::resolve_key(&pdf_a);
         assert_eq!(read_trailing_doc_id(&pdf_a).as_deref(), Some(id_a.as_str()));
         assert!(load_local_backup(&pdf_a).unwrap().rev > 0);
@@ -2162,7 +2469,10 @@ mod tests {
         let pdf_b = sub.join("renamed.pdf");
         fs::rename(&pdf_a, &pdf_b).unwrap();
         assert_eq!(crate::docid::resolve_key(&pdf_b), id_a);
-        assert_eq!(load_doc_data(&pdf_b).notes.get(&1).map(String::as_str), Some("first"));
+        assert_eq!(
+            load_doc_data(&pdf_b).notes.get(&1).map(String::as_str),
+            Some("first")
+        );
 
         // 2) copia con l'originale ancora presente: id nuovo, note comunque caricate dal PDF
         let pdf_c = root.join("copy.pdf");
@@ -2179,18 +2489,32 @@ mod tests {
         save_data_to_pdf_trailing(&pdf_b, &remote).unwrap();
         let loaded = load_doc_data(&pdf_b);
         assert_eq!(loaded.notes[&1], "edited elsewhere");
-        assert_eq!(load_local_backup(&pdf_b).unwrap().notes[&1], "edited elsewhere");
+        assert_eq!(
+            load_local_backup(&pdf_b).unwrap().notes[&1],
+            "edited elsewhere"
+        );
         let stashed = fs::read_dir(get_backup_dir())
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id_a}.conflict-")))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{id_a}.conflict-"))
+            })
             .count();
         assert_eq!(stashed, 1, "la versione scartata deve essere conservata");
 
         // 4) un salvataggio successivo ha sempre revisione maggiore di quella caricata
         let mut n2 = HashMap::new();
         n2.insert(1u32, "local edit".to_string());
-        save_doc_data(&pdf_b, &n2, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
+        save_doc_data(
+            &pdf_b,
+            &n2,
+            &HashMap::new(),
+            HashSet::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(load_local_backup(&pdf_b).unwrap().rev > remote.rev);
 
         // 5) backup più recente del PDF (scrittura nel PDF fallita): il PDF viene riallineato
@@ -2199,7 +2523,10 @@ mod tests {
         newer.rev = now_ms() + 60_000;
         save_local_backup(&pdf_b, &newer);
         assert_eq!(load_doc_data(&pdf_b).notes[&1], "local newer");
-        assert_eq!(read_trailing_doc_data(&pdf_b).unwrap().notes[&1], "local newer");
+        assert_eq!(
+            read_trailing_doc_data(&pdf_b).unwrap().notes[&1],
+            "local newer"
+        );
 
         // 6) dati senza revisione (versioni precedenti): regola storica, il backup vince
         //    e le pagine mancanti arrivano dal PDF

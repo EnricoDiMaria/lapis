@@ -406,7 +406,7 @@ The result is a single study document combining the original lecture material, y
 
 - [ ] Screenshots in the README.
 - [ ] (Optional) Updates availability verification at startup
-- [ ] Overall code improvement
+- [X] Overall code improvement
 
 ---
 

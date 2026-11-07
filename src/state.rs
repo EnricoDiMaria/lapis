@@ -1,22 +1,20 @@
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use eframe::egui;
-use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-
-use crate::ZoomMode;
 use crate::ViewMode;
+use crate::ZoomMode;
 
 const MAX_RECENT_FILES: usize = 15;
 
- 
 /// The time window within which the second button of a combo must follow the first.
 /// Increase it if the combo feels too "tight"; decrease it if it triggers accidentally.
 pub const CHORD_WINDOW_SECS: f64 = 0.45;
- 
+
 struct KeyTracker {
     frame_time: f64,
     last_press: HashMap<egui::Key, f64>,
@@ -24,9 +22,9 @@ struct KeyTracker {
     last_alt: f64,
     last_shift: f64,
 }
- 
+
 static KEY_TRACKER: OnceLock<Mutex<KeyTracker>> = OnceLock::new();
- 
+
 fn key_tracker() -> &'static Mutex<KeyTracker> {
     KEY_TRACKER.get_or_init(|| {
         Mutex::new(KeyTracker {
@@ -38,7 +36,7 @@ fn key_tracker() -> &'static Mutex<KeyTracker> {
         })
     })
 }
- 
+
 /// Records the keys pressed during this frame. It is idempotent (can be called only once per frame),
 /// so you may call it multiple times.
 ///
@@ -56,7 +54,7 @@ pub fn track_key_presses(i: &egui::InputState) {
         return;
     }
     t.frame_time = i.time;
- 
+
     for ev in &i.events {
         if let egui::Event::Key {
             key,
@@ -77,13 +75,12 @@ pub fn track_key_presses(i: &egui::InputState) {
     if i.modifiers.shift {
         t.last_shift = i.time;
     }
- 
+
     let cutoff = i.time - 5.0;
     t.last_press.retain(|_, ts| *ts >= cutoff);
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SlideshowEmptyMode {
     /// 1. Keeps the previous annotated slide's note visible (zero layout shifts)
     AutoHold,
@@ -94,14 +91,10 @@ pub enum SlideshowEmptyMode {
     /// 4. Hides the right panel on empty slides so the slide expands to 100% fullscreen
     ExpandFull,
     /// 5. Keeps the right panel fixed and displays "No notes for this slide."
+    #[default]
     StaticEmpty,
 }
 
-impl Default for SlideshowEmptyMode {
-    fn default() -> Self {
-        Self::StaticEmpty
-    }
-}
 /// What the exported PDF contains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExportContent {
@@ -147,11 +140,17 @@ impl ExportContent {
     }
 
     pub fn includes_annotations(self) -> bool {
-        matches!(self, ExportContent::Annotations | ExportContent::AnnotationsAndNotes)
+        matches!(
+            self,
+            ExportContent::Annotations | ExportContent::AnnotationsAndNotes
+        )
     }
 
     pub fn includes_notes(self) -> bool {
-        matches!(self, ExportContent::Notes | ExportContent::AnnotationsAndNotes)
+        matches!(
+            self,
+            ExportContent::Notes | ExportContent::AnnotationsAndNotes
+        )
     }
 }
 
@@ -226,97 +225,95 @@ impl ShortcutBinding {
         egui::Key::from_name(&self.key)
     }
 
-    
-pub fn consume(&self, i: &mut egui::InputState) -> bool {
-    track_key_presses(i);
- 
-    let Some(k) = self.to_egui_key() else {
-        return false;
-    };
- 
-    if let Some(ek_name) = &self.extra_key {
-        return self.consume_chord(i, k, ek_name);
-    }
- 
-    let mut mods = egui::Modifiers::NONE;
-    if self.ctrl {
-        mods |= egui::Modifiers::COMMAND;
-    }
-    if self.alt {
-        mods |= egui::Modifiers::ALT;
-    }
-    if self.shift {
-        mods |= egui::Modifiers::SHIFT;
-    }
-    i.consume_shortcut(&egui::KeyboardShortcut::new(mods, k))
+    pub fn consume(&self, i: &mut egui::InputState) -> bool {
+        track_key_presses(i);
+
+        let Some(k) = self.to_egui_key() else {
+            return false;
+        };
+
+        if let Some(ek_name) = &self.extra_key {
+            return self.consume_chord(i, k, ek_name);
+        }
+
+        let mut mods = egui::Modifiers::NONE;
+        if self.ctrl {
+            mods |= egui::Modifiers::COMMAND;
+        }
+        if self.alt {
+            mods |= egui::Modifiers::ALT;
+        }
+        if self.shift {
+            mods |= egui::Modifiers::SHIFT;
+        }
+        i.consume_shortcut(&egui::KeyboardShortcut::new(mods, k))
     }
 
     fn consume_chord(&self, i: &mut egui::InputState, k: egui::Key, ek_name: &str) -> bool {
-    let Some(ek) = egui::Key::from_name(ek_name) else {
-        return false;
-    };
-    if ek == k {
-        return false;
-    }
- 
-    let pressed_now = i.events.iter().any(|ev| {
-        matches!(
-            ev,
-            egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k
-        )
-    });
-    if !pressed_now {
-        return false;
-    }
- 
-    let now = i.time;
-    let held_extra = i.key_down(ek);
-    let (cur_ctrl, cur_alt, cur_shift) = (
-        i.modifiers.ctrl || i.modifiers.command,
-        i.modifiers.alt,
-        i.modifiers.shift,
-    );
- 
-    let ok = {
-        let Ok(t) = key_tracker().lock() else {
+        let Some(ek) = egui::Key::from_name(ek_name) else {
             return false;
         };
-        let recent = |ts: f64| now - ts <= CHORD_WINDOW_SECS;
- 
-        let extra_ok = held_extra || t.last_press.get(&ek).map(|&ts| recent(ts)).unwrap_or(false);
-        let ctrl_ok = !self.ctrl || cur_ctrl || recent(t.last_ctrl);
-        let alt_ok = !self.alt || cur_alt || recent(t.last_alt);
-        let shift_ok = !self.shift || cur_shift || recent(t.last_shift);
-        extra_ok && ctrl_ok && alt_ok && shift_ok
-    };
-    if !ok {
-        return false;
-    }
- 
-    i.events.retain(|ev| {
-        !matches!(
-            ev,
-            egui::Event::Key { key, pressed: true, .. } if *key == k
-        )
-    });
-    if let Ok(mut t) = key_tracker().lock() {
-        t.last_press.remove(&ek);
-        t.last_press.remove(&k);
-    }
-    true
-    }
+        if ek == k {
+            return false;
+        }
 
+        let pressed_now = i.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == k
+            )
+        });
+        if !pressed_now {
+            return false;
+        }
+
+        let now = i.time;
+        let held_extra = i.key_down(ek);
+        let (cur_ctrl, cur_alt, cur_shift) = (
+            i.modifiers.ctrl || i.modifiers.command,
+            i.modifiers.alt,
+            i.modifiers.shift,
+        );
+
+        let ok = {
+            let Ok(t) = key_tracker().lock() else {
+                return false;
+            };
+            let recent = |ts: f64| now - ts <= CHORD_WINDOW_SECS;
+
+            let extra_ok =
+                held_extra || t.last_press.get(&ek).map(|&ts| recent(ts)).unwrap_or(false);
+            let ctrl_ok = !self.ctrl || cur_ctrl || recent(t.last_ctrl);
+            let alt_ok = !self.alt || cur_alt || recent(t.last_alt);
+            let shift_ok = !self.shift || cur_shift || recent(t.last_shift);
+            extra_ok && ctrl_ok && alt_ok && shift_ok
+        };
+        if !ok {
+            return false;
+        }
+
+        i.events.retain(|ev| {
+            !matches!(
+                ev,
+                egui::Event::Key { key, pressed: true, .. } if *key == k
+            )
+        });
+        if let Ok(mut t) = key_tracker().lock() {
+            t.last_press.remove(&ek);
+            t.last_press.remove(&k);
+        }
+        true
+    }
 
     pub fn is_held(&self, i: &egui::InputState) -> bool {
-    let Some(k) = self.to_egui_key() else {
-        return false;
-    };
-    let ctrl_ok = !self.ctrl || i.modifiers.ctrl || i.modifiers.command;
-    let alt_ok = !self.alt || i.modifiers.alt;
-    let shift_ok = !self.shift || i.modifiers.shift;
-    ctrl_ok && alt_ok && shift_ok && i.key_down(k)
-}
-
+        let Some(k) = self.to_egui_key() else {
+            return false;
+        };
+        let ctrl_ok = !self.ctrl || i.modifiers.ctrl || i.modifiers.command;
+        let alt_ok = !self.alt || i.modifiers.alt;
+        let shift_ok = !self.shift || i.modifiers.shift;
+        ctrl_ok && alt_ok && shift_ok && i.key_down(k)
+    }
 }
 
 pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 17] {
@@ -336,11 +333,14 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
         ("Trackpad draw (hold)", &mut cfg.trackpad_draw_hold),
         ("Radial tools menu", &mut cfg.radial_tools_menu),
         ("Toggle fullscreen", &mut cfg.toggle_fullscreen),
-        ("Toggle Continuous / Single page", &mut cfg.toggle_continuous_single),
+        (
+            "Toggle Continuous / Single page",
+            &mut cfg.toggle_continuous_single,
+        ),
         ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
     ]
 }
- 
+
 pub enum Capture {
     Cancel,
     Set(ShortcutBinding),
@@ -352,15 +352,17 @@ pub const PENDING_ID: &str = "shortcut_capture_pending";
 
 fn is_modifier_key_name(name: &str) -> bool {
     let l = name.to_lowercase();
-    ["control", "ctrl", "alt", "shift", "super", "meta", "command", "option", "win"]
-        .iter()
-        .any(|m| l.contains(m))
+    [
+        "control", "ctrl", "alt", "shift", "super", "meta", "command", "option", "win",
+    ]
+    .iter()
+    .any(|m| l.contains(m))
 }
- 
+
 pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
     let id = ui.make_persistent_id(egui::IdSalt::new(PENDING_ID));
     let mut pending: Option<PendingChord> = ui.data(|d| d.get_temp(id));
- 
+
     let cancel = ui.input(|i| {
         i.events.iter().any(|ev| {
             matches!(
@@ -374,7 +376,7 @@ pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
         ui.data_mut(|d| d.remove::<PendingChord>(id));
         return Some(Capture::Cancel);
     }
- 
+
     ui.input(|i| {
         for ev in &i.events {
             if let egui::Event::Key {
@@ -412,11 +414,11 @@ pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
             }
         }
     });
- 
+
     if let Some(p) = pending {
         if p.0.elapsed() >= Duration::from_millis(CHORD_WINDOW_MS) {
             ui.data_mut(|d| d.remove::<PendingChord>(id));
- 
+
             let mut b = ShortcutBinding::new(p.2, p.3, p.4, p.1.last().unwrap());
             if p.1.len() >= 2 {
                 b.extra_key = Some(p.1[0].clone());
@@ -426,7 +428,7 @@ pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
         ui.data_mut(|d| d.insert_temp(id, p));
         ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
- 
+
     None
 }
 
@@ -523,9 +525,9 @@ pub struct AppSettings {
     pub flash_button: bool,
     pub restore_show_notes: bool,
     pub restore_show_toc: bool,
-    pub audio_dock:bool,
+    pub audio_dock: bool,
     pub audio_notes: bool,
-    pub bottom_notes:bool,
+    pub bottom_notes: bool,
     pub default_page_style: crate::notes::BlankPageStyle,
     /// Show the per-page Sketch tab in the notes panel (and include sketches in exports).
     pub sketch_enabled: bool,
@@ -576,12 +578,12 @@ impl AppState {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(mut state) = serde_json::from_str::<Self>(&content) {
-                // Filter out files that were deleted or moved from disk
-                state.recent_files.retain(|entry| entry.path.exists());
-                return state;
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Ok(mut state) = serde_json::from_str::<Self>(&content)
+        {
+            // Filter out files that were deleted or moved from disk
+            state.recent_files.retain(|entry| entry.path.exists());
+            return state;
         }
         Self {
             home_grid_view: true,

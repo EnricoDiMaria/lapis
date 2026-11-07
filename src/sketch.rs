@@ -7,7 +7,9 @@
 //! side panel. The scrollable area grows as you draw, so there is always room to continue.
 
 use crate::notes::{self, AnnotationKind, BlankPageStyle, PageAnnotation, SketchPage};
-use egui::{Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, vec2};
+use egui::{
+    Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, vec2,
+};
 use std::collections::HashMap;
 
 /// Mouse wheel / trackpad scrolling speed of the canvas (the egui default is 1.0).
@@ -189,7 +191,9 @@ impl SketchState {
         sketches: &'a mut HashMap<u32, SketchPage>,
         page: u32,
     ) -> &'a mut SketchPage {
-        sketches.entry(page).or_insert_with(|| SketchPage::new(self.new_paper))
+        sketches
+            .entry(page)
+            .or_insert_with(|| SketchPage::new(self.new_paper))
     }
 
     /// Undo the last change on `page`. Returns true if something changed.
@@ -199,7 +203,10 @@ impl SketchState {
         let Some(prev) = self.undo.get_mut(&page).and_then(|s| s.pop()) else {
             return false;
         };
-        let current = sketches.get(&page).map(|s| s.strokes.clone()).unwrap_or_default();
+        let current = sketches
+            .get(&page)
+            .map(|s| s.strokes.clone())
+            .unwrap_or_default();
         self.redo.entry(page).or_default().push(current);
         self.sheet_mut(sketches, page).strokes = prev;
         true
@@ -212,7 +219,10 @@ impl SketchState {
         let Some(next) = self.redo.get_mut(&page).and_then(|s| s.pop()) else {
             return false;
         };
-        let current = sketches.get(&page).map(|s| s.strokes.clone()).unwrap_or_default();
+        let current = sketches
+            .get(&page)
+            .map(|s| s.strokes.clone())
+            .unwrap_or_default();
         self.undo.entry(page).or_default().push(current);
         self.sheet_mut(sketches, page).strokes = next;
         true
@@ -324,7 +334,13 @@ pub fn show(
 // Toolbar
 // ---------------------------------------------------------------------------------------------
 
-fn icon_button(ui: &mut egui::Ui, icon: &str, selected: bool, enabled: bool, tip: &str) -> egui::Response {
+fn icon_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    selected: bool,
+    enabled: bool,
+    tip: &str,
+) -> egui::Response {
     let button = egui::Button::new(egui::RichText::new(icon).size(13.0))
         .selected(selected)
         .min_size(vec2(24.0, 22.0));
@@ -335,8 +351,11 @@ fn color_swatches(ui: &mut egui::Ui, st: &mut SketchState) {
     for col in PALETTE {
         let selected = st.color == col;
         let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 20.0), Sense::click());
-        ui.painter()
-            .circle_filled(rect.center(), 6.5, Color32::from_rgb(col[0], col[1], col[2]));
+        ui.painter().circle_filled(
+            rect.center(),
+            6.5,
+            Color32::from_rgb(col[0], col[1], col[2]),
+        );
         if selected || resp.hovered() {
             ui.painter().circle_stroke(
                 rect.center(),
@@ -355,7 +374,8 @@ fn size_presets(ui: &mut egui::Ui, st: &mut SketchState) {
         let selected = st.size_idx == i;
         let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
         let r = 1.5 + i as f32 * 1.4;
-        ui.painter().circle_filled(rect.center(), r, ui.visuals().text_color());
+        ui.painter()
+            .circle_filled(rect.center(), r, ui.visuals().text_color());
         if selected || resp.hovered() {
             ui.painter().circle_stroke(
                 rect.center(),
@@ -486,7 +506,10 @@ fn to_screen(origin: Pos2, zoom: f32, (x, y): (f32, f32)) -> Pos2 {
 
 /// Sketch point under a screen position (the canvas starts at the top-left corner).
 fn to_unit(origin: Pos2, zoom: f32, p: Pos2) -> (f32, f32) {
-    (((p.x - origin.x) / zoom).max(0.0), ((p.y - origin.y) / zoom).max(0.0))
+    (
+        ((p.x - origin.x) / zoom).max(0.0),
+        ((p.y - origin.y) / zoom).max(0.0),
+    )
 }
 
 fn ann_color(ann: &PageAnnotation) -> Color32 {
@@ -522,8 +545,18 @@ fn extent_of(strokes: &[PageAnnotation]) -> Vec2 {
     ext
 }
 
-fn paint_paper(painter: &egui::Painter, visible: Rect, origin: Pos2, zoom: f32, style: BlankPageStyle) {
-    painter.rect_filled(visible, CornerRadius::ZERO, Color32::from_rgb(253, 253, 251));
+fn paint_paper(
+    painter: &egui::Painter,
+    visible: Rect,
+    origin: Pos2,
+    zoom: f32,
+    style: BlankPageStyle,
+) {
+    painter.rect_filled(
+        visible,
+        CornerRadius::ZERO,
+        Color32::from_rgb(253, 253, 251),
+    );
 
     let step = notes::SKETCH_GRID_STEP * zoom;
     if step < 7.0 || style == BlankPageStyle::Blank {
@@ -531,8 +564,10 @@ fn paint_paper(painter: &egui::Painter, visible: Rect, origin: Pos2, zoom: f32, 
     }
     let line_w = (0.7 * zoom).clamp(0.5, 1.5);
     let first = |from: f32, o: f32| ((from - o) / step).floor().max(0.0) as i32;
-    let rows = first(visible.top(), origin.y)..=((visible.bottom() - origin.y) / step).ceil() as i32;
-    let cols = first(visible.left(), origin.x)..=((visible.right() - origin.x) / step).ceil() as i32;
+    let rows =
+        first(visible.top(), origin.y)..=((visible.bottom() - origin.y) / step).ceil() as i32;
+    let cols =
+        first(visible.left(), origin.x)..=((visible.right() - origin.x) / step).ceil() as i32;
 
     match style {
         BlankPageStyle::Blank => {}
@@ -585,7 +620,11 @@ fn paint_stroke(painter: &egui::Painter, origin: Pos2, zoom: f32, ann: &PageAnno
             if ann.points.is_empty() {
                 return;
             }
-            let pts: Vec<Pos2> = ann.points.iter().map(|&p| to_screen(origin, zoom, p)).collect();
+            let pts: Vec<Pos2> = ann
+                .points
+                .iter()
+                .map(|&p| to_screen(origin, zoom, p))
+                .collect();
             let first = pts[0];
             if pts.iter().all(|p| p.distance(first) < 0.5) {
                 painter.circle_filled(first, width * 0.5, col);
@@ -680,11 +719,17 @@ fn eraser_hits(
     };
     match ann.kind {
         AnnotationKind::Freehand => {
-            let pts: Vec<Pos2> = ann.points.iter().map(|&q| to_screen(origin, zoom, q)).collect();
+            let pts: Vec<Pos2> = ann
+                .points
+                .iter()
+                .map(|&q| to_screen(origin, zoom, q))
+                .collect();
             match pts.len() {
                 0 => false,
                 1 => pts[0].distance(p) <= tol,
-                _ => pts.windows(2).any(|w| dist_to_segment(p, w[0], w[1]) <= tol),
+                _ => pts
+                    .windows(2)
+                    .any(|w| dist_to_segment(p, w[0], w[1]) <= tol),
             }
         }
         AnnotationKind::Line | AnnotationKind::Arrow => {
@@ -692,7 +737,12 @@ fn eraser_hits(
         }
         AnnotationKind::Rect => two(ann).is_some_and(|(a, b)| {
             let r = Rect::from_two_pos(a, b);
-            let (tl, tr, br, bl) = (r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom());
+            let (tl, tr, br, bl) = (
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+            );
             [(tl, tr), (tr, br), (br, bl), (bl, tl)]
                 .iter()
                 .any(|&(u, v)| dist_to_segment(p, u, v) <= tol)
@@ -710,15 +760,27 @@ fn eraser_hits(
 }
 
 /// Screen rectangle of a text box, from its laid-out size.
-fn text_rect(painter: &egui::Painter, origin: Pos2, zoom: f32, ann: &PageAnnotation) -> Option<Rect> {
+fn text_rect(
+    painter: &egui::Painter,
+    origin: Pos2,
+    zoom: f32,
+    ann: &PageAnnotation,
+) -> Option<Rect> {
     let &top_left = ann.points.first()?;
     let galley = painter.layout(
-        if ann.text.is_empty() { " ".to_string() } else { ann.text.clone() },
+        if ann.text.is_empty() {
+            " ".to_string()
+        } else {
+            ann.text.clone()
+        },
         text_font(ann, zoom),
         Color32::BLACK,
         text_wrap_width(ann, zoom),
     );
-    Some(Rect::from_min_size(to_screen(origin, zoom, top_left), galley.size()))
+    Some(Rect::from_min_size(
+        to_screen(origin, zoom, top_left),
+        galley.size(),
+    ))
 }
 
 fn canvas_area(
@@ -728,7 +790,10 @@ fn canvas_area(
     sketches: &mut HashMap<u32, SketchPage>,
 ) -> bool {
     let paper = sketches.get(&page).map(|s| s.paper).unwrap_or(st.new_paper);
-    let extent = sketches.get(&page).map(|s| extent_of(&s.strokes)).unwrap_or(Vec2::ZERO);
+    let extent = sketches
+        .get(&page)
+        .map(|s| extent_of(&s.strokes))
+        .unwrap_or(Vec2::ZERO);
     let view = ui.available_size();
 
     let mut scroll = egui::ScrollArea::both()
@@ -744,142 +809,154 @@ fn canvas_area(
     }
 
     let output = scroll.show(ui, |ui| {
-            let mut changed = false;
-            let zoom = st.zoom;
-            let viewport = ui.clip_rect();
+        let mut changed = false;
+        let zoom = st.zoom;
+        let viewport = ui.clip_rect();
 
-            // The canvas is at least as big as the panel, and keeps free room around the drawing.
-            let content = vec2(
-                view.x.max((extent.x + GROW) * zoom),
-                view.y.max((extent.y + GROW) * zoom),
-            );
-            let (outer, _) = ui.allocate_exact_size(content, Sense::hover());
-            let origin = outer.min;
-            let resp = ui.interact(outer, ui.make_persistent_id(("sketch_canvas", page)), Sense::click_and_drag());
-            st.hovered = resp.hovered() || resp.dragged();
+        // The canvas is at least as big as the panel, and keeps free room around the drawing.
+        let content = vec2(
+            view.x.max((extent.x + GROW) * zoom),
+            view.y.max((extent.y + GROW) * zoom),
+        );
+        let (outer, _) = ui.allocate_exact_size(content, Sense::hover());
+        let origin = outer.min;
+        let resp = ui.interact(
+            outer,
+            ui.make_persistent_id(("sketch_canvas", page)),
+            Sense::click_and_drag(),
+        );
+        st.hovered = resp.hovered() || resp.dragged();
 
-            // Zoom: toolbar request, or pinch / Ctrl + wheel while the pointer is over the canvas.
-            let pointer = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()));
-            let mut factor = 1.0_f32;
-            let mut anchor = viewport.center();
-            match st.zoom_request.take() {
-                Some(ZoomRequest::Step(f)) => factor = f,
-                Some(ZoomRequest::Reset) => factor = 1.0 / zoom,
-                None => {}
-            }
-            if resp.hovered() {
-                let (z, scroll_y, ctrl) = ui.input(|i| {
-                    (i.zoom_delta(), i.smooth_scroll_delta.y, i.modifiers.command || i.modifiers.ctrl)
-                });
-                if (z - 1.0).abs() > 1e-4 {
-                    factor *= z;
-                } else if ctrl && scroll_y.abs() > 0.0 {
-                    factor *= 1.0 + scroll_y * 0.002;
-                }
-                if (factor - 1.0).abs() > 1e-4 {
-                    anchor = pointer.unwrap_or(anchor);
-                }
+        // Zoom: toolbar request, or pinch / Ctrl + wheel while the pointer is over the canvas.
+        let pointer = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()));
+        let mut factor = 1.0_f32;
+        let mut anchor = viewport.center();
+        match st.zoom_request.take() {
+            Some(ZoomRequest::Step(f)) => factor = f,
+            Some(ZoomRequest::Reset) => factor = 1.0 / zoom,
+            None => {}
+        }
+        if resp.hovered() {
+            let (z, scroll_y, ctrl) = ui.input(|i| {
+                (
+                    i.zoom_delta(),
+                    i.smooth_scroll_delta.y,
+                    i.modifiers.command || i.modifiers.ctrl,
+                )
+            });
+            if (z - 1.0).abs() > 1e-4 {
+                factor *= z;
+            } else if ctrl && scroll_y.abs() > 0.0 {
+                factor *= 1.0 + scroll_y * 0.002;
             }
             if (factor - 1.0).abs() > 1e-4 {
-                let new_zoom = (zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-                let ratio = new_zoom / zoom;
-                if (ratio - 1.0).abs() > 1e-4 {
-                    // Keep the point under the anchor where it is.
-                    let offset = viewport.min - origin;
-                    let anchor_in_view = anchor - viewport.min;
-                    let next = (offset + anchor_in_view) * ratio - anchor_in_view;
-                    st.zoom = new_zoom;
-                    st.pending_scroll = Some(vec2(next.x.max(0.0), next.y.max(0.0)));
-                    ui.ctx().request_repaint();
+                anchor = pointer.unwrap_or(anchor);
+            }
+        }
+        if (factor - 1.0).abs() > 1e-4 {
+            let new_zoom = (zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+            let ratio = new_zoom / zoom;
+            if (ratio - 1.0).abs() > 1e-4 {
+                // Keep the point under the anchor where it is.
+                let offset = viewport.min - origin;
+                let anchor_in_view = anchor - viewport.min;
+                let next = (offset + anchor_in_view) * ratio - anchor_in_view;
+                st.zoom = new_zoom;
+                st.pending_scroll = Some(vec2(next.x.max(0.0), next.y.max(0.0)));
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Painting.
+        let painter = ui.painter_at(viewport.intersect(outer));
+        paint_paper(&painter, outer.intersect(viewport), origin, zoom, paper);
+
+        let editing_idx = st.edit.as_ref().filter(|e| e.page == page).map(|e| e.index);
+        if let Some(sheet) = sketches.get(&page) {
+            for (i, ann) in sheet.strokes.iter().enumerate() {
+                if Some(i) == editing_idx {
+                    continue;
                 }
+                paint_stroke(&painter, origin, zoom, ann);
             }
+        }
+        if let Some(active) = &st.active {
+            paint_stroke(&painter, origin, zoom, active);
+        }
 
-            // Painting.
-            let painter = ui.painter_at(viewport.intersect(outer));
-            paint_paper(&painter, outer.intersect(viewport), origin, zoom, paper);
-
-            let editing_idx = st.edit.as_ref().filter(|e| e.page == page).map(|e| e.index);
-            if let Some(sheet) = sketches.get(&page) {
-                for (i, ann) in sheet.strokes.iter().enumerate() {
-                    if Some(i) == editing_idx {
-                        continue;
-                    }
-                    paint_stroke(&painter, origin, zoom, ann);
-                }
-            }
-            if let Some(active) = &st.active {
-                paint_stroke(&painter, origin, zoom, active);
-            }
-
-            // In-place text editing.
-            let mut commit_edit = false;
-            if let Some(edit) = st.edit.as_mut().filter(|e| e.page == page) {
-                if let Some(ann) = sketches.get(&page).and_then(|s| s.strokes.get(edit.index)) {
-                    let font = text_font(ann, zoom);
-                    let top_left = to_screen(origin, zoom, ann.points.first().copied().unwrap_or((0.0, 0.0)));
-                    let width = text_wrap_width(ann, zoom);
-                    let box_rect = Rect::from_min_size(top_left, vec2(width, font.size * 1.4));
-                    let id = ui.make_persistent_id(("sketch_text_edit", page, edit.index));
-                    let te = egui::TextEdit::multiline(&mut edit.buf)
-                        .id(id)
-                        .font(font)
-                        .text_color(ann_color(ann))
-                        .frame(egui::Frame::NONE)
-                        .margin(egui::Margin::ZERO)
-                        .desired_width(width)
-                        .desired_rows(1)
-                        .lock_focus(true);
-                    let out = ui.put(box_rect, te);
-                    ui.painter().rect_stroke(
-                        out.rect.expand(2.0),
-                        CornerRadius::same(2),
-                        Stroke::new(1.0, ui.visuals().selection.stroke.color),
-                        StrokeKind::Outside,
-                    );
-                    if edit.focus_requested {
-                        out.request_focus();
-                        edit.focus_requested = false;
-                    } else if out.lost_focus() {
-                        commit_edit = true;
-                    }
-                } else {
+        // In-place text editing.
+        let mut commit_edit = false;
+        if let Some(edit) = st.edit.as_mut().filter(|e| e.page == page) {
+            if let Some(ann) = sketches.get(&page).and_then(|s| s.strokes.get(edit.index)) {
+                let font = text_font(ann, zoom);
+                let top_left = to_screen(
+                    origin,
+                    zoom,
+                    ann.points.first().copied().unwrap_or((0.0, 0.0)),
+                );
+                let width = text_wrap_width(ann, zoom);
+                let box_rect = Rect::from_min_size(top_left, vec2(width, font.size * 1.4));
+                let id = ui.make_persistent_id(("sketch_text_edit", page, edit.index));
+                let te = egui::TextEdit::multiline(&mut edit.buf)
+                    .id(id)
+                    .font(font)
+                    .text_color(ann_color(ann))
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(width)
+                    .desired_rows(1)
+                    .lock_focus(true);
+                let out = ui.put(box_rect, te);
+                ui.painter().rect_stroke(
+                    out.rect.expand(2.0),
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                    StrokeKind::Outside,
+                );
+                if edit.focus_requested {
+                    out.request_focus();
+                    edit.focus_requested = false;
+                } else if out.lost_focus() {
                     commit_edit = true;
                 }
+            } else {
+                commit_edit = true;
             }
-            if commit_edit {
-                changed |= st.commit_pending(sketches);
-            }
+        }
+        if commit_edit {
+            changed |= st.commit_pending(sketches);
+        }
 
-            // Cursor and eraser preview.
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(match st.tool {
-                    SketchTool::Hand if resp.dragged() => egui::CursorIcon::Grabbing,
-                    SketchTool::Hand => egui::CursorIcon::Grab,
-                    SketchTool::Text => egui::CursorIcon::Text,
-                    _ => egui::CursorIcon::Crosshair,
-                });
-                if st.tool == SketchTool::Eraser {
-                    if let Some(p) = pointer {
-                        painter.circle_stroke(
-                            p,
-                            ERASER_RADIUS_PX,
-                            Stroke::new(1.0, Color32::from_black_alpha(140)),
-                        );
-                    }
-                }
+        // Cursor and eraser preview.
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(match st.tool {
+                SketchTool::Hand if resp.dragged() => egui::CursorIcon::Grabbing,
+                SketchTool::Hand => egui::CursorIcon::Grab,
+                SketchTool::Text => egui::CursorIcon::Text,
+                _ => egui::CursorIcon::Crosshair,
+            });
+            if st.tool == SketchTool::Eraser
+                && let Some(p) = pointer
+            {
+                painter.circle_stroke(
+                    p,
+                    ERASER_RADIUS_PX,
+                    Stroke::new(1.0, Color32::from_black_alpha(140)),
+                );
             }
+        }
 
-            // The hand tool, or a middle-button drag, moves the canvas.
-            let panning = resp.dragged_by(PointerButton::Middle)
-                || (st.tool == SketchTool::Hand && resp.dragged_by(PointerButton::Primary));
-            if panning {
-                ui.scroll_with_delta(resp.drag_delta()*PAN_SPEED);
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            }
+        // The hand tool, or a middle-button drag, moves the canvas.
+        let panning = resp.dragged_by(PointerButton::Middle)
+            || (st.tool == SketchTool::Hand && resp.dragged_by(PointerButton::Primary));
+        if panning {
+            ui.scroll_with_delta(resp.drag_delta() * PAN_SPEED);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
 
-            changed |= handle_input(ui, st, page, sketches, &resp, origin, zoom, &painter);
-            changed
-        });
+        changed |= handle_input(ui, st, page, sketches, &resp, origin, zoom, &painter);
+        changed
+    });
     st.scroll_offset = output.state.clamped_offset();
     output.inner
 }
@@ -902,26 +979,30 @@ fn handle_input(
         .or(resp.interact_pointer_pos());
     let pos = resp.interact_pointer_pos().or(resp.hover_pos());
 
-    if (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.button_down(primary))) || resp.clicked_by(primary) {
+    if (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.button_down(primary)))
+        || resp.clicked_by(primary)
+    {
         st.focus = true;
     }
 
     // Drawing near the edge of the panel scrolls the canvas along, so a stroke can go on.
-    if st.active.is_some() && resp.dragged_by(primary) {
-        if let Some(p) = pos {
-            let view = ui.clip_rect();
-            let speed = |dist_to_edge: f32| {
-                ((AUTOSCROLL_EDGE_PX - dist_to_edge).clamp(0.0, AUTOSCROLL_EDGE_PX) / AUTOSCROLL_EDGE_PX)
-                    * AUTOSCROLL_MAX_PX
-            };
-            let delta = vec2(
-                speed(p.x - view.left()) - speed(view.right() - p.x),
-                speed(p.y - view.top()) - speed(view.bottom() - p.y),
-            );
-            if delta != Vec2::ZERO {
-                ui.scroll_with_delta(delta);
-                ui.ctx().request_repaint();
-            }
+    if st.active.is_some()
+        && resp.dragged_by(primary)
+        && let Some(p) = pos
+    {
+        let view = ui.clip_rect();
+        let speed = |dist_to_edge: f32| {
+            ((AUTOSCROLL_EDGE_PX - dist_to_edge).clamp(0.0, AUTOSCROLL_EDGE_PX)
+                / AUTOSCROLL_EDGE_PX)
+                * AUTOSCROLL_MAX_PX
+        };
+        let delta = vec2(
+            speed(p.x - view.left()) - speed(view.right() - p.x),
+            speed(p.y - view.top()) - speed(view.bottom() - p.y),
+        );
+        if delta != Vec2::ZERO {
+            ui.scroll_with_delta(delta);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -933,12 +1014,12 @@ fn handle_input(
                     let pt = to_unit(origin, zoom, p);
                     st.active = Some(new_annotation(st, AnnotationKind::Freehand, vec![pt]));
                 }
-            } else if resp.dragged_by(primary) {
-                if let (Some(p), Some(active)) = (pos, st.active.as_mut()) {
-                    let pt = to_unit(origin, zoom, p);
-                    if active.points.last() != Some(&pt) {
-                        active.points.push(pt);
-                    }
+            } else if resp.dragged_by(primary)
+                && let (Some(p), Some(active)) = (pos, st.active.as_mut())
+            {
+                let pt = to_unit(origin, zoom, p);
+                if active.points.last() != Some(&pt) {
+                    active.points.push(pt);
                 }
             }
             if resp.drag_stopped_by(primary) {
@@ -946,12 +1027,12 @@ fn handle_input(
                     stroke.points = smooth(&stroke.points, zoom);
                     changed |= commit_stroke(st, page, sketches, stroke);
                 }
-            } else if resp.clicked_by(primary) {
-                if let Some(p) = pos {
-                    let pt = to_unit(origin, zoom, p);
-                    let dot = new_annotation(st, AnnotationKind::Freehand, vec![pt, pt]);
-                    changed |= commit_stroke(st, page, sketches, dot);
-                }
+            } else if resp.clicked_by(primary)
+                && let Some(p) = pos
+            {
+                let pt = to_unit(origin, zoom, p);
+                let dot = new_annotation(st, AnnotationKind::Freehand, vec![pt, pt]);
+                changed |= commit_stroke(st, page, sketches, dot);
             }
         }
         SketchTool::Line | SketchTool::Arrow | SketchTool::Rect | SketchTool::Circle => {
@@ -961,52 +1042,54 @@ fn handle_input(
                     let pt = to_unit(origin, zoom, p);
                     st.active = Some(new_annotation(st, kind, vec![pt, pt]));
                 }
-            } else if resp.dragged_by(primary) {
-                if let (Some(p), Some(active)) = (pos, st.active.as_mut()) {
-                    let pt = to_unit(origin, zoom, p);
-                    if let Some(last) = active.points.last_mut() {
-                        *last = pt;
-                    }
+            } else if resp.dragged_by(primary)
+                && let (Some(p), Some(active)) = (pos, st.active.as_mut())
+            {
+                let pt = to_unit(origin, zoom, p);
+                if let Some(last) = active.points.last_mut() {
+                    *last = pt;
                 }
             }
-            if resp.drag_stopped_by(primary) {
-                if let Some(shape) = st.active.take() {
-                    let (a, b) = (shape.points[0], *shape.points.last().unwrap());
-                    let size_px = ((b.0 - a.0) * zoom).hypot((b.1 - a.1) * zoom);
-                    if size_px >= 3.0 {
-                        changed |= commit_stroke(st, page, sketches, shape);
-                    }
+            if resp.drag_stopped_by(primary)
+                && let Some(shape) = st.active.take()
+            {
+                let (a, b) = (shape.points[0], *shape.points.last().unwrap());
+                let size_px = ((b.0 - a.0) * zoom).hypot((b.1 - a.1) * zoom);
+                if size_px >= 3.0 {
+                    changed |= commit_stroke(st, page, sketches, shape);
                 }
             }
         }
         SketchTool::Eraser => {
-            let erasing = resp.drag_started_by(primary) || resp.dragged_by(primary) || resp.clicked_by(primary);
-            if erasing {
-                if let Some(p) = pos {
-                    let hit: Vec<usize> = sketches
-                        .get(&page)
-                        .map(|s| {
-                            s.strokes
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, a)| eraser_hits(painter, origin, zoom, a, p, ERASER_RADIUS_PX))
-                                .map(|(i, _)| i)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !hit.is_empty() {
-                        st.commit_pending(sketches);
-                        let before = sketches[&page].strokes.clone();
-                        if !st.erase_snapshot_taken {
-                            st.push_undo(page, before);
-                            st.erase_snapshot_taken = true;
-                        }
-                        let sheet = st.sheet_mut(sketches, page);
-                        for i in hit.into_iter().rev() {
-                            sheet.strokes.remove(i);
-                        }
-                        changed = true;
+            let erasing = resp.drag_started_by(primary)
+                || resp.dragged_by(primary)
+                || resp.clicked_by(primary);
+            if erasing && let Some(p) = pos {
+                let hit: Vec<usize> = sketches
+                    .get(&page)
+                    .map(|s| {
+                        s.strokes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, a)| {
+                                eraser_hits(painter, origin, zoom, a, p, ERASER_RADIUS_PX)
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !hit.is_empty() {
+                    st.commit_pending(sketches);
+                    let before = sketches[&page].strokes.clone();
+                    if !st.erase_snapshot_taken {
+                        st.push_undo(page, before);
+                        st.erase_snapshot_taken = true;
                     }
+                    let sheet = st.sheet_mut(sketches, page);
+                    for i in hit.into_iter().rev() {
+                        sheet.strokes.remove(i);
+                    }
+                    changed = true;
                 }
             }
             if !resp.dragged_by(primary) {
@@ -1014,48 +1097,52 @@ fn handle_input(
             }
         }
         SketchTool::Text => {
-            if resp.clicked_by(primary) {
-                if let Some(p) = pos {
-                    changed |= st.commit_pending(sketches);
-                    let existing = sketches.get(&page).and_then(|s| {
-                        s.strokes.iter().position(|a| {
-                            a.kind == AnnotationKind::TextBox
-                                && text_rect(painter, origin, zoom, a).is_some_and(|r| r.expand(3.0).contains(p))
-                        })
-                    });
-                    let before = sketches.get(&page).map(|s| s.strokes.clone()).unwrap_or_default();
-                    match existing {
-                        Some(index) => {
-                            let text = sketches[&page].strokes[index].text.clone();
-                            st.edit = Some(TextEditState {
-                                page,
-                                index,
-                                buf: text.clone(),
-                                original: text,
-                                before,
-                                focus_requested: true,
-                            });
-                        }
-                        None => {
-                            let (x, y) = to_unit(origin, zoom, p);
-                            let mut ann = new_annotation(
-                                st,
-                                AnnotationKind::TextBox,
-                                vec![(x, y), (x + TEXT_BOX_W, y)],
-                            );
-                            ann.font_size = st.font_size();
-                            let sheet = st.sheet_mut(sketches, page);
-                            sheet.strokes.push(ann);
-                            let index = sheet.strokes.len() - 1;
-                            st.edit = Some(TextEditState {
-                                page,
-                                index,
-                                buf: String::new(),
-                                original: String::new(),
-                                before,
-                                focus_requested: true,
-                            });
-                        }
+            if resp.clicked_by(primary)
+                && let Some(p) = pos
+            {
+                changed |= st.commit_pending(sketches);
+                let existing = sketches.get(&page).and_then(|s| {
+                    s.strokes.iter().position(|a| {
+                        a.kind == AnnotationKind::TextBox
+                            && text_rect(painter, origin, zoom, a)
+                                .is_some_and(|r| r.expand(3.0).contains(p))
+                    })
+                });
+                let before = sketches
+                    .get(&page)
+                    .map(|s| s.strokes.clone())
+                    .unwrap_or_default();
+                match existing {
+                    Some(index) => {
+                        let text = sketches[&page].strokes[index].text.clone();
+                        st.edit = Some(TextEditState {
+                            page,
+                            index,
+                            buf: text.clone(),
+                            original: text,
+                            before,
+                            focus_requested: true,
+                        });
+                    }
+                    None => {
+                        let (x, y) = to_unit(origin, zoom, p);
+                        let mut ann = new_annotation(
+                            st,
+                            AnnotationKind::TextBox,
+                            vec![(x, y), (x + TEXT_BOX_W, y)],
+                        );
+                        ann.font_size = st.font_size();
+                        let sheet = st.sheet_mut(sketches, page);
+                        sheet.strokes.push(ann);
+                        let index = sheet.strokes.len() - 1;
+                        st.edit = Some(TextEditState {
+                            page,
+                            index,
+                            buf: String::new(),
+                            original: String::new(),
+                            before,
+                            focus_requested: true,
+                        });
                     }
                 }
             }
@@ -1075,7 +1162,11 @@ fn smooth(points: &[(f32, f32)], zoom: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
-fn new_annotation(st: &SketchState, kind: AnnotationKind, points: Vec<(f32, f32)>) -> PageAnnotation {
+fn new_annotation(
+    st: &SketchState,
+    kind: AnnotationKind,
+    points: Vec<(f32, f32)>,
+) -> PageAnnotation {
     PageAnnotation {
         kind,
         color: st.color,
@@ -1094,7 +1185,10 @@ fn commit_stroke(
     sketches: &mut HashMap<u32, SketchPage>,
     stroke: PageAnnotation,
 ) -> bool {
-    let before = sketches.get(&page).map(|s| s.strokes.clone()).unwrap_or_default();
+    let before = sketches
+        .get(&page)
+        .map(|s| s.strokes.clone())
+        .unwrap_or_default();
     st.push_undo(page, before);
     st.sheet_mut(sketches, page).strokes.push(stroke);
     true
@@ -1252,7 +1346,11 @@ mod tests {
         h.drag((200.0, 280.0), (200.0, 340.0));
         assert!(h.strokes().is_empty());
         assert!(h.st.undo(1, &mut h.sketches));
-        assert_eq!(h.strokes().len(), 2, "one undo restores everything the drag erased");
+        assert_eq!(
+            h.strokes().len(),
+            2,
+            "one undo restores everything the drag erased"
+        );
     }
 
     #[test]
@@ -1260,7 +1358,10 @@ mod tests {
         let mut h = Harness::new(400.0, 600.0);
         h.st.tool = SketchTool::Text;
         h.click(120.0, 200.0);
-        assert!(h.st.edit.is_some(), "clicking with the text tool opens a box");
+        assert!(
+            h.st.edit.is_some(),
+            "clicking with the text tool opens a box"
+        );
         h.frame(vec![]);
         h.frame(vec![Event::Text("hello".into())]);
         h.frame(vec![]);
@@ -1302,7 +1403,12 @@ mod tests {
 
     #[test]
     fn works_in_a_very_narrow_and_a_very_wide_panel() {
-        for (w, hgt) in [(96.0_f32, 400.0_f32), (140.0, 300.0), (1600.0, 500.0), (1800.0, 160.0)] {
+        for (w, hgt) in [
+            (96.0_f32, 400.0_f32),
+            (140.0, 300.0),
+            (1600.0, 500.0),
+            (1800.0, 160.0),
+        ] {
             let mut h = Harness::new(w, hgt);
             let cx = w * 0.5;
             // The sheet is centered (or starts at the left edge when it is wider than the panel).
@@ -1337,7 +1443,10 @@ mod tests {
             spans.push((b.0 - a.0, b.1 - a.1));
         }
         for (dx, dy) in spans {
-            assert!((dx - 90.0).abs() < 1.0 && (dy - 120.0).abs() < 1.0, "{dx} x {dy}");
+            assert!(
+                (dx - 90.0).abs() < 1.0 && (dy - 120.0).abs() < 1.0,
+                "{dx} x {dy}"
+            );
         }
     }
 
@@ -1349,7 +1458,10 @@ mod tests {
         h.drag((60.0, 200.0), (160.0, 300.0));
         let s = &h.strokes()[0];
         let (a, b) = (s.points[0], *s.points.last().unwrap());
-        assert!(((b.0 - a.0) - 50.0).abs() < 1.0, "100 px at 200 % are 50 units");
+        assert!(
+            ((b.0 - a.0) - 50.0).abs() < 1.0,
+            "100 px at 200 % are 50 units"
+        );
     }
 
     #[test]
@@ -1402,7 +1514,11 @@ mod tests {
         h.drag((200.0, 400.0), (200.0, 300.0));
         h.frame(vec![]);
         h.frame(vec![]);
-        assert!(h.st.scroll_offset.y > base + 50.0, "scrolled from {base} to {:?}", h.st.scroll_offset);
+        assert!(
+            h.st.scroll_offset.y > base + 50.0,
+            "scrolled from {base} to {:?}",
+            h.st.scroll_offset
+        );
         assert_eq!(h.strokes().len(), before, "the hand never draws");
     }
 
@@ -1429,8 +1545,16 @@ mod tests {
         }]);
         h.frame(vec![]);
         h.frame(vec![]);
-        assert!(h.st.scroll_offset.y > base + 50.0, "scrolled from {base} to {:?}", h.st.scroll_offset);
-        assert_eq!(h.strokes().len(), 1, "only the line made by make_scrollable");
+        assert!(
+            h.st.scroll_offset.y > base + 50.0,
+            "scrolled from {base} to {:?}",
+            h.st.scroll_offset
+        );
+        assert_eq!(
+            h.strokes().len(),
+            1,
+            "only the line made by make_scrollable"
+        );
     }
 
     #[test]
@@ -1450,7 +1574,10 @@ mod tests {
         h.button(200.0, 596.0, false);
         assert!(offset > base + 20.0, "scrolled from {base} to {offset}");
         let stroke = h.strokes().last().unwrap();
-        assert!(stroke.points.last().unwrap().1 > stroke.points[0].1 + 200.0, "the stroke follows the scroll");
+        assert!(
+            stroke.points.last().unwrap().1 > stroke.points[0].1 + 200.0,
+            "the stroke follows the scroll"
+        );
     }
 
     #[test]
