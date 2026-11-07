@@ -566,7 +566,12 @@ fn draw_pdf_annotations_scaled(
         (sx + (nx as f64) * sw, sy + (1.0 - (ny as f64)) * sh)
     };
 
-    for ann in anns {
+    // Screenshots go first, like on screen, so that text boxes and ink always end up above them.
+    let images_first = anns
+        .iter()
+        .filter(|a| a.kind == AnnotationKind::Image)
+        .chain(anns.iter().filter(|a| a.kind != AnnotationKind::Image));
+    for ann in images_first {
         let r = (ann.color[0] as f64) / 255.0;
         let g = (ann.color[1] as f64) / 255.0;
         let b = (ann.color[2] as f64) / 255.0;

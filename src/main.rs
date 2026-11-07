@@ -4265,6 +4265,8 @@ fn handle_slide_annotations(
         if self.pdf_panning {
             return;
         }
+        // Screenshots are painted first so that text boxes (drawn right after) always end up on top.
+        self.image_annotations_ui(ui, page_num, slide_rect);
         self.render_page_textboxes(ui, page_num, slide_rect);
         self.slide_rects.push((page_num, slide_rect));
 
@@ -4638,7 +4640,6 @@ fn handle_slide_annotations(
                 }
             }
         }
-        self.image_annotations_ui(ui, page_num, slide_rect);
         // Paint saved annotations + active stroke + Snip rect + Laser trail + Text selection
         let painter = ui.painter_at(slide_rect);
         if let Some(page_anns) = self.annotations.get(&page_num) {

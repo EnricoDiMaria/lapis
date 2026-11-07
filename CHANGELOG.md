@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first, then Edit and Preview, and the page navigation (lock, arrows) is more compact.
 - **Complete Home Screen Redesign.** Redesigned *Open PDF* and *Blank Notebook* cards with stable borders, dedicated Nerd Font icons (`󰝰` and `󰎔`), and optimized click targets. **Grid & List Views:** Introduced toggle views for *Recent documents* (grid view with flush thumbnails, progress bars; and list view with full-row click targets).
 
+### Fixed
+- Textboxes are now rendered on top of screenshots added in the PDF page.
 
 ## [1.2.1] - 2026/11/06 
 

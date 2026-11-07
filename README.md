@@ -400,7 +400,7 @@ The result is a single study document combining the original lecture material, y
 **Study tools**
 
 - [X] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
-- [ ] Fix textboxes rendered under screenshots.
+- [X] Fix textboxes rendered under screenshots.
 - [ ] Improve flashcards
 
 **Platform and project**
