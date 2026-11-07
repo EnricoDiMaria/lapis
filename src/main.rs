@@ -2483,18 +2483,13 @@ impl Lapis {
         }
         let btn_size = if labeled { egui::vec2(200.0, sq_btn.y) } else { sq_btn };
         // Flashcards of the page on screen: the live text of the editor when it is that page's note.
-        let page_has_cards = self.has_pdf()
-            && if self.note_page == self.current_page {
-                notes::page_has_flashcards(&self.current_note)
-            } else {
-                self.notes.get(&self.current_page).is_some_and(|n| notes::page_has_flashcards(n))
-            };
+        let has_flashcards = self.document_has_flashcards();
         let resp = ui.add(
             egui::Button::new(if labeled { format!("{}  Flashcards", "󰘸") } else { "󰘸 ".to_string() })
                 .selected(self.show_flashcards_modal)
                 .min_size(btn_size),
         );
-        if page_has_cards {
+        if has_flashcards {
             // Same dot as the Notes button.
             let dot_center = egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);
             ui.painter().circle(
@@ -2504,10 +2499,10 @@ impl Lapis {
                 egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
             );
         }
-        let has_cards_hover = if page_has_cards { "\n(This page contains flashcards)" } else { "" };
+        let has_cards_hover = if has_flashcards { "\n(This document contains flashcards)" } else { "" };
         if resp
             .on_hover_text(format!(
-                "Flashcard & Active Recall Trainer (parses '::' and 'Q:/A:' from notes){}",
+                "Flashcards (parses '::' and 'Q:/A:' from notes) {}",
                 has_cards_hover
             ))
             .clicked()
@@ -2517,7 +2512,7 @@ impl Lapis {
             if self.show_flashcards_modal {
                 self.show_flashcards_modal = false;
             } else {
-                self.open_flashcards_trainer();
+                self.toggle_flashcards_modal();
             }
         }
     }
@@ -2866,6 +2861,8 @@ fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.continuous_anchor_frac = 0.0;
         self.continuous_prev_layout = (0.0, 0.0, 0.0);
         self.jump_lock_y = None;
+        self.flashcards_deck.clear();
+        self.flashcard_idx = 0;
 
         self.save_session_state();
         ctx.request_repaint();
@@ -5074,7 +5071,7 @@ fn handle_slide_annotations(
                                                         }
                                                         ui.horizontal_wrapped(|ui| {
                                                             if ui.button("󰘸 Open Flashcards Modal").clicked() {
-                                                                self.open_flashcards_trainer();
+                                                                self.toggle_flashcards_modal();
                                                             }
 
                                                             if ui.button("󰈇 Export Anki Deck (.tsv)").clicked() {
@@ -6737,7 +6734,7 @@ fn execute_palette_command(&mut self, cmd_id: &str, opt_page: Option<u32>, ctx: 
             }
             "flashcards" => {
                 self.sync_and_save();
-                self.open_flashcards_trainer();
+                self.toggle_flashcards_modal();
             }
             "export_anki" => {
                 self.sync_and_save();
@@ -10758,6 +10755,49 @@ fn push_undo_snapshot(&mut self, page: u32) {
         self.flashcard_stats = (0, 0, 0);
         self.show_flashcards_modal = true;
     }
+    
+    /// Opens the flashcards modal, resuming an active session if one is in progress,
+    /// or scanning the document to start a new session if empty/finished.
+    fn toggle_flashcards_modal(&mut self) {
+        if self.show_flashcards_modal {
+            self.show_flashcards_modal = false;
+            return;
+        }
+
+        let session_in_progress =
+            !self.flashcards_deck.is_empty() && self.flashcard_idx < self.flashcards_deck.len();
+
+        if session_in_progress {
+            // Resume right where we left off!
+            self.show_flashcards_modal = true;
+        } else {
+            // Deck is empty or session was finished -> scan notes and start fresh
+            self.open_flashcards_trainer();
+        }
+    }
+
+    /// Returns true if any slide in the document has at least one flashcard.
+    fn document_has_flashcards(&self) -> bool {
+    // Replace `self.slide_notes.values()` with your map field (or `.iter()` if it's a Vec)
+        self.notes.values().any(|text| {
+            let mut has_q = false;
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if let Some((l, r)) = trimmed.split_once("::") {
+                    if !l.trim().is_empty() && !r.trim().is_empty() {
+                        return true;
+                    }
+                }
+                if trimmed.starts_with("Q:") && trimmed.len() > 2 {
+                    has_q = true;
+                } else if has_q && trimmed.starts_with("A:") && trimmed.len() > 2 {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
     fn render_flashcards_modal(&mut self, ui: &mut egui::Ui) {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_flashcards_modal = false;
@@ -10775,7 +10815,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                 ui.painter().rect_filled(
                     rect,
                     egui::CornerRadius::ZERO,
-                    egui::Color32::from_black_alpha(155),
+                    egui::Color32::from_black_alpha(165),
                 );
                 if resp.clicked() {
                     self.show_flashcards_modal = false;
@@ -10791,38 +10831,58 @@ fn push_undo_snapshot(&mut self, page: u32) {
                 egui::Frame::window(ui.style())
                     .fill(rgb(self.theme.bg_elevated))
                     .stroke(egui::Stroke::new(1.5, rgb(self.theme.accent)))
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .inner_margin(egui::Margin::same(18))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::same(20))
                     .show(ui, |ui| {
-                        ui.set_width(540.0);
-                        ui.set_min_height(330.0);
+                        ui.set_width(580.0);
+                        ui.set_min_height(350.0);
 
-                        // Top Header Bar
+                        // Top Header Bar — allocate remaining width explicitly so right-to-left never overlaps title
                         ui.horizontal(|ui| {
-                            ui.heading("󰘸  Active Recall & Flashcards");
-                            ui.with_layout(
+                            ui.label(
+                                egui::RichText::new("󰘸  Active Recall & Flashcards")
+                                    .strong()
+                                    .size(16.5)
+                                    .color(rgb(self.theme.fg_primary)),
+                            );
+
+                            let remaining = ui.available_size_before_wrap();
+                            ui.allocate_ui_with_layout(
+                                remaining,
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .add_sized([28.0, 26.0], egui::Button::new("󰅖"))
+                                        .add_sized([26.0, 24.0], egui::Button::new("󰅖"))
                                         .on_hover_text("Close [Esc]")
                                         .clicked()
                                     {
                                         self.show_flashcards_modal = false;
                                     }
 
+                                    ui.add_space(4.0);
+
                                     if !self.flashcards_deck.is_empty()
                                         && ui
-                                            .button("󰈇 Export Anki (.tsv)")
-                                            .on_hover_text("Export deck for Anki Desktop / AnkiDroid")
+                                            .add_sized(
+                                                [118.0, 24.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("󰈇 Export Anki").size(12.0),
+                                                ),
+                                            )
+                                            .on_hover_text("Export deck (.tsv) for Anki Desktop / AnkiDroid")
                                             .clicked()
                                     {
                                         self.export_anki_dialog(ui.ctx());
                                     }
 
                                     if ui
-                                        .small_button("󰑐 Refresh")
-                                        .on_hover_text("Re-scan notes for new cards")
+                                        .add_sized(
+                                            [80.0, 24.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("󰑐 Refresh").size(12.0),
+                                            ),
+                                        )
+                                        .on_hover_text("Re-scan document notes for flashcards")
                                         .clicked()
                                     {
                                         self.open_flashcards_trainer();
@@ -10830,62 +10890,115 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                 },
                             );
                         });
+
+                        ui.add_space(6.0);
                         ui.separator();
 
+                        // Empty Deck State
                         if self.flashcards_deck.is_empty() {
-                            ui.add_space(24.0);
+                            ui.add_space(22.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    egui::RichText::new("No Flashcards Found in Notes Yet")
+                                    egui::RichText::new("󰘸  No Flashcards Found in Document")
                                         .strong()
                                         .size(16.0),
                                 );
-                                ui.add_space(10.0);
+                                ui.add_space(8.0);
                                 ui.label(
                                     egui::RichText::new(
                                         "Write flashcards directly inside any slide's Markdown notes using either syntax:",
                                     )
                                     .color(rgb(self.theme.fg_muted)),
                                 );
-                                ui.add_space(12.0);
-                                egui::Frame::NONE
-                                    .fill(rgb(self.theme.bg_panel))
-                                    .corner_radius(egui::CornerRadius::same(6))
-                                    .inner_margin(egui::Margin::same(12))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "1) Inline syntax:\n   Page Fault :: Exception raised by MMU when PTE valid bit is 0\n\n2) Multi-line Q/A syntax:\n   Q: What is the time complexity of Heapify?\n   A: $O(\\log n)$ worst-case per node, $O(n)$ bottom-up build.",
-                                            )
-                                            .monospace()
-                                            .size(12.5),
-                                        );
-                                    });
                             });
+                            ui.add_space(14.0);
+                            egui::Frame::NONE
+                                .fill(rgb(self.theme.bg_panel))
+                                .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::same(14))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(
+                                        egui::RichText::new("1. Inline syntax (Term :: Definition)")
+                                            .strong()
+                                            .size(12.0)
+                                            .color(rgb(self.theme.accent)),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Page Fault :: Exception raised by MMU when PTE valid bit is 0",
+                                        )
+                                        .monospace()
+                                        .size(12.0),
+                                    );
+                                    ui.add_space(12.0);
+                                    ui.label(
+                                        egui::RichText::new("2. Multi-line Q/A syntax")
+                                            .strong()
+                                            .size(12.0)
+                                            .color(rgb(self.theme.accent)),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Q: What is the time complexity of Heapify?\nA: $O(\\log n)$ worst-case per node, $O(n)$ bottom-up build.",
+                                        )
+                                        .monospace()
+                                        .size(12.0),
+                                    );
+                                });
                             return;
                         }
 
-                        // Check if user finished reviewing all cards in the deck
+                        // Completed Session State
                         if self.flashcard_idx >= self.flashcards_deck.len() {
-                            ui.add_space(30.0);
+                            ui.add_space(28.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
                                     egui::RichText::new("󰄬  Deck Review Complete!")
                                         .strong()
-                                        .size(18.0)
+                                        .size(19.0)
                                         .color(rgb(self.theme.success)),
                                 );
-                                ui.add_space(12.0);
+                                ui.add_space(14.0);
+
                                 let (hard, good, easy) = self.flashcard_stats;
-                                ui.label(format!(
-                                    "Session stats:   Again/Hard: {}   |   Good: {}   |   Easy: {}",
-                                    hard, good, easy
-                                ));
-                                ui.add_space(20.0);
+                                egui::Frame::NONE
+                                    .fill(rgb(self.theme.bg_panel))
+                                    .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(20, 12))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("Again: {}", hard))
+                                                    .strong()
+                                                    .color(rgb(self.theme.error)),
+                                            );
+                                            ui.separator();
+                                            ui.label(
+                                                egui::RichText::new(format!("Good: {}", good))
+                                                    .strong()
+                                                    .color(rgb(self.theme.accent)),
+                                            );
+                                            ui.separator();
+                                            ui.label(
+                                                egui::RichText::new(format!("Easy: {}", easy))
+                                                    .strong()
+                                                    .color(rgb(self.theme.success)),
+                                            );
+                                        });
+                                    });
+
+                                ui.add_space(22.0);
                                 if ui
                                     .add_sized(
-                                        [180.0, 34.0],
-                                        egui::Button::new("󰑐  Restart Session"),
+                                        [190.0, 36.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("󰑐  Restart Session").strong(),
+                                        ),
                                     )
                                     .clicked()
                                 {
@@ -10897,12 +11010,15 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
                         let total_cards = self.flashcards_deck.len();
                         let card = self.flashcards_deck[self.flashcard_idx].clone();
+                        let progress = (self.flashcard_idx + 1) as f32 / total_cards as f32;
+
+                        ui.add_space(6.0);
 
                         // Progress & Slide Sync Bar
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "Card {} / {}",
+                                    "Card {} of {}",
                                     self.flashcard_idx + 1,
                                     total_cards
                                 ))
@@ -10910,26 +11026,55 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                 .color(rgb(self.theme.accent)),
                             );
 
+                            ui.add_space(6.0);
                             ui.separator();
+                            ui.add_space(6.0);
 
                             if ui
-                                .small_button(format!("󰈙 Slide {}", card.page))
-                                .on_hover_text("Jump PDF to this card's slide")
+                                .small_button(format!("󰈙 Go to Slide {}", card.page))
+                                .on_hover_text("Jump to this slide and hide modal to read (session progress is saved)")
                                 .clicked()
                             {
                                 jump_to_slide = Some(card.page);
+                                self.show_flashcards_modal = false; // Hides modal so you can read the slide immediately!
                             }
 
-                            if ui
-                                .checkbox(&mut self.flashcard_sync_slide, "Auto-sync PDF slide")
-                                .changed()
-                                && self.flashcard_sync_slide
-                            {
-                                jump_to_slide = Some(card.page);
-                            }
+                            let remaining = ui.available_size_before_wrap();
+                            ui.allocate_ui_with_layout(
+                                remaining,
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .checkbox(&mut self.flashcard_sync_slide, "Auto-sync slide")
+                                        .changed()
+                                        && self.flashcard_sync_slide
+                                    {
+                                        jump_to_slide = Some(card.page);
+                                    }
+                                },
+                            );
                         });
+                        ui.add_space(6.0);
 
-                        ui.add_space(8.0);
+                        // Sleek thin progress bar
+                        let (prog_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 4.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(
+                            prog_rect,
+                            egui::CornerRadius::same(2),
+                            rgb(self.theme.bg_panel),
+                        );
+                        let mut fill_rect = prog_rect;
+                        fill_rect.set_width(prog_rect.width() * progress.clamp(0.0, 1.0));
+                        ui.painter().rect_filled(
+                            fill_rect,
+                            egui::CornerRadius::same(2),
+                            rgb(self.theme.accent),
+                        );
+
+                        ui.add_space(12.0);
 
                         // Question Card Box (Front)
                         egui::Frame::NONE
@@ -10945,16 +11090,23 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                         .strong()
                                         .color(rgb(self.theme.fg_muted)),
                                 );
-                                ui.add_space(4.0);
-                                let q_md = notes::preprocess_markdown_view(&notes::escape_stray_asterisks(&card.front));
-                                egui_commonmark::CommonMarkViewer::new().show(
-                                    ui,
-                                    &mut self.commonmark_cache,
-                                    &q_md,
-                                );
+                                ui.add_space(6.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("fc_question_scroll")
+                                    .max_height(130.0)
+                                    .show(ui, |ui| {
+                                        let q_md = notes::preprocess_markdown_view(
+                                            &notes::escape_stray_asterisks(&card.front),
+                                        );
+                                        egui_commonmark::CommonMarkViewer::new().show(
+                                            ui,
+                                            &mut self.commonmark_cache,
+                                            &q_md,
+                                        );
+                                    });
                             });
 
-                        ui.add_space(10.0);
+                        ui.add_space(12.0);
 
                         // Answer Card Box (Back) or Reveal Button
                         if !self.flashcard_revealed {
@@ -10962,12 +11114,12 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                 i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
                             });
                             ui.vertical_centered(|ui| {
-                                ui.add_space(18.0);
+                                ui.add_space(24.0);
                                 if ui
                                     .add_sized(
-                                        [240.0, 38.0],
+                                        [250.0, 40.0],
                                         egui::Button::new(
-                                            egui::RichText::new("󰈈  Show Answer [Space]")
+                                            egui::RichText::new("󰈈  Show Answer  [Space]")
                                                 .strong()
                                                 .size(14.0),
                                         ),
@@ -10977,6 +11129,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                 {
                                     self.flashcard_revealed = true;
                                 }
+                                ui.add_space(12.0);
                             });
                         } else {
                             egui::Frame::NONE
@@ -10992,16 +11145,21 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                             .strong()
                                             .color(rgb(self.theme.success)),
                                     );
-                                    ui.add_space(4.0);
-                                    let a_md = notes::preprocess_markdown_view(&card.back);
-                                    egui_commonmark::CommonMarkViewer::new().show(
-                                        ui,
-                                        &mut self.commonmark_cache,
-                                        &a_md,
-                                    );
+                                    ui.add_space(6.0);
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("fc_answer_scroll")
+                                        .max_height(150.0)
+                                        .show(ui, |ui| {
+                                            let a_md = notes::preprocess_markdown_view(&card.back);
+                                            egui_commonmark::CommonMarkViewer::new().show(
+                                                ui,
+                                                &mut self.commonmark_cache,
+                                                &a_md,
+                                            );
+                                        });
                                 });
 
-                            ui.add_space(14.0);
+                            ui.add_space(16.0);
 
                             // Self-grading buttons (1 = Again/Requeue, 2 = Good, 3 = Easy)
                             let (k1, k2, k3) = ui.input(|i| {
@@ -11015,35 +11173,37 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
                             ui.columns(3, |cols| {
                                 if cols[0]
-                                    .add_sized(
-                                        [cols[0].available_width(), 32.0],
-                                        egui::Button::new(
-                                            egui::RichText::new("󰑐 Again (Re-queue) [1]")
-                                                .color(rgb(self.theme.error)),
-                                        ),
-                                    )
-                                    .clicked()
-                                    || k1
-                                {
-                                    self.flashcard_stats.0 += 1;
-                                    // Re-queue card at the end of the session until mastered!
-                                    self.flashcards_deck.push(card.clone());
-                                    self.flashcard_idx += 1;
-                                    self.flashcard_revealed = false;
-                                    if self.flashcard_sync_slide {
-                                        if let Some(next_c) =
-                                            self.flashcards_deck.get(self.flashcard_idx)
-                                        {
-                                            jump_to_slide = Some(next_c.page);
-                                        }
-                                    }
-                                }
+    .add_sized(
+        [cols[0].available_width(), 34.0],
+        egui::Button::new(
+            egui::RichText::new("󰑐 Again [1]")
+                .strong()
+                .color(rgb(self.theme.error)),
+        ),
+    )
+    .on_hover_text("Move card to the end of the remaining queue")
+    .clicked()
+    || k1
+{
+    self.flashcard_stats.0 += 1;
+    // Move current card to the back of the deck WITHOUT changing deck length or flashcard_idx!
+    let missed_card = self.flashcards_deck.remove(self.flashcard_idx);
+    self.flashcards_deck.push(missed_card);
+    self.flashcard_revealed = false;
+
+    if self.flashcard_sync_slide {
+        if let Some(next_c) = self.flashcards_deck.get(self.flashcard_idx) {
+            jump_to_slide = Some(next_c.page);
+        }
+    }
+}
 
                                 if cols[1]
                                     .add_sized(
-                                        [cols[1].available_width(), 32.0],
+                                        [cols[1].available_width(), 34.0],
                                         egui::Button::new(
                                             egui::RichText::new("󰄬 Good [2 / →]")
+                                                .strong()
                                                 .color(rgb(self.theme.accent)),
                                         ),
                                     )
@@ -11064,9 +11224,10 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
                                 if cols[2]
                                     .add_sized(
-                                        [cols[2].available_width(), 32.0],
+                                        [cols[2].available_width(), 34.0],
                                         egui::Button::new(
                                             egui::RichText::new("󰄬 Easy [3]")
+                                                .strong()
                                                 .color(rgb(self.theme.success)),
                                         ),
                                     )
@@ -16572,7 +16733,7 @@ impl eframe::App for Lapis {
         // Advanced Settings        
         if self.show_settings { self.render_settings_modal(ui); }
 
-// Toast Notification
+        // Toast Notification
         let mut clear_toast = false;
         if let Some((msg, time)) = &self.toast_message {
             const TOTAL_DURATION: f32 = 3.0;
