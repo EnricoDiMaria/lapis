@@ -1524,81 +1524,95 @@ pub fn extract_flashcards_from_notes(notes: &HashMap<u32, String>) -> Vec<Flashc
     sorted_pages.sort_unstable();
 
     for page in sorted_pages {
-        let Some(content) = notes.get(&page) else {
-            continue;
-        };
+        if let Some(content) = notes.get(&page) {
+            cards.extend(extract_flashcards_from_page(page, content));
+        }
+    }
 
-        let mut lines = content.lines().peekable();
-        while let Some(raw_line) = lines.next() {
-            let trimmed = raw_line
-                .trim()
-                .trim_start_matches(['-', '*', '+'])
-                .trim();
+    cards
+}
 
-            // 1. Check inline `Front :: Back` syntax
-            if let Some((left, right)) = trimmed.split_once("::") {
-                let f = left.trim().trim_matches('*').trim();
-                let b = right.trim();
-                if !f.is_empty() && !b.is_empty() {
-                    cards.push(Flashcard {
-                        page,
-                        front: f.to_string(),
-                        back: b.to_string(),
-                    });
-                    continue;
+/// `true` when the note of one page contains at least one flashcard (what the trainer would find).
+pub fn page_has_flashcards(content: &str) -> bool {
+    // Cheap pre-filter: this runs every frame for the page on screen.
+    if !content.contains("::") && !content.contains("Q:") && !content.contains("D:") {
+        return false;
+    }
+    !extract_flashcards_from_page(0, content).is_empty()
+}
+
+fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
+    let mut cards = Vec::new();
+    let mut lines = content.lines().peekable();
+    while let Some(raw_line) = lines.next() {
+        let trimmed = raw_line
+            .trim()
+            .trim_start_matches(['-', '*', '+'])
+            .trim();
+
+        // 1. Check inline `Front :: Back` syntax
+        if let Some((left, right)) = trimmed.split_once("::") {
+            let f = left.trim().trim_matches('*').trim();
+            let b = right.trim();
+            if !f.is_empty() && !b.is_empty() {
+                cards.push(Flashcard {
+                    page,
+                    front: f.to_string(),
+                    back: b.to_string(),
+                });
+                continue;
+            }
+        }
+
+        // 2. Check `Q: ...` / `A: ...` block syntax
+        if let Some(q_start) = trimmed
+            .strip_prefix("Q:")
+            .or_else(|| trimmed.strip_prefix("**Q:**"))
+            .or_else(|| trimmed.strip_prefix("D:"))
+        {
+            let mut question = q_start.trim().to_string();
+            let mut answer = String::new();
+            let mut in_answer = false;
+
+            while let Some(&next_raw) = lines.peek() {
+                let next_trim = next_raw.trim();
+                if next_trim.is_empty() && in_answer {
+                    break;
+                }
+                if next_trim.starts_with("Q:")
+                    || next_trim.starts_with("**Q:**")
+                    || next_trim.contains("::")
+                {
+                    break;
+                }
+
+                let consumed = lines.next().unwrap().trim();
+                if let Some(a_start) = consumed
+                    .strip_prefix("A:")
+                    .or_else(|| consumed.strip_prefix("**A:**"))
+                    .or_else(|| consumed.strip_prefix("R:"))
+                {
+                    in_answer = true;
+                    answer.push_str(a_start.trim());
+                } else if in_answer {
+                    if !answer.is_empty() {
+                        answer.push('\n');
+                    }
+                    answer.push_str(consumed);
+                } else if !consumed.is_empty() {
+                    if !question.is_empty() {
+                        question.push('\n');
+                    }
+                    question.push_str(consumed);
                 }
             }
 
-            // 2. Check `Q: ...` / `A: ...` block syntax
-            if let Some(q_start) = trimmed
-                .strip_prefix("Q:")
-                .or_else(|| trimmed.strip_prefix("**Q:**"))
-                .or_else(|| trimmed.strip_prefix("D:"))
-            {
-                let mut question = q_start.trim().to_string();
-                let mut answer = String::new();
-                let mut in_answer = false;
-
-                while let Some(&next_raw) = lines.peek() {
-                    let next_trim = next_raw.trim();
-                    if next_trim.is_empty() && in_answer {
-                        break;
-                    }
-                    if next_trim.starts_with("Q:")
-                        || next_trim.starts_with("**Q:**")
-                        || next_trim.contains("::")
-                    {
-                        break;
-                    }
-
-                    let consumed = lines.next().unwrap().trim();
-                    if let Some(a_start) = consumed
-                        .strip_prefix("A:")
-                        .or_else(|| consumed.strip_prefix("**A:**"))
-                        .or_else(|| consumed.strip_prefix("R:"))
-                    {
-                        in_answer = true;
-                        answer.push_str(a_start.trim());
-                    } else if in_answer {
-                        if !answer.is_empty() {
-                            answer.push('\n');
-                        }
-                        answer.push_str(consumed);
-                    } else if !consumed.is_empty() {
-                        if !question.is_empty() {
-                            question.push('\n');
-                        }
-                        question.push_str(consumed);
-                    }
-                }
-
-                if !question.is_empty() && !answer.is_empty() {
-                    cards.push(Flashcard {
-                        page,
-                        front: question,
-                        back: answer,
-                    });
-                }
+            if !question.is_empty() && !answer.is_empty() {
+                cards.push(Flashcard {
+                    page,
+                    front: question,
+                    back: answer,
+                });
             }
         }
     }
@@ -1911,6 +1925,17 @@ pub fn prepare_image_xobjects(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_has_flashcards_detects_both_syntaxes() {
+        assert!(page_has_flashcards("Mitosis :: cell division"));
+        assert!(page_has_flashcards("Q: What is 2+2?\nA: 4"));
+        assert!(page_has_flashcards("- **Q:** capital of Italy?\n**A:** Rome"));
+        assert!(!page_has_flashcards(""));
+        assert!(!page_has_flashcards("Just a plain note\nwith two lines"));
+        assert!(!page_has_flashcards("Q: a question without an answer"));
+        assert!(!page_has_flashcards("empty side ::   "));
+    }
+
     use super::*;
 
     #[test]

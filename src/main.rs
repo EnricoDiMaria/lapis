@@ -2482,13 +2482,34 @@ impl Lapis {
             return;
         }
         let btn_size = if labeled { egui::vec2(200.0, sq_btn.y) } else { sq_btn };
-            if ui
-            .add(
-         egui::Button::new(if labeled { format!("{}  Flashcards", "󰘸") } else { "󰘸 ".to_string() })
-             .selected(self.show_flashcards_modal)
-             .min_size(btn_size),
-            )
-            .on_hover_text("Flashcard & Active Recall Trainer (parses '::' and 'Q:/A:' from notes)")
+        // Flashcards of the page on screen: the live text of the editor when it is that page's note.
+        let page_has_cards = self.has_pdf()
+            && if self.note_page == self.current_page {
+                notes::page_has_flashcards(&self.current_note)
+            } else {
+                self.notes.get(&self.current_page).is_some_and(|n| notes::page_has_flashcards(n))
+            };
+        let resp = ui.add(
+            egui::Button::new(if labeled { format!("{}  Flashcards", "󰘸") } else { "󰘸 ".to_string() })
+                .selected(self.show_flashcards_modal)
+                .min_size(btn_size),
+        );
+        if page_has_cards {
+            // Same dot as the Notes button.
+            let dot_center = egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);
+            ui.painter().circle(
+                dot_center,
+                3.5,
+                theme::rgb(self.theme.accent),
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
+            );
+        }
+        let has_cards_hover = if page_has_cards { "\n(This page contains flashcards)" } else { "" };
+        if resp
+            .on_hover_text(format!(
+                "Flashcard & Active Recall Trainer (parses '::' and 'Q:/A:' from notes){}",
+                has_cards_hover
+            ))
             .clicked()
             && self.has_pdf()
         {
