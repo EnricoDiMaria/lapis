@@ -10946,7 +10946,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                                         .color(rgb(self.theme.fg_muted)),
                                 );
                                 ui.add_space(4.0);
-                                let q_md = notes::preprocess_markdown_view(&card.front);
+                                let q_md = notes::preprocess_markdown_view(&notes::escape_stray_asterisks(&card.front));
                                 egui_commonmark::CommonMarkViewer::new().show(
                                     ui,
                                     &mut self.commonmark_cache,

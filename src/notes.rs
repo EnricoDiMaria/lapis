@@ -1541,18 +1541,40 @@ pub fn page_has_flashcards(content: &str) -> bool {
     !extract_flashcards_from_page(0, content).is_empty()
 }
 
+/// Removes a Markdown list marker (`- `, `* `, `+ `) at the start of a line. A `*` that is part of
+/// the text (`*args`, `**Term**`, `A*`) is never touched.
+fn strip_list_marker(line: &str) -> &str {
+    let mut t = line.trim();
+    while let Some(rest) = ["- ", "* ", "+ "].iter().find_map(|m| t.strip_prefix(m)) {
+        t = rest.trim_start();
+    }
+    t
+}
+
+/// `**Term**` / `*Term*` -> `Term`, only when the emphasis wraps the whole title and nothing inside
+/// it uses `*`; any other asterisk belongs to the title and is kept.
+fn strip_title_emphasis(title: &str) -> &str {
+    let t = title.trim();
+    for m in ["***", "**", "*"] {
+        if t.len() > 2 * m.len() && t.starts_with(m) && t.ends_with(m) {
+            let inner = t[m.len()..t.len() - m.len()].trim();
+            if !inner.is_empty() && !inner.contains('*') {
+                return inner;
+            }
+        }
+    }
+    t
+}
+
 fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
     let mut cards = Vec::new();
     let mut lines = content.lines().peekable();
     while let Some(raw_line) = lines.next() {
-        let trimmed = raw_line
-            .trim()
-            .trim_start_matches(['-', '*', '+'])
-            .trim();
+        let trimmed = strip_list_marker(raw_line);
 
         // 1. Check inline `Front :: Back` syntax
         if let Some((left, right)) = trimmed.split_once("::") {
-            let f = left.trim().trim_matches('*').trim();
+            let f = strip_title_emphasis(left);
             let b = right.trim();
             if !f.is_empty() && !b.is_empty() {
                 cards.push(Flashcard {
@@ -1618,6 +1640,100 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
     }
 
     cards
+}
+
+/// Escapes the `*` of a flashcard question that Markdown would swallow because they do not form a
+/// valid emphasis (`*args`, `A*`, `a * b`, `**kwargs`), so they are shown as typed. Asterisks that
+/// do open and close an emphasis (`**bold**`, `*italic*`), list markers and code spans are kept.
+pub fn escape_stray_asterisks(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len() + 8);
+    for (i, line) in markdown.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let indent = line.len() - line.trim_start().len();
+        let body = &line[indent..];
+        out.push_str(&line[..indent]);
+        let body = match body.strip_prefix("* ") {
+            Some(rest) => {
+                out.push_str("* ");
+                rest
+            }
+            None => body,
+        };
+        // Even segments are text, odd ones are inside `code spans`.
+        let segs: Vec<&str> = body.split('`').collect();
+        let closed = segs.len() % 2 == 1;
+        for (n, seg) in segs.iter().enumerate() {
+            if n > 0 {
+                out.push('`');
+            }
+            if n % 2 == 0 || !closed {
+                out.push_str(&escape_stray_in_text(seg));
+            } else {
+                out.push_str(seg);
+            }
+        }
+    }
+    out
+}
+
+fn escape_stray_in_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    // Runs of `*`: (start, len, can_open, can_close)
+    let mut runs: Vec<(usize, usize, bool, bool)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '*' && (i == 0 || chars[i - 1] != '\\') {
+            let start = i;
+            while i < chars.len() && chars[i] == '*' {
+                i += 1;
+            }
+            let before = start.checked_sub(1).map(|j| chars[j]);
+            let after = chars.get(i).copied();
+            let can_open = after.is_some_and(|c| !c.is_whitespace());
+            let can_close = before.is_some_and(|c| !c.is_whitespace());
+            runs.push((start, i - start, can_open, can_close));
+        } else {
+            i += 1;
+        }
+    }
+    // Pair closers with the nearest opener of the same length.
+    let mut matched = vec![false; runs.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for (ri, &(_, len, can_open, can_close)) in runs.iter().enumerate() {
+        if can_close {
+            if let Some(pos) = stack.iter().rposition(|&o| runs[o].1 == len) {
+                let o = stack.remove(pos);
+                matched[o] = true;
+                matched[ri] = true;
+                continue;
+            }
+        }
+        if can_open {
+            stack.push(ri);
+        }
+    }
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut next_run = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if next_run < runs.len() && runs[next_run].0 == i {
+            let (_, len, _, _) = runs[next_run];
+            for _ in 0..len {
+                if !matched[next_run] {
+                    out.push('\\');
+                }
+                out.push('*');
+            }
+            i += len;
+            next_run += 1;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Exports extracted flashcards into an Anki-ready `.tsv` file with automatic slide tags.
@@ -1934,6 +2050,41 @@ mod tests {
         assert!(!page_has_flashcards("Just a plain note\nwith two lines"));
         assert!(!page_has_flashcards("Q: a question without an answer"));
         assert!(!page_has_flashcards("empty side ::   "));
+    }
+
+    fn card_fronts(note: &str) -> Vec<String> {
+        let mut m = HashMap::new();
+        m.insert(1u32, note.to_string());
+        extract_flashcards_from_notes(&m).into_iter().map(|c| c.front).collect()
+    }
+
+    #[test]
+    fn asterisks_in_flashcard_titles_are_kept() {
+        assert_eq!(card_fronts("*args :: positional arguments"), ["*args"]);
+        assert_eq!(card_fronts("**kwargs :: keyword arguments"), ["**kwargs"]);
+        assert_eq!(card_fronts("A* :: a search algorithm"), ["A*"]);
+        assert_eq!(card_fronts("a * b :: product"), ["a * b"]);
+        assert_eq!(card_fronts("- A* :: search"), ["A*"]);
+        // A wrapping emphasis is still removed, a list marker too.
+        assert_eq!(card_fronts("**Mitosis** :: division"), ["Mitosis"]);
+        assert_eq!(card_fronts("* *Mitosis* :: division"), ["Mitosis"]);
+        // Q/A blocks written in bold keep their text clean.
+        let mut m = HashMap::new();
+        m.insert(1u32, "**Q:** What is *p?\n**A:** a pointer".to_string());
+        let c = extract_flashcards_from_notes(&m);
+        assert_eq!((c[0].front.as_str(), c[0].back.as_str()), ("What is *p?", "a pointer"));
+    }
+
+    #[test]
+    fn stray_asterisks_are_escaped_for_display() {
+        assert_eq!(escape_stray_asterisks("*args"), "\\*args");
+        assert_eq!(escape_stray_asterisks("A*"), "A\\*");
+        assert_eq!(escape_stray_asterisks("a * b"), "a \\* b");
+        assert_eq!(escape_stray_asterisks("**kwargs and *args"), "\\*\\*kwargs and \\*args");
+        // Real emphasis, list markers and code spans are left alone.
+        assert_eq!(escape_stray_asterisks("a **bold** and *it* word"), "a **bold** and *it* word");
+        assert_eq!(escape_stray_asterisks("* item *x"), "* item \\*x");
+        assert_eq!(escape_stray_asterisks("`a*b` and c*"), "`a*b` and c\\*");
     }
 
     use super::*;
