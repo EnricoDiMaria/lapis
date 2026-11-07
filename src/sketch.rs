@@ -880,7 +880,7 @@ fn canvas_area(
             changed |= handle_input(ui, st, page, sketches, &resp, origin, zoom, &painter);
             changed
         });
-    st.scroll_offset = output.state.offset();
+    st.scroll_offset = output.state.clamped_offset();
     output.inner
 }
 

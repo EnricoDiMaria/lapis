@@ -58,6 +58,7 @@ fn shot_cache() -> &'static Mutex<Option<Shot>> {
     CACHED_SHOT.get_or_init(|| Mutex::new(None))
 }
 
+/*
 pub fn prefetch_clipboard_image() -> bool {
     if !clipboard_has_image() {
         if let Ok(mut g) = shot_cache().lock() {
@@ -73,6 +74,7 @@ pub fn prefetch_clipboard_image() -> bool {
     }
     false
 }
+    */
 
 pub fn is_image_path(p: &Path) -> bool {
     matches!(
@@ -147,6 +149,7 @@ pub fn clipboard_has_image() -> bool {
         .map_or(false, |mut cb| cb.get_image().is_ok())
 }
 
+/*
 #[cfg(target_os = "linux")]
 pub fn clipboard_has_image() -> bool {
     let attempts: [(&str, &[&str]); 2] = [
@@ -170,6 +173,7 @@ pub fn clipboard_has_image() -> bool {
     }
     false
 }
+ */
 
 pub fn is_image_placeholder(text: &str) -> bool {
     let t = text.trim();

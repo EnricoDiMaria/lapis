@@ -14,7 +14,7 @@ pub struct DocLock {
 #[derive(Debug)]
 pub enum LockError {
     Busy,
-    Io(io::Error),
+    Io(#[allow(dead_code)]io::Error),
 }
 
 pub fn canonical(path: &Path) -> PathBuf {

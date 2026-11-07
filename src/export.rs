@@ -61,7 +61,7 @@ struct StyledSpan {
 enum NoteLineKind {
     Blank,
     Rule,
-    Heading(u8, Vec<StyledSpan>),
+    Heading(#[allow(dead_code)] u8, Vec<StyledSpan>),
     Bullet(usize, Vec<StyledSpan>),
     Quote(Vec<StyledSpan>),
     CodeLine(String),
@@ -2324,7 +2324,7 @@ fn build_notes_pages(
     let sh_c = geo.dh * s_c;
     let w_total = (geo.dw * base_s_c).round();
     let text_x = sw_c + MARGIN;
-    let avail_text_w = w_total - text_x - MARGIN;
+    let _avail_text_w = w_total - text_x - MARGIN;
     let slide_y = (h_c - sh_c) / 2.0;
     let avail_text_w = w_total - text_x - MARGIN;
     let k = geo.dh / h_c; // canvas units -> points: the slide is drawn at exactly its original size

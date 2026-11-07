@@ -1532,15 +1532,6 @@ pub fn extract_flashcards_from_notes(notes: &HashMap<u32, String>) -> Vec<Flashc
     cards
 }
 
-/// `true` when the note of one page contains at least one flashcard (what the trainer would find).
-pub fn page_has_flashcards(content: &str) -> bool {
-    // Cheap pre-filter: this runs every frame for the page on screen.
-    if !content.contains("::") && !content.contains("Q:") && !content.contains("D:") {
-        return false;
-    }
-    !extract_flashcards_from_page(0, content).is_empty()
-}
-
 /// Removes a Markdown list marker (`- `, `* `, `+ `) at the start of a line. A `*` that is part of
 /// the text (`*args`, `**Term**`, `A*`) is never touched.
 fn strip_list_marker(line: &str) -> &str {
@@ -2041,17 +2032,6 @@ pub fn prepare_image_xobjects(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn page_has_flashcards_detects_both_syntaxes() {
-        assert!(page_has_flashcards("Mitosis :: cell division"));
-        assert!(page_has_flashcards("Q: What is 2+2?\nA: 4"));
-        assert!(page_has_flashcards("- **Q:** capital of Italy?\n**A:** Rome"));
-        assert!(!page_has_flashcards(""));
-        assert!(!page_has_flashcards("Just a plain note\nwith two lines"));
-        assert!(!page_has_flashcards("Q: a question without an answer"));
-        assert!(!page_has_flashcards("empty side ::   "));
-    }
-
     fn card_fronts(note: &str) -> Vec<String> {
         let mut m = HashMap::new();
         m.insert(1u32, note.to_string());

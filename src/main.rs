@@ -1343,7 +1343,6 @@ struct Lapis {
     home_thumb_rx: Receiver<(PathBuf, egui::ColorImage)>,
     home_thumb_cache: HashMap<PathBuf, (egui::TextureHandle, (usize, usize))>,
     home_thumb_pending: HashSet<PathBuf>,
-    home_logo: Option<egui::TextureHandle>,
     audio_dock_height: f32,
     jump_lock_y: Option<f32>,
     continuous_anchor_page: u32,
@@ -1383,18 +1382,6 @@ impl Lapis {
         let (export_tx, export_rx) = channel::<Result<PathBuf, String>>();
         let (asr_tx, asr_rx) = channel::<audio::AsrJobResult>();
         let (home_thumb_tx, home_thumb_rx) = channel::<(PathBuf, egui::ColorImage)>();
-        let home_logo = image::load_from_memory(include_bytes!("../assets/icon.png"))
-            .ok()
-            .map(|img| {
-                let rgba = img.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let pixels = rgba.as_flat_samples();
-                cc.egui_ctx.load_texture(
-                    "lapis_home_logo",
-                    egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
         let spellchecker = spellcheck::SpellChecker::new(&app_state.settings.extra_dictionaries);
 
         let mut app = Self {
@@ -1539,7 +1526,6 @@ impl Lapis {
             home_thumb_rx,
             home_thumb_cache: HashMap::new(),
             home_thumb_pending: HashSet::new(),
-            home_logo,
             audio_dock_height: 180.0,
             jump_lock_y: None,
             continuous_anchor_page: 1,
@@ -8539,7 +8525,7 @@ fn render_floating_audio_fabs(
     let mut memo_clicked = false;
     let mut lesson_clicked = false;
 
-    egui::Area::new(egui::Id::new("floating_audio_fabs_cluster"))
+    egui::Area::new(egui::Id::unique("floating_audio_fabs_cluster"))
         // Keep the floating controls above panels and notes.
         .order(egui::Order::Tooltip)
         .pivot(egui::Align2::RIGHT_BOTTOM)
@@ -15372,7 +15358,7 @@ impl eframe::App for Lapis {
                                     let open_resp = cols[0]
                                         .interact(
                                             open_rect,
-                                            cols[0].id().with("action_open_pdf"),
+                                            cols[0].scope_id().with("action_open_pdf"),
                                             egui::Sense::click(),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -15712,7 +15698,7 @@ impl eframe::App for Lapis {
                                                                         let close_resp = cell_ui
                                                                             .interact(
                                                                                 close_rect,
-                                                                                cell_ui.id().with((
+                                                                                cell_ui.scope_id().with((
                                                                                     "remove_btn",
                                                                                     idx,
                                                                                 )),
@@ -15730,7 +15716,7 @@ impl eframe::App for Lapis {
                                                                         let card_resp = cell_ui
                                                                             .interact(
                                                                                 rect,
-                                                                                cell_ui.id().with((
+                                                                                cell_ui.scope_id().with((
                                                                                     "recent_card",
                                                                                     idx,
                                                                                 )),
@@ -15921,7 +15907,7 @@ impl eframe::App for Lapis {
                                                         let row_resp = ui
                                                             .interact(
                                                                 row_rect,
-                                                                ui.id()
+                                                                ui.scope_id()
                                                                     .with(("recent_row", idx)),
                                                                 egui::Sense::click(),
                                                             )
