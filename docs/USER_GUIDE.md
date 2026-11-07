@@ -294,7 +294,7 @@ Switch to Preview to see the formatted result rather than the raw Markdown sourc
 
 Use the Edit / Preview shortcut to switch between the two modes.
 
-### Sketch — `Alt + S`
+### Sketch
 
 The **Sketch** tab, to the left of Edit and Preview, is a scratchpad attached to the current page, for
 diagrams, quick calculations or anything that is easier to draw than to type. Each PDF page has its own

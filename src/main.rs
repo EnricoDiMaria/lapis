@@ -9945,15 +9945,15 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
                     // Primary Tools
                     bar_btn(ui, "󰇀", AnnotationTool::Cursor, "Cursor / Select PDF Text");
-                    bar_btn(ui, "", AnnotationTool::Highlight, "Highlighter");
+                    bar_btn(ui, " ", AnnotationTool::Highlight, "Highlighter");
                     bar_btn(ui, "󰊇", AnnotationTool::Underline, "Underline");
                     bar_btn(ui, "󱦹", AnnotationTool::Draw, "Freehand Smooth Pen");
                     bar_btn(ui, "󰠱", AnnotationTool::Shape, "Geometric Shapes");
                     bar_btn(ui, "󰊄", AnnotationTool::TextBox, "Text Box");
-                    bar_btn(ui, "󰝤", AnnotationTool::Tape, "Occlusion Tape (Active Recall)");
-                    bar_btn(ui, "󰆞", AnnotationTool::Snip, "Snip Slide Region to Notes");
-                    bar_btn(ui, "󰐾", AnnotationTool::Laser, "Laser Pointer");
-                    bar_btn(ui, "󰇾", AnnotationTool::Eraser, "Eraser");
+                    bar_btn(ui, "󰝤 ", AnnotationTool::Tape, "Occlusion Tape (Active Recall)");
+                    bar_btn(ui, "󰆞 ", AnnotationTool::Snip, "Snip Slide Region to Notes");
+                    bar_btn(ui, "󰐾 ", AnnotationTool::Laser, "Laser Pointer");
+                    bar_btn(ui, "󰇾 ", AnnotationTool::Eraser, "Eraser");
 
                     ui.separator();
 
@@ -10436,7 +10436,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
 
                     rail_btn(
                         ui,
-                        "",
+                        " ",
                         AnnotationTool::Highlight,
                         "Highlighter",
                     );
@@ -10489,7 +10489,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                     // Tape
                     rail_btn(
                         ui,
-                        "󰝤",
+                        "󰝤 ",
                         AnnotationTool::Tape,
                         "Occlusion Tape (mask formulas; click tape to peek)",
                     );
@@ -10497,7 +10497,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                     // Snip
                     rail_btn(
                         ui,
-                        "󰆞",
+                        "󰆞 ",
                         AnnotationTool::Snip,
                         "Snip / Crop Slide Region into Notes",
                     );
@@ -10505,7 +10505,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                     // Laser
                     rail_btn(
                         ui,
-                        "󰐾",
+                        "󰐾 ",
                         AnnotationTool::Laser,
                         "Laser Pointer",
                     );
@@ -10513,7 +10513,7 @@ fn push_undo_snapshot(&mut self, page: u32) {
                     // Eraser
                     rail_btn(
                         ui,
-                        "󰇾",
+                        "󰇾 ",
                         AnnotationTool::Eraser,
                         "Eraser",
                     );
