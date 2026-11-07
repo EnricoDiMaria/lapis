@@ -8,13 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Sketch: a scratchpad for every page.** A new **Sketch** tab in the notes panel, next to Edit and
-  Preview, gives each PDF page its own page-like canvas (`Alt + S`, configurable, also in the Command
-  Palette). It has its own toolbar (pen, eraser, line, arrow, rectangle, circle, text, colors, sizes,
-  undo / redo) and a menu for the paper (blank, ruled, grid, dotted), portrait / landscape and zoom.
-  The sheet scales with the panel, so drawings look the same in a very narrow or a very wide panel;
-  `Ctrl + wheel` or pinch zooms the sheet. Sketches are saved with the document (notes data, backup and
-  PDF trailer) and follow their page when pages are inserted, deleted or reordered.
+- **Sketch: a scratchpad for every page.** A new **Sketch** tab in the notes panel, to the left of Edit
+  and Preview, gives each PDF page its own drawing surface (`Alt  S`, configurable, also in the Command
+  Palette). It is just a background (blank, ruled, grid or dotted, chosen page by page) plus strokes on a
+  canvas that fills the whole panel below its toolbar and grows as you draw, so it works the same in a
+  narrow side panel and in a wide bottom panel. It has its own toolbar (hand, pen, eraser, line, arrow,
+  rectangle, circle, text, colors, sizes, undo / redo and a menu for the background and zoom). You move
+  around with the hand tool, the middle mouse button or the wheel, and the canvas also scrolls by itself
+  when you draw near the edge of the panel; a thin scroll bar shows where you are and whether there is
+  more canvas. `Ctrl + wheel` or pinch zooms around the cursor. Sketches are saved with the document (notes data, backup and PDF trailer),  follow their page when pages are inserted, deleted or reordered, and can be turned off in
+  *Advanced Settings*.
+- **Sketches in the PDF export.** They are exported together with the notes, cropped to the drawing: to
+  the right of the slide when the page has no notes, under the notes when these are short enough to leave
+  room, otherwise on a page of their own right after the slide and its notes.
+- The Notes panel header collapses more gracefully in narrow panels: the Sketch tab shrinks to an icon
+  first, then Edit and Preview, and the page navigation (lock, arrows) is more compact.
 - **Complete Home Screen Redesign.** Redesigned *Open PDF* and *Blank Notebook* cards with stable borders, dedicated Nerd Font icons (`󰝰` and `󰎔`), and optimized click targets. **Grid & List Views:** Introduced toggle views for *Recent documents* (grid view with flush thumbnails, progress bars; and list view with full-row click targets).
 
 

@@ -296,27 +296,34 @@ Use the Edit / Preview shortcut to switch between the two modes.
 
 ### Sketch — `Alt + S`
 
-The **Sketch** tab, next to Edit and Preview, is a scratchpad attached to the current page: a page-like
-sheet for diagrams, quick calculations or anything that is easier to draw than to type. Each PDF page has
-its own sheet, and it follows the note page shown in the panel header.
+The **Sketch** tab, to the left of Edit and Preview, is a scratchpad attached to the current page, for
+diagrams, quick calculations or anything that is easier to draw than to type. Each PDF page has its own
+sketch, and it follows the note page shown in the panel header. Only the strokes and the background are saved,
+like notes.
+
+The canvas fills the whole panel below its toolbar and grows as you draw, so there are no page edges and it
+works the same in a narrow side panel and in a wide bottom panel (moving the panel never changes what you
+drew, it only shows a different part of the canvas). To move around use the **hand** tool, drag with the middle
+mouse button, or scroll with the wheel / trackpad; the canvas also scrolls by itself when you draw close to the edge
+of the panel. A thin scroll bar at the edge shows where you are and whether there is more canvas. `Ctrl + wheel` or
+pinch zooms around the cursor.
 
 **Toolbar:**
 
-- **Tools:** pen, eraser, line, arrow, rectangle, circle and text. The eraser removes whole strokes; the
-  text tool creates a box where you click (click it again to edit it).
+- **Tools:** hand (moves the canvas), pen, eraser, line, arrow, rectangle, circle and text. The eraser removes
+  whole strokes; the text tool creates a box where you click (click it again to edit it).
 - **Colors and sizes:** six colors and four sizes, which also set the text size. In a very narrow panel they
   collapse into a single button.
 - **Undo / Redo:** works on the sketch while it is the last thing you drew on (`Ctrl + Z` / `Ctrl + Y`).
-- **Menu (`…`):** paper (blank, ruled, grid, dotted), portrait or landscape (while the sheet is empty), zoom,
-  *Fit width* and *Clear sketch* (which can be undone).
+- **Menu (`…`):** the background (blank, ruled, grid, dotted) for this page, zoom and *Clear sketch*
+  (which can be undone).
 
-**Any panel size:** the sheet always keeps its proportions and scales with the panel, so a drawing looks the same
-whether the panel is very narrow or very wide. By default the whole sheet fits the panel; use *Fit width* to
-fill the width and scroll vertically, or zoom with `Ctrl + wheel` / pinch while the pointer is over the sheet.
-If the panel is narrower than the smallest readable sheet, the sheet scrolls sideways.
+Sketches are saved with the document and move with their page when you insert, delete or reorder pages. They are
+included in the PDF export together with the notes: to the right of the slide if the page has no notes, under the
+notes if these are short, otherwise on a page right after the slide and its notes.
 
-Sketches are saved with the document, like notes and annotations, and move with their page when you insert,
-delete or reorder pages. They are not included in exports yet.
+If you do not need them, turn the tab off in **Settings → Advanced Settings → Enable Sketch**; your sketches are
+kept and the tab (and the sketches in exports) come back when you turn it on again.
 
 ### Mathematical notation
 

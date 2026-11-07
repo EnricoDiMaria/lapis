@@ -43,47 +43,60 @@ fn default_textbox_size() -> f32 {
 
 pub const DEFAULT_ANNOTATION_STROKE_WIDTH: f32 = 2.5;
 
-/// Height / width of a new sketch sheet (portrait, A4-like).
-pub const SKETCH_DEFAULT_ASPECT: f32 = 1.4142;
+/// Spacing (sketch units) of the ruled / grid / dotted sketch backgrounds.
+pub const SKETCH_GRID_STEP: f32 = 28.0;
 
-fn default_sketch_aspect() -> f32 {
-    SKETCH_DEFAULT_ASPECT
-}
+/// Version 1 sketches stored coordinates normalized to a 400 x (400 * aspect) sheet.
+const LEGACY_SKETCH_W: f32 = 400.0;
 
 fn default_sketch_paper() -> BlankPageStyle {
     BlankPageStyle::Blank
 }
 
 /// Free-hand scratchpad attached to one PDF page, shown in the notes panel ("Sketch" tab).
-/// Strokes use the same normalized 0..1 coordinates as [`PageAnnotation`], relative to the
-/// sheet, so the drawing looks the same at any panel width.
+///
+/// It is a plain background plus strokes on an unbounded canvas: coordinates are in sketch
+/// units (1 unit = 1 px at 100 % zoom), measured from the top-left corner, so the drawing does
+/// not depend on the size or position of the panel it was drawn in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SketchPage {
     #[serde(default = "default_sketch_paper")]
     pub paper: BlankPageStyle,
-    /// Sheet height / width.
-    #[serde(default = "default_sketch_aspect")]
-    pub aspect: f32,
     #[serde(default)]
     pub strokes: Vec<PageAnnotation>,
+    /// Only present in version 1 files, whose strokes were normalized to a fixed-ratio sheet.
+    /// Read once by [`SketchPage::migrate_legacy`] and never written back.
+    #[serde(default, rename = "aspect", skip_serializing)]
+    legacy_aspect: Option<f32>,
 }
 
 impl SketchPage {
-    pub fn new(paper: BlankPageStyle, aspect: f32) -> Self {
-        Self { paper, aspect, strokes: Vec::new() }
+    pub fn new(paper: BlankPageStyle) -> Self {
+        Self { paper, strokes: Vec::new(), legacy_aspect: None }
     }
 
-    /// Nothing worth saving: no strokes and the default sheet.
+    /// Nothing worth saving: no strokes and the default background.
     pub fn is_default(&self) -> bool {
-        self.strokes.is_empty()
-            && self.paper == BlankPageStyle::Blank
-            && (self.aspect - SKETCH_DEFAULT_ASPECT).abs() < 0.01
+        self.strokes.is_empty() && self.paper == BlankPageStyle::Blank
+    }
+
+    /// Converts a version 1 sketch (normalized coordinates) to sketch units. Idempotent.
+    pub fn migrate_legacy(&mut self) {
+        let Some(aspect) = self.legacy_aspect.take() else {
+            return;
+        };
+        let (sx, sy) = (LEGACY_SKETCH_W, LEGACY_SKETCH_W * aspect.clamp(0.3, 4.0));
+        for ann in &mut self.strokes {
+            for p in &mut ann.points {
+                *p = (p.0 * sx, p.1 * sy);
+            }
+        }
     }
 }
 
 impl Default for SketchPage {
     fn default() -> Self {
-        Self::new(BlankPageStyle::Blank, SKETCH_DEFAULT_ASPECT)
+        Self::new(BlankPageStyle::Blank)
     }
 }
 
@@ -537,6 +550,9 @@ pub fn parse_doc_data_bytes(bytes: &[u8]) -> Option<DocData> {
     
     data.notes.retain(|_, v| !v.trim().is_empty());
     data.annotations.retain(|_, v| !v.is_empty());
+    for sketch in data.sketches.values_mut() {
+        sketch.migrate_legacy();
+    }
     data.sketches.retain(|_, s| !s.is_default());
     
     Some(data)
@@ -1895,6 +1911,8 @@ pub fn prepare_image_xobjects(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn sketches_follow_pages_when_a_page_is_inserted() {
         let mut notes = HashMap::new();
@@ -1903,20 +1921,30 @@ mod tests {
         let mut sketches = HashMap::new();
         for p in [1u32, 2, 3] {
             let mut sk = SketchPage::default();
-            sk.aspect = 1.0 + p as f32; // marker to recognise the sheet after the shift
+            // Marker to recognise the sheet after the shift.
+            sk.strokes.push(PageAnnotation {
+                kind: AnnotationKind::Line,
+                color: [0, 0, 0],
+                points: vec![(p as f32, 0.0), (p as f32, 1.0)],
+                text: String::new(),
+                font_size: 16.0,
+                bold: false,
+                italic: false,
+                stroke_width: 2.0,
+            });
             sketches.insert(p, sk);
         }
         shift_doc_data_on_insert(&mut notes, &mut anns, &mut blanks, &mut sketches, 2);
         let mut keys: Vec<u32> = sketches.keys().copied().collect();
         keys.sort();
         assert_eq!(keys, vec![1, 3, 4]);
-        assert_eq!(sketches[&1].aspect, 2.0);
-        assert_eq!(sketches[&3].aspect, 3.0);
-        assert_eq!(sketches[&4].aspect, 4.0);
+        assert_eq!(sketches[&1].strokes[0].points[0].0, 1.0);
+        assert_eq!(sketches[&3].strokes[0].points[0].0, 2.0);
+        assert_eq!(sketches[&4].strokes[0].points[0].0, 3.0);
     }
 
     #[test]
-    fn default_sketch_is_not_saved_but_a_drawn_one_is() {
+    fn default_sketch_is_not_saved_but_a_styled_one_is() {
         let mut sk = SketchPage::default();
         assert!(sk.is_default());
         sk.paper = BlankPageStyle::Grid;
@@ -1929,7 +1957,19 @@ mod tests {
         assert!(d.sketches.is_empty());
     }
 
-    use super::*;
+    #[test]
+    fn version_1_sketches_are_converted_to_units_once() {
+        let json = r#"{"paper":"Grid","aspect":2.0,"strokes":[
+            {"kind":"Line","color":[0,0,0],"points":[[0.5,0.25],[1.0,0.5]],"stroke_width":3.0}]}"#;
+        let mut sk: SketchPage = serde_json::from_str(json).unwrap();
+        sk.migrate_legacy();
+        assert_eq!(sk.strokes[0].points, vec![(200.0, 200.0), (400.0, 400.0)]);
+        // Idempotent, and the legacy field is never written back.
+        sk.migrate_legacy();
+        assert_eq!(sk.strokes[0].points[0], (200.0, 200.0));
+        assert!(!serde_json::to_string(&sk).unwrap().contains("aspect"));
+    }
+
 
     #[test]
     fn header_multibyte_does_not_panic() {

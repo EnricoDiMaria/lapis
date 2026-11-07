@@ -527,6 +527,8 @@ pub struct AppSettings {
     pub audio_notes: bool,
     pub bottom_notes:bool,
     pub default_page_style: crate::notes::BlankPageStyle,
+    /// Show the per-page Sketch tab in the notes panel (and include sketches in exports).
+    pub sketch_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -547,6 +549,7 @@ impl Default for AppSettings {
             audio_notes: true,
             bottom_notes: true,
             default_page_style: crate::notes::BlankPageStyle::Ruled,
+            sketch_enabled: true,
         }
     }
 }

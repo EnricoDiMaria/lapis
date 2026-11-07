@@ -1929,8 +1929,16 @@ impl Lapis {
         }
     }
 
+    /// The Sketch tab can be turned off in the advanced settings.
+    fn sketch_enabled(&self) -> bool {
+        self.app_state.settings.sketch_enabled
+    }
+
     /// Show the Sketch tab (opening the notes panel if needed), or go back to Edit.
     fn toggle_sketch_tab(&mut self) {
+        if !self.sketch_enabled() {
+            return;
+        }
         if self.show_notes && self.note_mode == NoteMode::Sketch {
             self.note_mode = NoteMode::Edit;
             self.focus_note_editor = true;
@@ -1942,7 +1950,7 @@ impl Lapis {
 
     /// Ctrl+Z / Ctrl+Y act on the sketch when it was the last thing drawn on.
     fn sketch_receives_undo(&self) -> bool {
-        self.show_notes && self.note_mode == NoteMode::Sketch && self.sketch.focus
+        self.sketch_enabled() && self.show_notes && self.note_mode == NoteMode::Sketch && self.sketch.focus
     }
 
     fn start_export(&mut self, ctx: &egui::Context) {
@@ -1970,9 +1978,11 @@ impl Lapis {
         let annotations = self.annotations.clone();
         let export_cfg = self.app_state.export_settings.clone();
         let hidden_cfg = self.hidden_pages.clone();
+        // Sketches go into the export with the notes, unless the feature is turned off.
+        let sketches_snapshot = if self.sketch_enabled() { self.sketches.clone() } else { HashMap::new() };
 
         thread::spawn(move || {
-            let res = export::export_slides_with_notes(&source_path, &out_path, &notes_snapshot, &annotations, &export_cfg, &hidden_cfg);
+            let res = export::export_slides_with_notes(&source_path, &out_path, &notes_snapshot, &annotations, &sketches_snapshot, &export_cfg, &hidden_cfg);
             match res {
                 Ok(_) => {
                     let _ = tx.send(Ok(out_path));
@@ -4977,6 +4987,22 @@ fn handle_slide_annotations(
                                                             .changed()
                                                         {
                                                             settings_dirty = true;
+                                                        }
+                                                        if ui
+                                                            .checkbox(
+                                                                &mut self.app_state.settings.sketch_enabled,
+                                                                "Enable Sketch (per-page scratchpad tab in the Notes panel)",
+                                                            )
+                                                            .on_hover_text("Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.")
+                                                            .changed()
+                                                        {
+                                                            settings_dirty = true;
+                                                            if !self.app_state.settings.sketch_enabled {
+                                                                self.finish_sketch_edit();
+                                                                if self.note_mode == NoteMode::Sketch {
+                                                                    self.note_mode = NoteMode::Edit;
+                                                                }
+                                                            }
                                                         }
                                                         
 
@@ -11900,9 +11926,11 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
             full_panel_rect.min,
             egui::vec2(full_panel_rect.width(), notes_max_h),
         );
+        // The Sketch canvas goes edge to edge; the audio widgets below keep a small side margin.
+        let side_pad = if self.note_mode == NoteMode::Sketch && self.sketch_enabled() { 8.0 } else { 0.0 };
         let bottom_rect = egui::Rect::from_min_max(
-            egui::pos2(full_panel_rect.left(), notes_rect.bottom()),
-            full_panel_rect.max,
+            egui::pos2(full_panel_rect.left() + side_pad, notes_rect.bottom()),
+            egui::pos2(full_panel_rect.right() - side_pad, full_panel_rect.bottom()),
         );
 
         // ---------------------------------------------------------
@@ -11918,22 +11946,43 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
         {
             let ui = &mut notes_ui;
 
-            // Responsive 22 px toolbar: navigation left, Edit and Preview right.
-            let avail_w = notes_rect.width();
-            let compact_mode = avail_w < 300.0; // Show icons only in compact mode.
-            let ultra_narrow = avail_w < 171.0; // Hide page arrows in narrow mode.
-            let tiny = avail_w < 150.0; // Also hide the lock and use slimmer tab buttons.
-            let tab_icon_w = if tiny { 20.0 } else { 24.0 };
+            // Responsive 22 px toolbar: page navigation on the left, Sketch / Edit / Preview on the
+            // right. Sketch is the secondary tab, so it shrinks to an icon first; then Edit and
+            // Preview follow, and finally the page arrows (and the lock) go if there is no room.
+            let sk_on = self.sketch_enabled();
+            let sketch_open = self.note_mode == NoteMode::Sketch && sk_on;
+            let header_pad: i8 = if sketch_open { 6 } else { 0 }; // the Sketch canvas is edge to edge
+            let avail_w = notes_rect.width() - 2.0 * header_pad as f32;
+            let sp = 3.0_f32;
+            let digits = self.total_pages.max(1).to_string().len() as f32;
+            let page_btn_w = 6.6 * (2.0 + digits) + 8.0;
+            let left_nav = 18.0 + 28.0 + 6.0 + page_btn_w; // lock, two arrows, page label
+            let left_min = 18.0 + 2.0 + page_btn_w; // lock and page label
+            let gap = 14.0; // keep clear of the arrows
+            let (w_sketch, w_edit, w_prev) = (66.0_f32, 56.0_f32, 68.0_f32);
+            let n_tabs = if sk_on { 3.0_f32 } else { 2.0 };
+            let right_full = w_edit + w_prev + sp + if sk_on { w_sketch + sp } else { 0.0 };
+            let right_sketch_icon = w_edit + w_prev + sp + if sk_on { 24.0 + sp } else { 0.0 };
+            let right_icons = n_tabs * 24.0 + (n_tabs - 1.0) * sp;
+            let sketch_compact = avail_w < left_nav + gap + right_full;
+            let edit_prev_compact = avail_w < left_nav + gap + right_sketch_icon;
+            let ultra_narrow = avail_w < left_nav + gap + right_icons; // Hide page arrows.
+            let tab_icon_w = if avail_w < left_min + gap + right_icons { 20.0 } else { 24.0 };
+            let tiny = avail_w < left_min + gap + n_tabs * 20.0 + (n_tabs - 1.0) * sp; // Hide the lock.
 
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(header_pad, 0))
+                .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_height(22.0);
-                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
 
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if !tiny && ui
                     .add_sized(
-                        [22.0, 20.0],
-                        egui::Button::new(egui::RichText::new(lock_icon).size(12.0))
+                        [18.0, 20.0],
+                        egui::Button::new(egui::RichText::new(lock_icon).size(11.0))
                             .selected(self.lock_note_page),
                     )
                     .on_hover_text("Lock/Unlock note page from PDF scrolling")
@@ -11949,8 +11998,8 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     if ui
                         .add_enabled(
                             self.note_page > 1,
-                            egui::Button::new(egui::RichText::new("").size(11.0))
-                                .min_size(egui::vec2(16.0, 20.0)),
+                            egui::Button::new(egui::RichText::new("\u{F438}").size(10.5))
+                                .min_size(egui::vec2(14.0, 20.0)),
                         )
                         .clicked()
                     {
@@ -11962,7 +12011,7 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                 let target_np = self.note_page;
                 let button_text = format!("p.{}", target_np);
                 if ui
-                    .add(egui::Button::new(button_text).frame(true))
+                    .add(egui::Button::new(egui::RichText::new(button_text).size(11.5)).frame(true))
                     .on_hover_text("Note page (click to reset to current document page)")
                     .clicked()
                 {
@@ -11974,8 +12023,8 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     if ui
                         .add_enabled(
                             self.note_page < self.total_pages,
-                            egui::Button::new(egui::RichText::new("").size(11.0))
-                                .min_size(egui::vec2(16.0, 20.0)),
+                            egui::Button::new(egui::RichText::new("\u{F44A}").size(10.5))
+                                .min_size(egui::vec2(14.0, 20.0)),
                         )
                         .clicked()
                     {
@@ -11984,35 +12033,15 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     }
                 }
 
-                // Align the Edit / Preview switcher to the right.
+                // Tabs on the right, from right to left: Preview, Edit, Sketch.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.spacing_mut().item_spacing.x = sp;
 
-                    // Tabs from right to left: Sketch, Preview, Edit.
-                    let (sketch_label, sketch_w) = if compact_mode {
-                        ("󰠱", tab_icon_w)
-                    } else {
-                        ("󰠱 Sketch", 66.0)
-                    };
-
-                    if ui
-                        .add_sized(
-                            [sketch_w, 20.0],
-                            egui::Button::new(egui::RichText::new(sketch_label).size(11.5))
-                                .selected(self.note_mode == NoteMode::Sketch),
-                        )
-                        .on_hover_text("Sketch: a scratchpad for this page")
-                        .clicked()
-                    {
-                        self.note_mode = NoteMode::Sketch;
-                    }
-
-                    let (prev_label, prev_w) = if compact_mode {
+                    let (prev_label, prev_w) = if edit_prev_compact {
                         ("󰈈", tab_icon_w)
                     } else {
-                        ("󰈈 Preview", 68.0)
+                        ("󰈈 Preview", w_prev)
                     };
-
                     if ui
                         .add_sized(
                             [prev_w, 20.0],
@@ -12025,12 +12054,11 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                         self.note_mode = NoteMode::Preview;
                     }
 
-                    let (edit_label, edit_w) = if compact_mode {
+                    let (edit_label, edit_w) = if edit_prev_compact {
                         ("󰏫", tab_icon_w)
                     } else {
-                        ("󰏫 Edit", 56.0)
+                        ("󰏫 Edit", w_edit)
                     };
-
                     if ui
                         .add_sized(
                             [edit_w, 20.0],
@@ -12043,8 +12071,28 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                         self.note_mode = NoteMode::Edit;
                         self.focus_note_editor = true;
                     }
+
+                    if sk_on {
+                        let (sketch_label, sketch_w) = if sketch_compact {
+                            ("󰠱", tab_icon_w)
+                        } else {
+                            ("󰠱 Sketch", w_sketch)
+                        };
+                        if ui
+                            .add_sized(
+                                [sketch_w, 20.0],
+                                egui::Button::new(egui::RichText::new(sketch_label).size(11.5))
+                                    .selected(self.note_mode == NoteMode::Sketch),
+                            )
+                            .on_hover_text("Sketch: a scratchpad for this page (Alt+S)")
+                            .clicked()
+                        {
+                            self.note_mode = NoteMode::Sketch;
+                        }
+                    }
                 });
             });
+                });
             ui.add_space(3.0);
 
             let is_edit = matches!(self.note_mode, NoteMode::Edit);
@@ -12055,12 +12103,12 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     egui::Stroke::new(1.0, rgb(self.theme.border)),
                     egui::Margin::same(10),
                 )
-            } else if self.note_mode == NoteMode::Sketch {
-                // The sheet needs every pixel of a narrow panel.
+            } else if sketch_open {
+                // The canvas fills the whole panel below the toolbar.
                 (
                     egui::Color32::TRANSPARENT,
                     egui::Stroke::NONE,
-                    egui::Margin::same(2),
+                    egui::Margin::ZERO,
                 )
             } else {
                 (
@@ -13018,6 +13066,9 @@ impl eframe::App for Lapis {
         let note_editor_focused = ui.ctx().memory(|m| m.has_focus(text_edit_id));
 
         // Leaving the Sketch tab (or hiding the notes) finishes an open text box.
+        if !self.sketch_enabled() && self.note_mode == NoteMode::Sketch {
+            self.note_mode = NoteMode::Edit;
+        }
         let sketch_visible = self.show_notes && self.note_mode == NoteMode::Sketch;
         if !sketch_visible {
             self.sketch.hovered = false;
@@ -14676,10 +14727,16 @@ impl eframe::App for Lapis {
         } else if self.show_notes && !in_slideshow {
             if use_bottom_notes {
             let max_panel_h = (win_rect.height() * 0.75).max(220.0);
-            egui::Panel::bottom("notes_panel_bottom")
+            let mut notes_panel = egui::Panel::bottom("notes_panel_bottom")
                 .resizable(true)
                 .default_size((win_rect.height() * 0.36).clamp(180.0, 420.0))
-                .size_range(120.0..=max_panel_h)
+                .size_range(120.0..=max_panel_h);
+            if self.note_mode == NoteMode::Sketch && self.sketch_enabled() {
+                // No padding: the Sketch canvas takes the whole panel.
+                notes_panel = notes_panel
+                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO));
+            }
+            notes_panel
                 .show(ui, |ui| {
                     self.render_notes_panel_contents(
                         ui,
@@ -14688,9 +14745,15 @@ impl eframe::App for Lapis {
                     );
                 });
         } else {
-            egui::Panel::right("notes_panel")
+            let mut notes_panel = egui::Panel::right("notes_panel")
                 .resizable(true)
-                .default_size(320.0)
+                .default_size(320.0);
+            if self.note_mode == NoteMode::Sketch && self.sketch_enabled() {
+                // No padding: the Sketch canvas takes the whole panel.
+                notes_panel = notes_panel
+                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO));
+            }
+            notes_panel
                 .show(ui, |ui| {
                     self.render_notes_panel_contents(
                         ui,

@@ -8,7 +8,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Document as LoDocument, Object, ObjectId, Stream};
 use mupdf::{Colorspace, Document as MuDocument, Matrix, Page as MuPage, TextPageFlags};
 
-use crate::notes::{AnnotationKind, PageAnnotation, prepare_image_xobjects};
+use crate::notes::{AnnotationKind, BlankPageStyle, PageAnnotation, SketchPage, prepare_image_xobjects};
 use crate::state::ExportSettings;
 
 pub const CANVAS_W: f64 = 960.0;
@@ -91,6 +91,7 @@ fn export_rasterized(
     output_pdf: &Path,
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    sketches: &HashMap<u32, SketchPage>,
     settings: &ExportSettings,
     hidden_pages: &std::collections::HashSet<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -244,6 +245,23 @@ fn export_rasterized(
                     ops,
                 )?;
                 prepared.register_on(&mut pdf, page_id);
+                page_ids.push(page_id);
+            }
+        }
+
+        // The fallback layout is fixed, so a sketch always gets a page of its own.
+        if settings.content.includes_notes() {
+            if let Some(sk) = sketches.get(&p_num).and_then(prepare_sketch) {
+                let ops = sketch_page_ops(&sk, CANVAS_W, CANVAS_H, p_num, total_pages);
+                let page_id = add_export_page(
+                    &mut pdf,
+                    pages_id,
+                    img_id,
+                    font_regular_id,
+                    font_bold_id,
+                    font_italic_id,
+                    ops,
+                )?;
                 page_ids.push(page_id);
             }
         }
@@ -523,6 +541,23 @@ fn draw_pdf_annotations(
     sh: f64,
     k: f64,
 ) {
+    // Slide annotations size their text relative to the height of the slide.
+    draw_pdf_annotations_scaled(ops, anns, images, sx, sy, sw, sh, k, sh / 800.0);
+}
+
+/// Like [`draw_pdf_annotations`], with the size of text boxes given explicitly: the text size in
+/// points is `font_size * text_unit`.
+fn draw_pdf_annotations_scaled(
+    ops: &mut Vec<Operation>,
+    anns: &[PageAnnotation],
+    images: &std::collections::HashMap<String, String>,
+    sx: f64,
+    sy: f64,
+    sw: f64,
+    sh: f64,
+    k: f64,
+    text_unit: f64,
+) {
     if anns.is_empty() {
         return;
     }
@@ -732,7 +767,7 @@ fn draw_pdf_annotations(
                         .unwrap_or(tx + sw * 0.30);
                     let box_w = (right_x - tx).max(20.0);
 
-                    let pdf_sz = ((ann.font_size as f64) * (sh / 800.0)).clamp(4.0, 120.0);
+                    let pdf_sz = ((ann.font_size as f64) * text_unit).clamp(4.0, 120.0);
                     let pad = (pdf_sz * 0.35).round().clamp(2.0, 64.0);
                     let avail = (box_w - 2.0 * pad).max(10.0);
                     let line_step = pdf_sz * 1.2;
@@ -939,6 +974,275 @@ fn draw_pdf_annotations(
             }
         }
     }
+}
+
+// ───────────────────────────────── sketches ─────────────────────────────────
+//
+// A sketch is an unbounded canvas, so it is exported cropped to its drawing (plus a margin) and
+// scaled to fit. It goes (1) to the right of the slide when the page has no notes, (2) under the
+// notes when they are short enough to leave room, (3) on a page of its own after the slide and its
+// notes otherwise.
+
+/// Smallest / largest scale (export units per sketch unit) at which a sketch is placed in the
+/// notes column. Below the minimum it would be hard to read, so it gets its own page.
+const SKETCH_MIN_SCALE: f64 = 0.4;
+const SKETCH_MAX_SCALE: f64 = 1.3;
+/// Largest scale on a page of its own.
+const SKETCH_PAGE_MAX_SCALE: f64 = 1.6;
+/// Space reserved for the small "Sketch" caption above a sketch in the notes column.
+const SKETCH_LABEL_H: f64 = 14.0;
+/// Margin kept around the drawing, in sketch units.
+const SKETCH_CROP_PAD: f64 = 12.0;
+
+/// A sketch prepared for export.
+struct SketchLayout {
+    paper: BlankPageStyle,
+    /// Top-left corner of the exported area, in sketch units (the paper pattern is anchored to the
+    /// canvas origin, not to the crop).
+    origin: (f64, f64),
+    /// Size of the exported area, in sketch units.
+    w: f64,
+    h: f64,
+    /// Strokes with their points normalized to the exported area.
+    strokes: Vec<PageAnnotation>,
+}
+
+/// Height of a text box once laid out for the export (monospace font, wrapped to its width).
+fn sketch_text_height(ann: &PageAnnotation, width: f64) -> f64 {
+    let font = ann.font_size as f64;
+    let pad = (font * 0.35).round().clamp(2.0, 64.0);
+    let per_line = (((width - 2.0 * pad) / (font * 0.6)).floor()).max(1.0) as usize;
+    let lines: usize = ann
+        .text
+        .split('\n')
+        .map(|l| l.chars().count().max(1).div_ceil(per_line))
+        .sum();
+    lines as f64 * font * 1.2 + 2.0 * pad
+}
+
+/// Crops a sketch to its drawing. `None` when there is nothing to draw.
+fn prepare_sketch(sketch: &SketchPage) -> Option<SketchLayout> {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut kept: Vec<PageAnnotation> = Vec::new();
+    for ann in &sketch.strokes {
+        let mut grow = |x: f64, y: f64, pad: f64| {
+            x0 = x0.min(x - pad);
+            y0 = y0.min(y - pad);
+            x1 = x1.max(x + pad);
+            y1 = y1.max(y + pad);
+        };
+        match ann.kind {
+            AnnotationKind::Freehand
+            | AnnotationKind::Line
+            | AnnotationKind::Arrow
+            | AnnotationKind::Rect
+            | AnnotationKind::Circle => {
+                if ann.points.is_empty() {
+                    continue;
+                }
+                let pad = ann.stroke_width as f64 * 0.5
+                    + if ann.kind == AnnotationKind::Arrow { 18.0 } else { 0.0 };
+                for &(x, y) in &ann.points {
+                    grow(x as f64, y as f64, pad);
+                }
+                kept.push(ann.clone());
+            }
+            AnnotationKind::TextBox => {
+                let Some(&(x, y)) = ann.points.first() else { continue };
+                if ann.text.trim().is_empty() {
+                    continue;
+                }
+                let width = ann
+                    .points
+                    .get(1)
+                    .map(|p| (p.0 - x) as f64)
+                    .filter(|w| *w > 8.0)
+                    .unwrap_or(240.0);
+                let height = sketch_text_height(ann, width);
+                grow(x as f64, y as f64, 0.0);
+                grow(x as f64 + width, y as f64 + height, 0.0);
+                let mut text = ann.clone();
+                text.points = vec![(x, y), (x + width as f32, y)];
+                kept.push(text);
+            }
+            _ => {}
+        }
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    let ox = (x0 - SKETCH_CROP_PAD).max(0.0);
+    let oy = (y0 - SKETCH_CROP_PAD).max(0.0);
+    let w = (x1 + SKETCH_CROP_PAD - ox).max(40.0);
+    let h = (y1 + SKETCH_CROP_PAD - oy).max(40.0);
+    for ann in &mut kept {
+        for p in &mut ann.points {
+            *p = (((p.0 as f64 - ox) / w) as f32, ((p.1 as f64 - oy) / h) as f32);
+        }
+    }
+    Some(SketchLayout { paper: sketch.paper, origin: (ox, oy), w, h, strokes: kept })
+}
+
+fn stroke_line(ops: &mut Vec<Operation>, x1: f64, y1: f64, x2: f64, y2: f64, w: f64, c: (f64, f64, f64)) {
+    ops.push(Operation::new("q", vec![]));
+    ops.push(Operation::new("RG", vec![c.0.into(), c.1.into(), c.2.into()]));
+    ops.push(Operation::new("w", vec![w.into()]));
+    ops.push(Operation::new("m", vec![x1.into(), y1.into()]));
+    ops.push(Operation::new("l", vec![x2.into(), y2.into()]));
+    ops.push(Operation::new("S", vec![]));
+    ops.push(Operation::new("Q", vec![]));
+}
+
+/// Draws a sketch with its top-left corner at (`x`, `y_top`), `scale` export units per sketch unit.
+fn draw_sketch_box(ops: &mut Vec<Operation>, sk: &SketchLayout, x: f64, y_top: f64, scale: f64, pal: &Palette) {
+    let bw = sk.w * scale;
+    let bh = sk.h * scale;
+    let y = y_top - bh;
+    fill_rect(ops, x, y, bw, bh, (0.992, 0.992, 0.984));
+
+    // Paper pattern, clipped to the box and anchored to the canvas origin like on screen.
+    if sk.paper != BlankPageStyle::Blank {
+        let step = crate::notes::SKETCH_GRID_STEP as f64;
+        if step * scale >= 4.0 {
+            ops.push(Operation::new("q", vec![]));
+            ops.push(Operation::new("re", vec![x.into(), y.into(), bw.into(), bh.into()]));
+            ops.push(Operation::new("W", vec![]));
+            ops.push(Operation::new("n", vec![]));
+            let first = |o: f64| ((o / step).ceil()).max(1.0) as i64;
+            let to_y = |unit_y: f64| y_top - (unit_y - sk.origin.1) * scale;
+            let to_x = |unit_x: f64| x + (unit_x - sk.origin.0) * scale;
+            let rows = first(sk.origin.1)..=((sk.origin.1 + sk.h) / step).floor() as i64;
+            let cols = first(sk.origin.0)..=((sk.origin.0 + sk.w) / step).floor() as i64;
+            match sk.paper {
+                BlankPageStyle::Blank => {}
+                BlankPageStyle::Ruled => {
+                    for r in rows {
+                        let py = to_y(r as f64 * step);
+                        stroke_line(ops, x, py, x + bw, py, 0.4, (0.84, 0.88, 0.93));
+                    }
+                }
+                BlankPageStyle::Grid => {
+                    for r in rows {
+                        let py = to_y(r as f64 * step);
+                        stroke_line(ops, x, py, x + bw, py, 0.4, (0.89, 0.90, 0.93));
+                    }
+                    for c in cols {
+                        let px = to_x(c as f64 * step);
+                        stroke_line(ops, px, y, px, y + bh, 0.4, (0.89, 0.90, 0.93));
+                    }
+                }
+                BlankPageStyle::Dotted => {
+                    let d = (1.6 * scale).max(0.7);
+                    for r in rows {
+                        for c in cols.clone() {
+                            let (px, py) = (to_x(c as f64 * step), to_y(r as f64 * step));
+                            fill_rect(ops, px - d * 0.5, py - d * 0.5, d, d, (0.69, 0.72, 0.77));
+                        }
+                    }
+                }
+            }
+            ops.push(Operation::new("Q", vec![]));
+        }
+    }
+
+    // Border.
+    ops.push(Operation::new("q", vec![]));
+    ops.push(Operation::new("RG", vec![pal.divider.0.into(), pal.divider.1.into(), pal.divider.2.into()]));
+    ops.push(Operation::new("w", vec![0.5.into()]));
+    ops.push(Operation::new("re", vec![x.into(), y.into(), bw.into(), bh.into()]));
+    ops.push(Operation::new("S", vec![]));
+    ops.push(Operation::new("Q", vec![]));
+
+    let no_images = std::collections::HashMap::new();
+    draw_pdf_annotations_scaled(ops, &sk.strokes, &no_images, x, y, bw, bh, scale, scale);
+}
+
+/// Scale at which a sketch fits a column of `col_w` x `col_h`, or `None` if it would be too small.
+fn plan_sketch_scale(sk: &SketchLayout, col_w: f64, col_h: f64) -> Option<f64> {
+    if col_w < 40.0 || col_h < 40.0 {
+        return None;
+    }
+    let s = (col_w / sk.w).min(col_h / sk.h).min(SKETCH_MAX_SCALE);
+    (s >= SKETCH_MIN_SCALE).then_some(s)
+}
+
+/// Where the notes (or the sketch, on a page without notes) start in the right column.
+fn column_top_y() -> f64 {
+    CANVAS_H - MARGIN - 11.0 - 6.0 - 14.0
+}
+
+/// Free height for a sketch in the right column once the notes (if any) end at `notes_end_y`.
+fn sketch_column_height(notes_end_y: f64) -> f64 {
+    notes_end_y - MARGIN - 6.0 - SKETCH_LABEL_H
+}
+
+/// Width of the right column of a page whose slide takes `ratio` of the width.
+fn right_column_width(geo: &PageGeo, ratio: f64) -> f64 {
+    let base_s_c = CANVAS_H / geo.dh;
+    let w_total = (geo.dw * base_s_c).round();
+    let sw_c = geo.dw * base_s_c * ratio;
+    w_total - (sw_c + MARGIN) - MARGIN
+}
+
+/// Page with just the sketch (canvas units, origin at the lower-left corner).
+fn sketch_page_ops(sk: &SketchLayout, w: f64, h: f64, p_num: u32, total_pages: u32) -> Vec<Operation> {
+    let pal = LIGHT;
+    let mut ops = Vec::new();
+    fill_rect(&mut ops, 0.0, 0.0, w, h, pal.page_bg);
+    let header_y = h - MARGIN - 11.0;
+    push_styled_span(
+        &mut ops,
+        &format!("Slide {} / {}  (Sketch)", p_num, total_pages),
+        MARGIN,
+        header_y,
+        8.5,
+        pal.muted,
+        SpanStyle::default(),
+        false,
+    );
+    let div_y = header_y - 6.0;
+    fill_rect(&mut ops, MARGIN, div_y - 0.25, w - 2.0 * MARGIN, 0.5, pal.divider);
+    let top = div_y - 14.0;
+    let region_w = (w - 2.0 * MARGIN).max(40.0);
+    let region_h = (top - MARGIN).max(40.0);
+    let scale = (region_w / sk.w).min(region_h / sk.h).min(SKETCH_PAGE_MAX_SCALE);
+    let x = MARGIN + (region_w - sk.w * scale) / 2.0;
+    draw_sketch_box(&mut ops, sk, x, top, scale, &pal);
+    ops
+}
+
+/// Adds a sketch page after `after` (vector export; the page has the size of the slide page).
+fn append_sketch_page(
+    pdf: &mut LoDocument,
+    after: ObjectId,
+    geo: &PageGeo,
+    fonts: (ObjectId, ObjectId, ObjectId),
+    p_num: u32,
+    total_pages: u32,
+    sk: &SketchLayout,
+) -> Result<ObjectId, Box<dyn std::error::Error>> {
+    let h_c = CANVAS_H;
+    let w_total = (geo.dw * (h_c / geo.dh)).round();
+    let k = geo.dh / h_c;
+    let mut ops = vec![Operation::new("q", vec![]), op_cm(k, 0.0, 0.0, k, 0.0, 0.0)];
+    ops.extend(sketch_page_ops(sk, w_total, h_c, p_num, total_pages));
+    ops.push(Operation::new("Q", vec![]));
+
+    let bytes = Content { operations: ops }.encode()?;
+    let content_id = pdf.add_object(Stream::new(dictionary! {}, bytes));
+    let resources = dictionary! {
+        "Font" => dictionary! { "F1" => fonts.0, "F2" => fonts.1, "F3" => fonts.2 },
+    };
+    let parent_id = page_parent(pdf, after)?;
+    let new_id = pdf.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => parent_id,
+        "MediaBox" => real_array(&[0.0, 0.0, w_total * k, h_c * k]),
+        "Resources" => resources,
+        "Contents" => content_id,
+    });
+    insert_page_after(pdf, after, new_id)?;
+    Ok(new_id)
 }
 
 fn layout_note_lines(markdown: &str, avail_w: f64, font_scale: f64) -> Vec<LayoutLine> {
@@ -1828,9 +2132,10 @@ fn build_notes_pages(
     p_num: u32,
     total_pages: u32,
     raw_note: &str,
+    sketch: Option<&SketchLayout>,
     ratio: f64,
     font_scale: f64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(ObjectId, bool), Box<dyn std::error::Error>> {
     let pal = LIGHT;
     let h_c = CANVAS_H;
     let base_s_c = h_c / geo.dh;
@@ -1847,8 +2152,20 @@ fn build_notes_pages(
 
     let processed_md = crate::notes::preprocess_markdown_math(raw_note);
     let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale);
-    let chunks = paginate_note_lines(&layout_lines, h_c - MARGIN * 2.4);
-    let total_parts = chunks.len().max(1);
+    let mut chunks = paginate_note_lines(&layout_lines, h_c - MARGIN * 2.4);
+    if chunks.is_empty() {
+        chunks.push(Vec::new()); // no notes: the page is still rebuilt (slide + sketch column)
+    }
+    let total_parts = chunks.len();
+
+    // A sketch goes under the notes when they fit one page and leave enough room.
+    let sketch_scale = match sketch {
+        Some(sk) if chunks.len() == 1 => {
+            let notes_end_y = column_top_y() - chunks[0].iter().map(|l| l.height).sum::<f64>();
+            plan_sketch_scale(sk, avail_text_w, sketch_column_height(notes_end_y))
+        }
+        _ => None,
+    };
 
     let mut last_id = page_id;
     for (part_idx, chunk) in chunks.into_iter().enumerate() {
@@ -1891,6 +2208,10 @@ fn build_notes_pages(
             render_layout_line(&mut ops, &line, text_x, cur_y, avail_text_w, &pal);
             cur_y -= line.height - line.font_size;
         }
+        if let (Some(sk), Some(scale)) = (sketch, sketch_scale) {
+            push_styled_span(&mut ops, "Sketch", text_x, cur_y - 10.0, 7.5, pal.muted, SpanStyle::default(), false);
+            draw_sketch_box(&mut ops, sk, text_x, cur_y - SKETCH_LABEL_H, scale, &pal);
+        }
         ops.push(Operation::new("Q", vec![]));
 
         let bytes = Content { operations: ops }.encode()?;
@@ -1919,7 +2240,7 @@ fn build_notes_pages(
             last_id = new_id;
         }
     }
-    Ok(())
+    Ok((last_id, sketch_scale.is_some()))
 }
 
 fn export_vector(
@@ -1927,6 +2248,7 @@ fn export_vector(
     output_pdf: &Path,
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    sketches: &HashMap<u32, SketchPage>,
     settings: &ExportSettings,
     hidden_pages: &std::collections::HashSet<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1969,15 +2291,31 @@ fn export_vector(
         } else {
             &[]
         };
-        if raw_note.is_empty() && page_anns.is_empty() {
+        // Sketches are part of the notes: they are exported whenever the notes are.
+        let sketch = if include_notes {
+            sketches.get(&p_num).and_then(prepare_sketch)
+        } else {
+            None
+        };
+        if raw_note.is_empty() && page_anns.is_empty() && sketch.is_none() {
             continue; // untouched: identical to the original page
         }
         let geo = page_geo(&pdf, page_id).ok_or("cannot read the page size")?;
         let prepared = prepare_image_xobjects(&mut pdf, page_anns, &media_dir, &mut img_cache);
 
-        if raw_note.is_empty() {
-            let form = make_annotation_form(&mut pdf, page_anns, &prepared, fonts, geo.dw, geo.dh, 1.0)?;
-            overlay_page(&mut pdf, page_id, &geo, form)?;
+        // Without notes, a sketch that fits goes to the right of the slide.
+        let sketch_beside_slide = raw_note.is_empty()
+            && sketch.as_ref().is_some_and(|sk| {
+                plan_sketch_scale(sk, right_column_width(&geo, ratio), sketch_column_height(column_top_y())).is_some()
+            });
+        let mut last_page = page_id;
+        let mut sketch_placed = false;
+
+        if raw_note.is_empty() && !sketch_beside_slide {
+            if !page_anns.is_empty() {
+                let form = make_annotation_form(&mut pdf, page_anns, &prepared, fonts, geo.dw, geo.dh, 1.0)?;
+                overlay_page(&mut pdf, page_id, &geo, form)?;
+            }
         } else {
             let slide_form = make_slide_form(&mut pdf, page_id, &geo)?;
             let s_c = CANVAS_H / geo.dh;
@@ -1994,10 +2332,17 @@ fn export_vector(
                     s_c,
                 )?)
             };
-            build_notes_pages(
-                &mut pdf, page_id, &geo, slide_form, ann_form, fonts, p_num, total_pages, raw_note, ratio,
-                font_scale,
+            let (last, placed) = build_notes_pages(
+                &mut pdf, page_id, &geo, slide_form, ann_form, fonts, p_num, total_pages, raw_note,
+                sketch.as_ref(), ratio, font_scale,
             )?;
+            last_page = last;
+            sketch_placed = placed;
+        }
+
+        // Too big for the column (or the notes are long): a page of its own after the slide.
+        if let (Some(sk), false) = (&sketch, sketch_placed) {
+            append_sketch_page(&mut pdf, last_page, &geo, fonts, p_num, total_pages, sk)?;
         }
     }
 
@@ -2012,14 +2357,15 @@ pub fn export_slides_with_notes(
     output_pdf: &Path,
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    sketches: &HashMap<u32, SketchPage>,
     settings: &ExportSettings,
     hidden_pages: &std::collections::HashSet<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match export_vector(source_pdf, output_pdf, notes, annotations, settings, hidden_pages) {
+    match export_vector(source_pdf, output_pdf, notes, annotations, sketches, settings, hidden_pages) {
         Ok(()) => Ok(()),
         Err(e) => {
             eprintln!("Vector export failed ({e}); falling back to the rasterised export.");
-            export_rasterized(source_pdf, output_pdf, notes, annotations, settings, hidden_pages)
+            export_rasterized(source_pdf, output_pdf, notes, annotations, sketches, settings, hidden_pages)
         }
     }
 }
@@ -2141,7 +2487,7 @@ mod tests {
         let run = |content: ExportContent, hidden: &std::collections::HashSet<u32>, notes: &HashMap<u32, String>| {
             let out = root.join(format!("out_{:?}.pdf", content));
             let cfg = ExportSettings { content, ..Default::default() };
-            export_slides_with_notes(&src, &out, notes, &anns, &cfg, hidden).unwrap();
+            export_slides_with_notes(&src, &out, notes, &anns, &HashMap::new(), &cfg, hidden).unwrap();
             out
         };
 
@@ -2225,11 +2571,225 @@ mod tests {
         // ── fallback (used for files lopdf cannot process) still produces a valid PDF ──
         let fb = root.join("fallback.pdf");
         let cfg = ExportSettings::default();
-        export_rasterized(&src, &fb, &notes, &anns, &cfg, &hidden).unwrap();
+        export_rasterized(&src, &fb, &notes, &anns, &HashMap::new(), &cfg, &hidden).unwrap();
         let fb_sizes = page_sizes(&fb);
         assert_eq!(fb_sizes.len(), 3);
         assert!(fb_sizes.iter().all(|s| *s == (960.0, 540.0)));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ───────────────────────────── sketches in the export ─────────────────────────────
+
+    fn sketch_with(strokes: Vec<PageAnnotation>) -> SketchPage {
+        let mut sk = SketchPage::default();
+        sk.strokes = strokes;
+        sk
+    }
+
+    /// A thick red horizontal bar, `len` units wide.
+    fn red_bar(len: f32) -> Vec<PageAnnotation> {
+        vec![ann(AnnotationKind::Line, [255, 0, 0], &[(20.0, 40.0), (20.0 + len, 40.0)], 14.0)]
+    }
+
+    fn is_red(p: (u8, u8, u8)) -> bool {
+        p.0 > 200 && p.1 < 70 && p.2 < 70
+    }
+
+    fn has_red(img: &(usize, usize, usize, Vec<u8>), xs: std::ops::Range<usize>, ys: std::ops::Range<usize>) -> bool {
+        ys.into_iter().any(|y| xs.clone().any(|x| is_red(px(img, x, y))))
+    }
+
+    struct SketchEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        root: std::path::PathBuf,
+        src: std::path::PathBuf,
+    }
+
+    fn sketch_env(name: &str) -> SketchEnv {
+        let guard = crate::docid::test_lock();
+        let root = std::env::temp_dir().join(format!("lapis_sketch_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: tests are serialised by test_lock().
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
+            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
+        }
+        let src = root.join("src.pdf");
+        sample_pdf(&src);
+        SketchEnv { _guard: guard, root, src }
+    }
+
+    fn export_with(
+        env: &SketchEnv,
+        name: &str,
+        content: ExportContent,
+        notes: &HashMap<u32, String>,
+        sketches: &HashMap<u32, SketchPage>,
+    ) -> std::path::PathBuf {
+        let out = env.root.join(format!("{name}.pdf"));
+        let cfg = ExportSettings { content, ..Default::default() };
+        export_slides_with_notes(
+            &env.src,
+            &out,
+            notes,
+            &HashMap::new(),
+            sketches,
+            &cfg,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn prepare_sketch_crops_to_the_drawing_and_normalizes() {
+        let mut sk = sketch_with(vec![
+            ann(AnnotationKind::Line, [0, 0, 0], &[(100.0, 200.0), (300.0, 200.0)], 4.0),
+            // Unsupported kinds and empty text boxes are ignored.
+            ann(AnnotationKind::Highlight, [0, 0, 0], &[(900.0, 900.0), (950.0, 950.0)], 2.0),
+        ]);
+        let mut empty_text = ann(AnnotationKind::TextBox, [0, 0, 0], &[(800.0, 800.0), (900.0, 800.0)], 2.0);
+        empty_text.text = "  ".into();
+        sk.strokes.push(empty_text);
+
+        let lay = prepare_sketch(&sk).unwrap();
+        assert!((lay.origin.0 - (100.0 - 2.0 - SKETCH_CROP_PAD)).abs() < 0.01);
+        assert!((lay.w - (200.0 + 4.0 + 2.0 * SKETCH_CROP_PAD)).abs() < 0.01);
+        assert_eq!(lay.strokes.len(), 1);
+        assert!(lay.strokes[0].points.iter().all(|&(x, y)| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)));
+
+        assert!(prepare_sketch(&SketchPage::default()).is_none(), "an empty sketch is not exported");
+    }
+
+    #[test]
+    fn text_boxes_are_part_of_the_cropped_area() {
+        let mut t = ann(AnnotationKind::TextBox, [0, 0, 0], &[(50.0, 50.0), (290.0, 50.0)], 2.0);
+        t.text = "a fairly long text that will wrap on several lines inside its box ".repeat(3);
+        t.font_size = 16.0;
+        let lay = prepare_sketch(&sketch_with(vec![t])).unwrap();
+        assert!(lay.h > 100.0, "the height of the wrapped text counts: {}", lay.h);
+    }
+
+    #[test]
+    fn small_sketches_fit_the_column_and_big_ones_do_not() {
+        let small = prepare_sketch(&sketch_with(red_bar(100.0))).unwrap();
+        let big = prepare_sketch(&sketch_with(red_bar(1500.0))).unwrap();
+        assert!(plan_sketch_scale(&small, 200.0, 300.0).is_some());
+        assert!(plan_sketch_scale(&big, 200.0, 300.0).is_none());
+        assert!(plan_sketch_scale(&small, 200.0, 20.0).is_none(), "no height left");
+    }
+
+    #[test]
+    fn sketch_without_notes_goes_to_the_right_of_the_slide() {
+        let env = sketch_env("beside");
+        let mut sketches = HashMap::new();
+        sketches.insert(3u32, sketch_with(red_bar(120.0)));
+        let out = export_with(&env, "o", ExportContent::AnnotationsAndNotes, &HashMap::new(), &sketches);
+        assert_eq!(page_sizes(&out).len(), 3, "no extra page");
+        let size = page_sizes(&out)[2];
+        assert!((size.0 - 400.0).abs() < 1.0 && (size.1 - 300.0).abs() < 0.6, "same page size: {size:?}");
+        let img = render(&out, 2);
+        let split = (400.0 * 0.75) as usize; // the slide takes 75 % of the width by default
+        assert!(has_red(&img, split + 4..396, 10..290), "sketch in the right column");
+        assert!(!has_red(&img, 0..split - 4, 0..300), "none on the slide");
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    #[test]
+    fn sketch_goes_under_short_notes_on_the_same_page() {
+        let env = sketch_env("below");
+        let mut notes = HashMap::new();
+        notes.insert(1u32, "A short note.".to_string());
+        let mut sketches = HashMap::new();
+        sketches.insert(1u32, sketch_with(red_bar(60.0)));
+        let out = export_with(&env, "o", ExportContent::AnnotationsAndNotes, &notes, &sketches);
+        assert_eq!(page_sizes(&out).len(), 3);
+        let img = render(&out, 0);
+        let split = (612.0 * 0.75) as usize;
+        assert!(has_red(&img, split + 4..608, 60..780));
+        // The note text comes first: the top of the column holds no sketch ink.
+        assert!(!has_red(&img, split + 4..608, 0..40));
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    #[test]
+    fn long_notes_move_the_sketch_to_a_page_after() {
+        let env = sketch_env("long");
+        let mut notes = HashMap::new();
+        notes.insert(
+            1u32,
+            (0..220).map(|i| format!("line number {i}")).collect::<Vec<_>>().join("\n\n"),
+        );
+        let mut sketches = HashMap::new();
+        sketches.insert(1u32, sketch_with(red_bar(60.0)));
+        let without = export_with(&env, "a", ExportContent::Notes, &notes, &HashMap::new());
+        let with = export_with(&env, "b", ExportContent::Notes, &notes, &sketches);
+        let (n0, n1) = (page_sizes(&without).len(), page_sizes(&with).len());
+        assert_eq!(n1, n0 + 1, "exactly one page more");
+        // It comes right after the last notes page of that slide, and holds the sketch.
+        let notes_pages = n0 - 2; // pages 2 and 3 are not part of slide 1
+        let sketch_page = render(&with, notes_pages as i32);
+        assert!(has_red(&sketch_page, 0..sketch_page.0, 0..sketch_page.1));
+        assert!(!has_red(&render(&with, notes_pages as i32 - 1), 0..400, 0..780));
+        // Pages of the other slides keep their order.
+        assert_eq!(page_sizes(&with)[n1 - 1], (400.0, 300.0));
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    #[test]
+    fn a_big_sketch_gets_a_page_of_its_own_after_its_slide() {
+        let env = sketch_env("big");
+        let mut sketches = HashMap::new();
+        sketches.insert(1u32, sketch_with(red_bar(1500.0)));
+        let out = export_with(&env, "o", ExportContent::AnnotationsAndNotes, &HashMap::new(), &sketches);
+        let sizes = page_sizes(&out);
+        assert_eq!(sizes.len(), 4);
+        // Same size as the slide page (the canvas width is rounded to whole units).
+        assert!((sizes[1].0 - 612.0).abs() < 1.0 && (sizes[1].1 - 792.0).abs() < 0.6, "{:?}", sizes[1]);
+        let img = render(&out, 1);
+        assert!(has_red(&img, 0..img.0, 0..img.1));
+        // The slide page itself is untouched.
+        assert_eq!(render(&out, 0).3, render(&env.src, 0).3);
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    #[test]
+    fn sketches_follow_the_notes_in_the_export_settings() {
+        let env = sketch_env("settings");
+        let mut sketches = HashMap::new();
+        sketches.insert(3u32, sketch_with(red_bar(120.0)));
+        let out = export_with(&env, "o", ExportContent::Annotations, &HashMap::new(), &sketches);
+        assert_eq!(page_sizes(&out).len(), 3);
+        // Annotations only: the page stays pixel-identical to the original.
+        assert_eq!(render(&out, 2).3, render(&env.src, 2).3);
+        // And nothing is added when there are no sketches at all.
+        let out = export_with(&env, "p", ExportContent::AnnotationsAndNotes, &HashMap::new(), &HashMap::new());
+        assert_eq!(render(&out, 2).3, render(&env.src, 2).3);
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    #[test]
+    fn the_fallback_export_adds_a_page_for_a_sketch() {
+        let env = sketch_env("fallback");
+        let mut sketches = HashMap::new();
+        sketches.insert(1u32, sketch_with(red_bar(200.0)));
+        let fb = env.root.join("fb.pdf");
+        export_rasterized(
+            &env.src,
+            &fb,
+            &HashMap::new(),
+            &HashMap::new(),
+            &sketches,
+            &ExportSettings::default(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        let sizes = page_sizes(&fb);
+        assert_eq!(sizes.len(), 4);
+        let img = render(&fb, 1);
+        assert!(has_red(&img, 0..img.0, 0..img.1));
+        let _ = std::fs::remove_dir_all(&env.root);
     }
 }
