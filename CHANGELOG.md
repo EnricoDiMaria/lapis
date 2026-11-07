@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
+- **Note Editor**: Added dynamic scrolloff behavior to the notes editor, automatically keeping a 2.5-line visual margin
+  around the cursor during typing and keyboard navigation.Added adaptive bottom padding to the TextEdit to maintain proper
+  scrolling clearance on the final line and fixed a 1-frame flash artifact on the scroll indicator pill.
 - **Sketch: a scratchpad for every page.** A new **Sketch** tab in the notes panel, to the left of Edit
   and Preview, gives each PDF page its own drawing surface (`Alt  S`, configurable, also in the Command
   Palette). It is just a background (blank, ruled, grid or dotted, chosen page by page) plus strokes on a

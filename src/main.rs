@@ -12117,7 +12117,6 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     egui::Margin::symmetric(14, 8),
                 )
             };
-
             // Main Notes Area
             egui::Frame::NONE
                 .fill(notes_bg)
@@ -12154,6 +12153,10 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                             ui.data_mut(|d| d.remove::<f32>(anim_scroll_id));
                         }
                     }
+
+                    let note_font_sz = self.app_state.settings.note_font_size.clamp(10.0, 28.0);
+                    let edit_bottom_pad = note_font_sz * 3.5;
+                    let mut pending_scroll_px = 0.0_f32;
 
                     let scroll_out = scroll_area.show(ui, |ui| match self.note_mode {
                         NoteMode::Edit => {
@@ -12226,41 +12229,41 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                 };
 
                                 if has_paste_event || fallback_v_release {
-                                // 1. Read text immediately through arboard when available.
-                                let sys_text = self.clipboard.get_text();
-                                let is_klipper_img = sys_text
-                                    .as_deref()
-                                    .map_or(false, screenshots::is_image_placeholder);
+                                    // 1. Read text immediately through arboard when available.
+                                    let sys_text = self.clipboard.get_text();
+                                    let is_klipper_img = sys_text
+                                        .as_deref()
+                                        .map_or(false, screenshots::is_image_placeholder);
 
-                                if let Some(sys_text) = sys_text.filter(|_| !is_klipper_img) {
-                                    // Plain text: use the original fast path.
-                                    ui.input_mut(|i| {
-                                        if has_paste_event {
-                                            for ev in &mut i.events {
-                                                if let egui::Event::Paste(t) = ev {
-                                                    *t = sys_text.clone();
+                                    if let Some(sys_text) = sys_text.filter(|_| !is_klipper_img) {
+                                        // Plain text: use the original fast path.
+                                        ui.input_mut(|i| {
+                                            if has_paste_event {
+                                                for ev in &mut i.events {
+                                                    if let egui::Event::Paste(t) = ev {
+                                                        *t = sys_text.clone();
+                                                    }
                                                 }
+                                            } else {
+                                                i.events.push(egui::Event::Paste(sys_text));
                                             }
-                                        } else {
-                                            i.events.push(egui::Event::Paste(sys_text));
-                                        }
-                                    });
-                                } else {
-                                    // If no text is available, try to paste an image in the background.
-                                    ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
-                                    let cursor = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
-                                        .and_then(|s| s.cursor.char_range())
-                                        .map(|r| r.primary.index)
-                                        .unwrap_or_else(|| eframe::egui::text::CharIndex(self.current_note.chars().count()));
-                                    self.shots.request_clipboard(
-                                        ui.ctx(),
-                                        ShotTarget::Note {
-                                            page: self.note_page,
-                                            cursor: cursor.into(),
-                                        },
-                                    );
+                                        });
+                                    } else {
+                                        // If no text is available, try to paste an image in the background.
+                                        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+                                        let cursor = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                            .and_then(|s| s.cursor.char_range())
+                                            .map(|r| r.primary.index)
+                                            .unwrap_or_else(|| eframe::egui::text::CharIndex(self.current_note.chars().count()));
+                                        self.shots.request_clipboard(
+                                            ui.ctx(),
+                                            ShotTarget::Note {
+                                                page: self.note_page,
+                                                cursor: cursor.into(),
+                                            },
+                                        );
+                                    }
                                 }
-                            }
 
                                 if has_copy_or_cut {
                                     copied_or_cut_text = selected_slice;
@@ -12275,8 +12278,6 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                 }
                             }
 
-                            let note_font_sz =
-                                self.app_state.settings.note_font_size.clamp(10.0, 28.0);
                             let text_col = rgb(self.theme.fg_primary);
                             let err_stroke = egui::Stroke::new(
                                 1.3,
@@ -12357,9 +12358,43 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
 
                             let output = text_edit.show(ui);
 
+                            // Spazio extra sotto il TextEdit per mantenere lo scrolloff anche sull'ultima riga
+                            ui.add_space(edit_bottom_pad);
+
                             if output.response.changed() {
                                 self.note_is_dirty = true;
                                 self.sync_and_save();
+                            }
+
+                            // Scrolloff: mantiene ~2.5 righe visibili sopra e sotto il cursore
+                            let nav_or_edit = output.response.changed()
+                                || ui.input(|i| {
+                                    i.key_pressed(egui::Key::ArrowDown)
+                                        || i.key_pressed(egui::Key::ArrowUp)
+                                        || i.key_pressed(egui::Key::ArrowLeft)
+                                        || i.key_pressed(egui::Key::ArrowRight)
+                                        || i.key_pressed(egui::Key::Enter)
+                                        || i.key_pressed(egui::Key::PageDown)
+                                        || i.key_pressed(egui::Key::PageUp)
+                                });
+
+                            if output.response.has_focus() && nav_or_edit {
+                                if let Some(range) = output.cursor_range {
+                                    let local_caret = output.galley.pos_from_cursor(range.primary);
+                                    let row_h = local_caret.height().max(note_font_sz * 1.35);
+                                    let caret_screen = local_caret.translate(output.galley_pos.to_vec2());
+
+                                    let margin_y = row_h * 2.5;
+                                    let padded_rect = egui::Rect::from_min_max(
+                                        egui::pos2(caret_screen.min.x, caret_screen.min.y - margin_y),
+                                        egui::pos2(caret_screen.max.x, caret_screen.max.y + margin_y),
+                                    );
+                                    let clip_bot = ui.clip_rect().bottom();
+                                    if padded_rect.max.y > clip_bot {
+                                        pending_scroll_px = padded_rect.max.y - clip_bot;
+                                    }
+                                    ui.scroll_to_rect(padded_rect, None);
+                                }
                             }
 
                             let ctx_id = ui.make_persistent_id("spell_ctx_word");
@@ -12495,9 +12530,6 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                                     );
                                 });
                             } else {
-                                let note_font_sz =
-                                    self.app_state.settings.note_font_size.clamp(10.0, 28.0);
-
                                 ui.scope(|ui| {
                                     let style = ui.style_mut();
                                     style.visuals.override_text_color = None;
@@ -12568,9 +12600,11 @@ let dropped: Option<PathBuf> = ctx.input(|i: &InputState| {
                     let view_h = viewport_rect.height();
                     let offset_y = scroll_out.state.clamped_offset().y;
 
-                    let remaining_px = content_h - (offset_y + view_h);
-                    if remaining_px > 8.0 {
-                        let alpha = (remaining_px / 35.0).clamp(0.25, 0.95);
+                    let extra_pad = if is_edit { edit_bottom_pad } else { 0.0 };
+                    let extra_pad_audio = if self.app_state.settings.audio_dock || self.app_state.settings.audio_dock {Self::AUDIO_BTN_SIZE} else {0.0}; //add floating buttons size
+                    let remaining_px = content_h - (offset_y + pending_scroll_px + view_h + extra_pad) + extra_pad_audio; 
+                    if remaining_px > note_font_sz/2.0 {
+                        let alpha = (remaining_px+note_font_sz / 35.0).clamp(0.25, 0.95);
                         let elevated = rgb(self.theme.bg_elevated);
                         let accent = rgb(self.theme.accent);
                         let foreground = rgb(self.theme.fg_primary);
