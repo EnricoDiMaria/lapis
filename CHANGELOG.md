@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Textboxes are now rendered on top of screenshots added in the PDF page.
+- Screenshots and snips are now correctly exported
 
 ## [1.2.1] - 2026/11/06 
 

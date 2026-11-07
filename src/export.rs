@@ -66,6 +66,8 @@ enum NoteLineKind {
     Quote(Vec<StyledSpan>),
     CodeLine(String),
     Paragraph(Vec<StyledSpan>),
+    /// A screenshot or a snip (`![alt](file:///...)`) drawn at `w` x `h` canvas units.
+    Image { name: String, id: ObjectId, w: f64, h: f64 },
 }
 
 #[derive(Clone)]
@@ -170,11 +172,13 @@ fn export_rasterized(
 
             // Preprocess $LaTeX$ and $$LaTeX$$ expressions before laying out lines
             let processed_md = crate::notes::preprocess_markdown_math(raw_note);
-            let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale);
+            let note_images = prepare_note_images(&mut pdf, &processed_md, &mut img_cache);
+            let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale, &note_images);
             let note_chunks = paginate_note_lines(&layout_lines, CANVAS_H - MARGIN * 2.4);
             let total_parts = note_chunks.len().max(1);
 
             for (part_idx, chunk) in note_chunks.into_iter().enumerate() {
+                let chunk_lines = chunk.clone();
                 let mut ops = Vec::new();
                 draw_background(&mut ops, true, split_x, &pal);
                 draw_slide_xobject(&mut ops, sx, sy, sw, sh);
@@ -245,6 +249,7 @@ fn export_rasterized(
                     ops,
                 )?;
                 prepared.register_on(&mut pdf, page_id);
+                register_line_images(&mut pdf, page_id, &chunk_lines);
                 page_ids.push(page_id);
             }
         }
@@ -1250,7 +1255,135 @@ fn append_sketch_page(
     Ok(new_id)
 }
 
-fn layout_note_lines(markdown: &str, avail_w: f64, font_scale: f64) -> Vec<LayoutLine> {
+// ───────────────────────────── images inside the notes ─────────────────────────────
+//
+// Screenshots and snips are stored in the notes as `![alt](file:///path/to/image.png)`. They are
+// loaded once per file, embedded as image XObjects and laid out as a line as tall as the image.
+
+/// An image referenced by the notes, ready to be drawn.
+#[derive(Clone)]
+struct NoteImage {
+    name: String,
+    id: ObjectId,
+    px_w: f64,
+    px_h: f64,
+}
+
+/// Images of a note, by the URL written in the Markdown.
+type NoteImages = HashMap<String, NoteImage>;
+
+/// `![alt](url)` occupying a whole (trimmed) line -> `(alt, url)`.
+fn parse_markdown_image(trimmed: &str) -> Option<(&str, &str)> {
+    let rest = trimmed.strip_prefix("![")?;
+    let (alt, tail) = rest.split_once("](")?;
+    let url = tail.strip_suffix(')')?.trim();
+    // Optional title: `![alt](url "title")`.
+    let url = url.split_once(" \"").map_or(url, |(u, _)| u).trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some((alt, url))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+            let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+            out.push(hex(b[i + 1]) * 16 + hex(b[i + 2]));
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Local path of an image URL used in the notes (`file://` URIs, with or without `%20`, and
+/// absolute paths). Remote images are not exported.
+fn note_image_path(url: &str) -> Option<std::path::PathBuf> {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("file://") {
+        let dec = percent_decode(rest);
+        let b = dec.as_bytes();
+        // `/C:/dir/x.png` (Windows drive) -> `C:/dir/x.png`
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+            return Some(std::path::PathBuf::from(&dec[1..]));
+        }
+        if dec.starts_with('/') {
+            return Some(std::path::PathBuf::from(dec));
+        }
+        // UNC: `server/share/x.png`
+        return Some(std::path::PathBuf::from(format!("//{dec}")));
+    }
+    if url.contains("://") {
+        return None;
+    }
+    let p = std::path::PathBuf::from(percent_decode(url));
+    p.is_absolute().then_some(p)
+}
+
+/// Loads the images referenced by `markdown` and embeds them in `pdf`. `cache` keeps one XObject
+/// per file for the whole export.
+fn prepare_note_images(
+    pdf: &mut LoDocument,
+    markdown: &str,
+    cache: &mut HashMap<String, ObjectId>,
+) -> NoteImages {
+    let mut out = NoteImages::new();
+    let mut in_code = false;
+    for line in markdown.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let Some((_, url)) = parse_markdown_image(t) else { continue };
+        if out.contains_key(url) {
+            continue;
+        }
+        let Some(path) = note_image_path(url) else { continue };
+        let Ok((w, h)) = image::image_dimensions(&path) else { continue };
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let key = format!("note:{}", path.display());
+        let id = match cache.get(&key) {
+            Some(id) => *id,
+            None => {
+                let Some(shot) = crate::screenshots::Shot::from_file(&path) else { continue };
+                if shot.is_empty() {
+                    continue;
+                }
+                let id = crate::notes::add_image_xobject(pdf, &shot);
+                cache.insert(key, id);
+                id
+            }
+        };
+        out.insert(
+            url.to_string(),
+            NoteImage { name: format!("LapisNote{}", id.0), id, px_w: w as f64, px_h: h as f64 },
+        );
+    }
+    out
+}
+
+/// Registers on `page_id` the images drawn by `lines`.
+fn register_line_images(pdf: &mut LoDocument, page_id: ObjectId, lines: &[LayoutLine]) {
+    for line in lines {
+        if let NoteLineKind::Image { name, id, .. } = &line.kind {
+            let _ = crate::notes::register_xobject_on_page(pdf, page_id, name, *id);
+        }
+    }
+}
+
+fn layout_note_lines(markdown: &str, avail_w: f64, font_scale: f64, images: &NoteImages) -> Vec<LayoutLine> {
     let body_sz = (12.0 * font_scale).clamp(8.0, 24.0);
     let h1_sz = (17.0 * font_scale).clamp(11.0, 30.0);
     let h2_sz = (15.0 * font_scale).clamp(10.0, 27.0);
@@ -1297,6 +1430,40 @@ fn layout_note_lines(markdown: &str, avail_w: f64, font_scale: f64) -> Vec<Layou
                 font_size: body_sz * 0.5,
                 height: body_sz * 0.9,
             });
+            continue;
+        }
+
+        // Screenshots and snips: `![alt](url)` alone on its line.
+        if let Some((alt, url)) = parse_markdown_image(trimmed) {
+            if let Some(img) = images.get(url) {
+                // Natural size at 60 %, never wider than the column nor taller than most of a page.
+                let max_h = (CANVAS_H - MARGIN * 2.4) * 0.8 - 30.0;
+                let mut w = avail_w.min(img.px_w * 0.6).max(1.0);
+                let mut h = w * img.px_h / img.px_w;
+                if h > max_h {
+                    h = max_h;
+                    w = h * img.px_w / img.px_h;
+                }
+                out.push(LayoutLine {
+                    kind: NoteLineKind::Image { name: img.name.clone(), id: img.id, w, h },
+                    font_size: h,
+                    height: h + body_sz * 0.6,
+                });
+            } else {
+                // Missing or remote file: keep a short marker instead of a long raw URL.
+                let label = if alt.trim().is_empty() { "image" } else { alt.trim() };
+                let spans = vec![StyledSpan {
+                    text: format!("[image not found: {label}]"),
+                    style: SpanStyle { italic: true, ..Default::default() },
+                }];
+                for w_spans in wrap_styled_spans(&spans, avail_w, body_sz) {
+                    out.push(LayoutLine {
+                        kind: NoteLineKind::Paragraph(w_spans),
+                        font_size: body_sz,
+                        height: body_sz * 1.36,
+                    });
+                }
+            }
             continue;
         }
 
@@ -1615,6 +1782,13 @@ fn render_layout_line(ops: &mut Vec<Operation>, line: &LayoutLine, text_x: f64, 
             fill_rect(ops, text_x, y - 3.0, avail_w, sz * 1.32, pal.code_bg);
             push_styled_span(ops, code, text_x + 6.0, y, sz, pal.text,
                 SpanStyle { code: true, ..Default::default() }, true);
+        }
+        NoteLineKind::Image { name, w, h, .. } => {
+            // `y` is the bottom edge of the image.
+            ops.push(Operation::new("q", vec![]));
+            ops.push(op_cm(*w, 0.0, 0.0, *h, text_x, y));
+            ops.push(op_do(name));
+            ops.push(Operation::new("Q", vec![]));
         }
         NoteLineKind::Paragraph(spans) => {
             let mut cx = text_x;
@@ -2140,6 +2314,7 @@ fn build_notes_pages(
     sketch: Option<&SketchLayout>,
     ratio: f64,
     font_scale: f64,
+    img_cache: &mut HashMap<String, ObjectId>,
 ) -> Result<(ObjectId, bool), Box<dyn std::error::Error>> {
     let pal = LIGHT;
     let h_c = CANVAS_H;
@@ -2156,7 +2331,8 @@ fn build_notes_pages(
     let parent_id = page_parent(pdf, page_id)?;
 
     let processed_md = crate::notes::preprocess_markdown_math(raw_note);
-    let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale);
+    let note_images = prepare_note_images(pdf, &processed_md, img_cache);
+    let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale, &note_images);
     let mut chunks = paginate_note_lines(&layout_lines, h_c - MARGIN * 2.4);
     if chunks.is_empty() {
         chunks.push(Vec::new()); // no notes: the page is still rebuilt (slide + sketch column)
@@ -2174,6 +2350,7 @@ fn build_notes_pages(
 
     let mut last_id = page_id;
     for (part_idx, chunk) in chunks.into_iter().enumerate() {
+        let chunk_lines = chunk.clone();
         let mut ops = vec![Operation::new("q", vec![]), op_cm(k, 0.0, 0.0, k, 0.0, 0.0)];
         fill_rect(&mut ops, 0.0, 0.0, w_total, h_c, pal.page_bg);
         ops.push(Operation::new("q", vec![]));
@@ -2224,6 +2401,11 @@ fn build_notes_pages(
         let mut xobjects = dictionary! { "LpSlide" => slide_form };
         if let Some(a) = ann_form {
             xobjects.set("LpAnn", a);
+        }
+        for line in &chunk_lines {
+            if let NoteLineKind::Image { name, id, .. } = &line.kind {
+                xobjects.set(name.as_str(), *id);
+            }
         }
         let resources = dictionary! {
             "Font" => dictionary! { "F1" => fonts.0, "F2" => fonts.1, "F3" => fonts.2 },
@@ -2339,7 +2521,7 @@ fn export_vector(
             };
             let (last, placed) = build_notes_pages(
                 &mut pdf, page_id, &geo, slide_form, ann_form, fonts, p_num, total_pages, raw_note,
-                sketch.as_ref(), ratio, font_scale,
+                sketch.as_ref(), ratio, font_scale, &mut img_cache,
             )?;
             last_page = last;
             sketch_placed = placed;
@@ -2772,6 +2954,75 @@ mod tests {
         // And nothing is added when there are no sketches at all.
         let out = export_with(&env, "p", ExportContent::AnnotationsAndNotes, &HashMap::new(), &HashMap::new());
         assert_eq!(render(&out, 2).3, render(&env.src, 2).3);
+        let _ = std::fs::remove_dir_all(&env.root);
+    }
+
+    // ───────────────────────── screenshots and snips in the notes ─────────────────────────
+
+    fn write_png(path: &Path, w: u32, h: u32, rgb: [u8; 3]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let buf: Vec<u8> = (0..w * h).flat_map(|_| rgb).collect();
+        image::save_buffer(path, &buf, w, h, image::ColorType::Rgb8).unwrap();
+    }
+
+    #[test]
+    fn markdown_images_are_parsed_and_resolved() {
+        assert_eq!(parse_markdown_image("![Snip p.3](file:///a/b.png)"), Some(("Snip p.3", "file:///a/b.png")));
+        assert_eq!(parse_markdown_image("![x](/a/b.png \"title\")"), Some(("x", "/a/b.png")));
+        assert_eq!(parse_markdown_image("text ![x](y)"), None);
+        assert_eq!(parse_markdown_image("![x]()"), None);
+
+        assert_eq!(note_image_path("file:///home/me/My%20Docs/a.png").unwrap(), Path::new("/home/me/My Docs/a.png"));
+        assert_eq!(note_image_path("file:///home/me/My Docs/a.png").unwrap(), Path::new("/home/me/My Docs/a.png"));
+        assert_eq!(note_image_path("file:///C:/Users/me/a.png").unwrap(), Path::new("C:/Users/me/a.png"));
+        assert!(note_image_path("https://example.com/a.png").is_none());
+        assert!(note_image_path("relative/a.png").is_none());
+    }
+
+    #[test]
+    fn screenshots_and_snips_in_the_notes_are_exported() {
+        let env = sketch_env("noteimg");
+        // A folder with a space, as the app writes it (the snip link is not percent-encoded).
+        let shot = env.root.join("my shots").join("shot.png");
+        let snip = env.root.join("my shots").join("snip.png");
+        write_png(&shot, 200, 200, [255, 0, 0]);
+        write_png(&snip, 200, 200, [255, 0, 0]);
+        let encoded = format!("![screenshot](file://{})", shot.display().to_string().replace(' ', "%20"));
+        let raw = format!("![Snip p.1](file://{})", snip.display());
+
+        // Only the screenshot (percent-encoded) and a missing file.
+        let mut notes = HashMap::new();
+        notes.insert(1u32, format!("Intro\n\n{encoded}\n\n![gone](file:///does/not/exist.png)\n"));
+        let out = export_with(&env, "a", ExportContent::AnnotationsAndNotes, &notes, &HashMap::new());
+        let img = render(&out, 0);
+        let split = (612.0 * 0.75) as usize;
+        assert!(has_red(&img, split + 4..608, 30..780), "screenshot in the notes column");
+        assert!(!has_red(&img, 0..split - 4, 0..792), "nothing on the slide");
+
+        // Only the snip (raw path with a space).
+        notes.insert(1u32, format!("{raw}\n"));
+        let out = export_with(&env, "b", ExportContent::Notes, &notes, &HashMap::new());
+        assert!(has_red(&render(&out, 0), split + 4..608, 30..780), "snip in the notes column");
+
+        // Without notes in the export the images are not exported either.
+        let out = export_with(&env, "c", ExportContent::Annotations, &notes, &HashMap::new());
+        assert_eq!(render(&out, 0).3, render(&env.src, 0).3);
+
+        // The rasterised fallback draws them too.
+        let fb = env.root.join("fb.pdf");
+        export_rasterized(
+            &env.src,
+            &fb,
+            &notes,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        let (split_x, _, _) = compute_export_geometry(ExportSettings::default().slide_width_pct);
+        let img = render(&fb, 0);
+        assert!(has_red(&img, split_x as usize + 10..950, 30..520), "image in the fallback export");
         let _ = std::fs::remove_dir_all(&env.root);
     }
 

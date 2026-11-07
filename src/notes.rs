@@ -1770,7 +1770,7 @@ pub(crate) fn resolve_obj(doc: &lopdf::Document, o: lopdf::Object) -> lopdf::Obj
 }
 
 /// Create a Flate-compressed image XObject and return its object ID.
-fn add_image_xobject(doc: &mut lopdf::Document, shot: &crate::screenshots::Shot) -> lopdf::ObjectId {
+pub(crate) fn add_image_xobject(doc: &mut lopdf::Document, shot: &crate::screenshots::Shot) -> lopdf::ObjectId {
     use lopdf::{dictionary, Object, Stream};
 
     let (iw, ih) = (shot.width as i64, shot.height as i64);

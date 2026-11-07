@@ -389,7 +389,7 @@ The result is a single study document combining the original lecture material, y
 
 - [ ] Alternative export layouts for pages with notes: notes on a following page, notes below the slide, or notes as PDF comments.
 - [ ] Add SHA256 verification to model downloads (installer, `install.sh` and `install.ps1`).
-- [ ] Fix: Export screenshorts and snips
+- [X] Fix: Export screenshorts and snips
 
 **Viewing and interface**
 
