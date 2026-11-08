@@ -28,6 +28,10 @@ WizardStyle=modern
 ; A running Lapis is closed (and not restarted) before its files are replaced.
 CloseApplications=yes
 RestartApplications=no
+#ifdef SignBuild
+SignTool=mysigntool
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

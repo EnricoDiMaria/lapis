@@ -35,14 +35,42 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      - name: Installer (Inno Setup)
+      - name: Sign binary and build Installer (Inno Setup)
         shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
           choco install innosetup -y --no-progress
-          # lo script .iss si aspetta target\release: copia dal target dir corto
-          New-Item -ItemType Directory -Force target/release | Out-Null
-          Copy-Item C:\t\release\lapis.exe target\release\lapis.exe
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\lapis.iss "/DAppVersion=${{ steps.ver.outputs.version }}"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $verArg = "/DAppVersion=${{ steps.ver.outputs.version }}"
+
+          if ($env:PFX_BASE64) {
+            $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+            $pfx = "$env:RUNNER_TEMP\cert.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+
+            # 1. Firma C:	elease\lapis.exe (cosi' sia il setup che lo zip portabile avranno il binario firmato)
+            & $signtool sign /f $pfx /p $env:PFX_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 C:\t\release\lapis.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on lapis.exe" }
+
+            # lo script .iss si aspetta targetelease: copia dal target dir corto
+            New-Item -ItemType Directory -Force target/release | Out-Null
+            Copy-Item C:\t\release\lapis.exe target\release\lapis.exe
+
+            # 2. Compila e firma automaticamente unins000.exe + lapis-setup.exe tramite Inno Setup
+            $signCmd = "`$q$signtool`$q sign /f `$q$pfx`$q /p `$q$env:PFX_PASSWORD`$q /fd sha256 /tr http://timestamp.digicert.com /td sha256 `$f"
+            & $iscc packaging\windows\lapis.iss $verArg "/DSignBuild" "/Smysigntool=$signCmd"
+            $isccExit = $LASTEXITCODE
+
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+            if ($isccExit -ne 0) { throw "ISCC failed with exit code $isccExit" }
+          } else {
+            Write-Host "WINDOWS_PFX_BASE64 non impostato: build non firmata."
+            New-Item -ItemType Directory -Force target/release | Out-Null
+            Copy-Item C:\t\release\lapis.exe target\release\lapis.exe
+            & $iscc packaging\windows\lapis.iss $verArg
+          }
 
       - name: Zip portabile (per install.ps1)
         shell: pwsh
@@ -67,6 +95,7 @@ jobs:
           path: |
             dist/lapis-*
             dist/SHA256SUMS-windows.txt
+          overwrite: true
 
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
