@@ -50,11 +50,11 @@ jobs:
             $pfx = "$env:RUNNER_TEMP\cert.pfx"
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
 
-            # 1. Firma C:	elease\lapis.exe (cosi' sia il setup che lo zip portabile avranno il binario firmato)
+            # 1. Firma il binario compilato (cosi' sia il setup che lo zip portabile avranno l'eseguibile firmato)
             & $signtool sign /f $pfx /p $env:PFX_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 C:\t\release\lapis.exe
             if ($LASTEXITCODE -ne 0) { throw "signtool failed on lapis.exe" }
 
-            # lo script .iss si aspetta targetelease: copia dal target dir corto
+            # lo script .iss si aspetta target/release: copia dal target dir corto
             New-Item -ItemType Directory -Force target/release | Out-Null
             Copy-Item C:\t\release\lapis.exe target\release\lapis.exe
 
