@@ -183,7 +183,8 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-Select a tool from the annotation toolbar. The radial tools menu can also be used when enabled in Settings and can be opened with a right click anywhere on the PDF.
+Select a tool from the annotation toolbar (two versions available in advanced settings: orizontal sub-topbar and vertical). The radial tools menu can also be used when enabled in Settings and can be opened with a right click anywhere on the PDF. 
+> You can draw simply by holding down the Spacebar and moving the cursor, offering a much more ergonomic workflow on laptops without needing to click and drag on the touchpad (Note: ensure "Disable touchpad while typing" is turned off in your OS settings).
 
 ### Cursor
 

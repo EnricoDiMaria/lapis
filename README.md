@@ -45,6 +45,7 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 - **PDF Night Mode** — Toggle a dark viewing treatment for PDFs.
 - **Annotation tools always at hand**: Right-click anywhere on the PDF to open the radial menu.
 - **Full Drawing & Markup Kit** — Freehand drawing, highlighting, underlining, shapes, text boxes, eraser, occlusion tape, region snipping, and laser pointer.
+- **Ergonomic Drawing**: You can draw simply by holding down the Spacebar and moving the cursor, offering a much more ergonomic workflow on laptops without needing to click and drag on the touchpad (Note: ensure "Disable touchpad while typing" is turned off in your OS settings).
 - **Custom Study Pages** — Insert ruled, dotted, grid, or blank pages into your document.
 - **Markdown & LaTeX Notes** — Edit and preview formatted notes, including mathematical expressions.
 - **Spellchecking & Dictionaries** — Offline spellchecking, suggestions, custom words, and additional dictionaries.
