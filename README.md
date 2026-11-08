@@ -40,9 +40,11 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 ## Features at a Glance
 
 - **Advanced PDF Viewer** — Single Page, Continuous Scroll, Two-Page Book, Slideshow, and Slideshow with Notes modes.
+- **Customizable Workspace**: Choose which features to enable, which buttons to display, and tailor the app to your liking. Select from 15+ unique themes, upload custom fonts, personalize keyboard shortcuts, and much more — all from advanced settings.
 - **Split View** — Display and annotate two PDF pages side by side.
 - **PDF Night Mode** — Toggle a dark viewing treatment for PDFs.
-- **Vector Annotation Tools** — Freehand drawing, highlighting, underlining, shapes, text boxes, erasing, occlusion tapes, region snipping, and laser pointer.
+- **Annotation tools always at hand**: Right-click anywhere on the PDF to open the radial menu.
+- **Full Drawing & Markup Kit** — Freehand drawing, highlighting, underlining, shapes, text boxes, eraser, occlusion tape, region snipping, and laser pointer.
 - **Custom Study Pages** — Insert ruled, dotted, grid, or blank pages into your document.
 - **Markdown & LaTeX Notes** — Edit and preview formatted notes, including mathematical expressions.
 - **Spellchecking & Dictionaries** — Offline spellchecking, suggestions, custom words, and additional dictionaries.
@@ -55,7 +57,6 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 - **Global Search & Command Palette** — Search across PDF content, notes, and audio transcripts, or quickly access application commands.
 - **Bookmarks, Thumbnails & Outline** — Navigate large documents more efficiently.
 - **Import & Export** — Import Markdown/text notes, export notes, and export a PDF with your annotations, your notes, or both, keeping the original pages untouched.
-- **Customizable Workspace** — Themes, typography, keyboard shortcuts, study tools, and storage management.
 
 > ### 📖 [Read the complete User Guide →](docs/USER_GUIDE.md)
 > Viewing modes, annotation tools, Markdown & LaTeX notes, the audio workspace, offline transcription, flashcards, search, settings and export, all explained step by step.

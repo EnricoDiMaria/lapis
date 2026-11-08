@@ -183,7 +183,7 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-Select a tool from the annotation toolbar. The radial tools menu can also be used when enabled in Settings.
+Select a tool from the annotation toolbar. The radial tools menu can also be used when enabled in Settings and can be opened with a right click anywhere on the PDF.
 
 ### Cursor
 
