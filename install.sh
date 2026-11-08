@@ -60,7 +60,7 @@ get_app_version() {
     if [[ -f "$cargo_file" ]]; then
         sed -n 's/^version = "\(.*\)"/\1/p' "$cargo_file" | head -n 1
     else
-        echo "1.2.1"
+        echo "1.3.0"
     fi
 }
 
