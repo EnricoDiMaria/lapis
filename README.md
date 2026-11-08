@@ -22,10 +22,8 @@
   <img src="assets/lapis_overview.png" alt="Lapis PDF Reader Overview" width="100%">
 </p>
 
-<p align="center">
-  <i>If you want a closer look watch the 1-minute showcase below — and check the <a href="docs/USER_GUIDE.md">User Guide</a> for even more features waiting to be discovered:</i>
-</p>
 <details>
+  <summary><b>If you want a closer look watch the 1-minute showcase below — and check the <a href="docs/USER_GUIDE.md">User Guide</a> for even more features waiting to be discovered:</b></summary>
   <video src="https://github.com/user-attachments/assets/2a0df59c-1059-4a95-8c4d-a5d285a32271" width="100%" controls muted autoplay loop></video>
 </details>
 
