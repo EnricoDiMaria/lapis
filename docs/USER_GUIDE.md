@@ -30,6 +30,10 @@ This section explains how to use the main Lapis features, from opening a PDF to 
 
 Start by opening a PDF through the **Open PDF** action or by dragging a PDF into the application.
 
+<p align="center">
+  <img src="images/01-open-document.png" alt="Opening a PDF document in Lapis" width="85%">
+</p>
+
 Once a document is loaded, Lapis provides a workspace containing the PDF viewer, navigation controls, annotation tools, notes, and study features.
 
 The current document is the context for your work: notes, annotations, bookmarks, and associated audio information are organized around its pages.
@@ -47,6 +51,10 @@ When moving a PDF to another computer, remember to consider its associated Lapis
 ## 2. PDF Viewing Modes
 
 The View Mode menu offers five ways to work with a document.
+
+<p align="center">
+  <img src="images/02-view-modes.png" alt="PDF Viewing Modes menu" width="75%">
+</p>
 
 ### Single Page — `Alt + 1`
 
@@ -106,6 +114,10 @@ Split View displays two PDF pages side by side.
 
 Enable it using the **Split View** toolbar action.
 
+<p align="center">
+  <img src="images/03-split-view.png" alt="Split View side by side" width="85%">
+</p>
+
 This is particularly useful when:
 
 - Comparing two slides.
@@ -119,6 +131,10 @@ Both displayed pages can be used as part of the annotation workflow.
 ## 4. PDF Night Mode
 
 Use the **PDF Night Mode** toolbar button to toggle the PDF's dark viewing treatment.
+
+<p align="center">
+  <img src="images/04-night-mode.png" alt="PDF Night Mode comparison" width="85%">
+</p>
 
 This changes the PDF viewing appearance without requiring you to modify the original document.
 
@@ -162,6 +178,10 @@ The Alt-based navigation shortcuts are also available inside the notes editor.
 ## 6. Annotation Tools
 
 Lapis includes a collection of annotation tools for marking up PDF pages.
+
+<p align="center">
+  <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
+</p>
 
 Select a tool from the annotation toolbar. The radial tools menu can also be used when enabled in Settings.
 
@@ -248,6 +268,10 @@ Lapis can insert additional pages into a PDF document.
 
 Use the **New Page** toolbar button to insert a page after the current page.
 
+<p align="center">
+  <img src="images/07-custom-pages.png" alt="Custom study page styles" width="80%">
+</p>
+
 A normal click inserts a page using the configured default style.
 
 Right-click the button to choose a different style:
@@ -300,6 +324,10 @@ The **Sketch** tab, to the left of Edit and Preview, is a scratchpad attached to
 diagrams, quick calculations or anything that is easier to draw than to type. Each PDF page has its own
 sketch, and it follows the note page shown in the panel header. Only the strokes and the background are saved,
 like notes.
+
+<p align="center">
+  <img src="images/08-sketch-canvas.png" alt="Sketch canvas in notes panel" width="85%">
+</p>
 
 The canvas fills the whole panel below its toolbar and grows as you draw, so there are no page edges and it
 works the same in a narrow side panel and in a wide bottom panel (moving the panel never changes what you
@@ -390,6 +418,10 @@ Spellchecking can also be enabled or disabled through the application settings.
 Lapis includes an audio workspace for working with lecture recordings.
 
 Open the Audio Lecture Dock using the expandable control at the bottom of the application.
+
+<p align="center">
+  <img src="images/10-audio-dock.png" alt="Lecture audio workspace and waveform" width="85%">
+</p>
 
 The audio workspace provides access to lecture playback, recording management, waveform navigation, trimming, and transcription.
 
@@ -510,6 +542,10 @@ Lecture transcription and voice-memo transcription share the same offline model 
 Lapis includes a flashcard trainer that extracts supported question-and-answer patterns from Markdown notes.
 
 Open it using the **Flashcards** toolbar button or the corresponding Command Palette action.
+
+<p align="center">
+  <img src="images/13-flashcards-trainer.png" alt="Flashcards active recall trainer" width="85%">
+</p>
 
 The trainer allows you to review cards, reveal answers, and track your study progress.
 

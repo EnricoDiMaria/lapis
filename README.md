@@ -18,6 +18,10 @@
 
 ---
 
+<p align="center">
+  <img src="assets/lapis-overview.png" alt="Lapis PDF Reader Overview" width="100%">
+</p>
+
 ## Overview
 
 **Lapis** is a native, feature-rich study environment built in Rust. It brings lecture slides, handwritten-style annotations, structured Markdown notes, mathematical notation, audio recordings, automatic transcription, and active-recall tools together in a single workspace.
@@ -389,24 +393,12 @@ The result is a single study document combining the original lecture material, y
 
 - [ ] Alternative export layouts for pages with notes: notes on a following page, notes below the slide, or notes as PDF comments.
 - [ ] Add SHA256 verification to model downloads (installer, `install.sh` and `install.ps1`).
-- [X] Fix: Export screenshorts and snips
 
-**Viewing and interface**
-
-- [X] Follow cursor with autoscroll when writing in the note edit panel.
-- [X] Frameless toolbar buttons with hover colour feedback, nicer toast messages and other visual polish.
-
-**Study tools**
-
-- [X] Blank pages / whiteboard in split view, or a page-like canvas inside the notes panel.
-- [X] Fix textboxes rendered under screenshots.
-- [X] Improve flashcards
 
 **Platform and project**
 
-- [ ] Screenshots in the README.
+- [ ] Screenshots in the User Guide.
 - [ ] (Optional) Updates availability verification at startup
-- [X] Overall code improvement
 
 ---
 
