@@ -25,7 +25,9 @@
 <p align="center">
   <i>If you want a closer look watch the 1-minute showcase below — and check the <a href="docs/USER_GUIDE.md">User Guide</a> for even more features waiting to be discovered:</i>
 </p>
-https://github.com/user-attachments/assets/2a0df59c-1059-4a95-8c4d-a5d285a32271
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/2a0df59c-1059-4a95-8c4d-a5d285a32271" width="100%" controls muted autoplay loop></video>
+</p>
 
 
 
@@ -397,14 +399,10 @@ The result is a single study document combining the original lecture material, y
 ### Planned in next releases
 
 **Documents and export**
-
 - [ ] Alternative export layouts for pages with notes: notes on a following page, notes below the slide, or notes as PDF comments.
 - [ ] Add SHA256 verification to model downloads (installer, `install.sh` and `install.ps1`).
 
-
 **Platform and project**
-
-- [ ] Screenshots in the User Guide.
 - [ ] (Optional) Updates availability verification at startup
 
 ---
