@@ -157,7 +157,7 @@ EOF
 
     cat > "$APP_DIR/lapis.desktop" << EOF
 [Desktop Entry]
-Version=$version
+Version=1.5
 Type=Application
 Name=Lapis
 GenericName=PDF Study Suite
