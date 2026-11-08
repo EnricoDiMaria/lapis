@@ -19,8 +19,15 @@
 ---
 
 <p align="center">
-  <img src="assets/lapis-overview.png" alt="Lapis PDF Reader Overview" width="100%">
+  <img src="assets/lapis_overview.png" alt="Lapis PDF Reader Overview" width="100%">
 </p>
+
+<p align="center">
+  <i>If you want a closer look watch the 1-minute showcase below — and check the <a href="docs/USER_GUIDE.md">User Guide</a> for even more features waiting to be discovered:</i>
+</p>
+https://github.com/user-attachments/assets/2a0df59c-1059-4a95-8c4d-a5d285a32271
+
+
 
 ## Overview
 
