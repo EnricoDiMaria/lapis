@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **External PDF annotations no longer overwritten:** Lapis no longer truncates bytes after the first `%%EOF` marker. Incremental updates appended by external software (such as Microsoft Edge) are preserved intact across saves.
+- **The eraser icon now displays properly in the main PDF area as well.**
 
 
 ### Compatibility and upgrade notes

@@ -4586,13 +4586,18 @@ impl Lapis {
                 }
             }
             AnnotationTool::Eraser => {
-                if (img_resp.clicked() || img_resp.dragged() || hold_key_down)
-                    && let Some(pos) = pointer_pos
-                {
+                if let Some(pos) = pointer_pos {
+                    ui.painter().circle_stroke(
+                    pointer_pos.unwrap(),
+                    7.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+                    );
+                    if img_resp.clicked() || img_resp.dragged() || hold_key_down {
                     let (nx, ny) = to_norm(pos);
                     let before_state = self.annotations.get(&page_num).cloned().unwrap_or_default();
                     let before_len = before_state.len();
                     let mut changed = false;
+                    
 
                     if let Some(list) = self.annotations.get_mut(&page_num) {
                         list.retain(|ann| match ann.kind {
@@ -4666,6 +4671,7 @@ impl Lapis {
                         );
                     }
                 }
+            }
             }
             AnnotationTool::TextBox => {}
             AnnotationTool::Laser => {

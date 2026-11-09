@@ -28,7 +28,7 @@ const TEXT_BOX_W: f32 = 240.0;
 const GROW: f32 = 400.0;
 /// The toolbar puts colors and sizes in a popup below this width.
 const COMPACT_TOOLBAR_W: f32 = 150.0;
-const ERASER_RADIUS_PX: f32 = 8.0;
+const ERASER_RADIUS_PX: f32 = 7.0;
 
 /// Colors readable on the (always light) paper.
 const PALETTE: [[u8; 3]; 6] = [
