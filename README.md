@@ -58,6 +58,7 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 - **Global Search & Command Palette** — Search across PDF content, notes, and audio transcripts, or quickly access application commands.
 - **Bookmarks, Thumbnails & Outline** — Navigate large documents more efficiently.
 - **Import & Export** — Import Markdown/text notes, export notes, and export a PDF with your annotations, your notes, or both, keeping the original pages untouched.
+- **Standard PDF Annotation Interoperability** — Highlights, freehand drawings, shapes, and text boxes are saved as standard PDF annotations (ISO 32000-1), making them immediately visible and editable in external viewers like Microsoft Edge, Acrobat, or tablet PDF apps, while seamlessly importing annotations created outside Lapis.
 
 > ### 📖 [Read the complete User Guide →](docs/USER_GUIDE.md)
 > Viewing modes, annotation tools, Markdown & LaTeX notes, the audio workspace, offline transcription, flashcards, search, settings and export, all explained step by step.
@@ -305,6 +306,8 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 
 ## Where your work is stored
 
+- **Hybrid PDF & standard annotation storage:** While you work, periodic autosaves update a fast **local backup** without bloating the PDF file. When you explicitly save (`Ctrl + S`), switch documents, or close the app, Lapis commits a single **PDF Incremental Update** containing both standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText` with appearance streams for external viewers) and Lapis's own metadata stream (notes, sketches, flashcards, and custom properties).
+- **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open, without truncating external PDF revisions.
 - **Notes and annotations live inside the PDF**, in a small JSON block appended after the final `%%EOF`. Other PDF readers ignore it, so the file stays a valid PDF and your work travels with it.
 - A **local backup** of the same data is written first on every save (it survives a PDF that is locked or read-only).
 - Every document has a random **document ID** stored in that block. Local data (note backup, audio folder, original-PDF copy) is keyed by the ID rather than by the file path, so moving or renaming a PDF, or opening it on another computer, keeps everything connected. A copy of a file made on the same computer gets its own ID.
@@ -327,6 +330,18 @@ Exporting does not re-draw the document. The original PDF is opened, pages witho
 - On Linux, clipboard images can also be read through `wl-paste` / `xclip` as a fallback; on Windows the clipboard goes through `arboard`.
 - Helper processes (ffmpeg) are started without a console window on Windows.
 - A per-document OS lock prevents two Lapis processes from opening the same PDF at once.
+
+### Hybrid PDF annotation persistence
+
+Lapis separates its editable document state from the PDF's native annotation objects. While a document is open, periodic autosaves write the current notes, custom annotations, sketches, and related page data to Lapis's local backup. These background autosaves do **not** append revisions to the PDF. The PDF is committed on an explicit Save action, when switching documents, and when the application exits.
+
+At commit time, Lapis writes a PDF incremental update rather than rewriting the original file. Supported Lapis annotations are exported as standard PDF annotations; imported and exported annotation geometry is converted between PDF page coordinates and Lapis page coordinates. The import path supports PDF `/Ink`, `/Highlight`, `/FreeText`, and `/Text` annotations. Exported Lapis annotations carry `/LapisExported`, `/LapisKind`, and `/LapisSig` entries so they can be recognized and, where their signature changes, synchronized after edits in another PDF viewer.
+
+Exported FreeText annotations include a normal appearance (`/AP`) Form XObject so viewers that rely on annotation appearances can display their text immediately. The appearance uses Helvetica with `WinAnsiEncoding`, including octal escapes for common Latin-1 accented characters. MuPDF page rasterization does not paint PDF annotations into the page image; Lapis renders its own annotation layer to avoid duplicate appearances.
+
+Lapis metadata is delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END` and stored as uncompressed bytes in a PDF stream object added to the incremental document. This keeps the metadata searchable by Lapis without placing a large block between `startxref` and `%%EOF`. A short `%LAPIS_INC_EOF` marker identifies the base length for a Lapis-created revision. Cleanup only rolls back a revision when that marker identifies the immediately trailing Lapis update; later external PDF revisions are intended to remain intact. Existing legacy trailing metadata markers remain readable for migration.
+
+For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a full-file read if the metadata is not found there.
 
 ## Development
 

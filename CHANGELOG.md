@@ -1,8 +1,33 @@
 # Changelog
-
 All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- **Standard PDF annotation interoperability (Import & Export):**
+    - **Visible in external viewers:** On save or exit, Lapis exports freehand strokes, shapes, highlights, and text boxes as standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText`) inside a single PDF incremental update. Your markup is now natively visible in other PDF readers/editors without needing a separate export.
+    - **Import from external readers:** Annotations created in external PDF viewers (`/Ink`, `/Highlight`, `/FreeText`, `/Text`) are automatically imported into Lapis's vector layer when opening the document, handling page rotations and coordinate conversions.
+    - **Two-way edit sync:** Exported Lapis annotations embed a lightweight content signature (`/LapisSig` and `/LapisKind`). If you move, resize, or edit a Lapis text box or annotation in an external editor, Lapis detects the change on reopen and updates the local annotation accordingly.
+    - **Immediate FreeText rendering (`/AP` streams):** Exported text boxes include a standard PDF Form XObject appearance stream with `WinAnsiEncoding` (supporting Latin-1 accented characters), ensuring text is immediately visible.
+
+### Changed
+
+- **Zero-bloat hybrid persistence:** Periodic background autosaves now write exclusively to the local backup (`~/.local/share/lapis` / `%LOCALAPPDATA%\lapis`), keeping editing instantaneous and preventing the PDF file from growing on every stroke. The PDF file itself is updated in a single atomic commit on explicit Save (`Ctrl + S`), document switch, or application exit. When committing to a PDF whose last revision was already written by Lapis, Lapis replaces its own previous trailing incremental update instead of stacking new revisions on every session.
+- **Stream-based metadata & fast ID lookup:** Lapis's portable metadata block (`%LAPIS_CUSTOM_START` ... `%LAPIS_CUSTOM_END`) is now stored inside an uncompressed PDF stream object rather than as raw bytes after `%%EOF`, keeping `startxref` and `%%EOF` at the physical end of the file. Document ID lookup scans the last 16 MiB first and falls back to a full read only when needed.
+
+### Fixed
+
+- **External PDF annotations no longer overwritten:** Lapis no longer truncates bytes after the first `%%EOF` marker. Incremental updates appended by external software (such as Microsoft Edge) are preserved intact across saves.
+
+
+### Compatibility and upgrade notes
+
+- **Automatic migration of existing documents (Backward Compatibility):** PDFs annotated with Lapis 1.3.0 and earlier (using the legacy `---Lapis_NOTES_V1---` trailer after `%%EOF`) are recognized and migrated automatically the first time they are opened and saved in 1.4.0. No manual action is required.
+- **Opening 1.4.0 files in older Lapis versions (Forward Compatibility):** Because 1.4.0 stores portable metadata inside a standard PDF stream using the new `%LAPIS_CUSTOM_START` delimiters, Lapis 1.3.0 and earlier will not read the new embedded metadata block from the PDF (though standard PDF annotations will still be visible if rendered). Please update Lapis to 1.4.0 across all your machines.
+- **Deletion safety net:** Deleting a Lapis-created annotation inside an external viewer (e.g. Microsoft Edge) does not delete it from Lapis's local backup on reopen, protecting study-specific items (such as Occlusion Tapes and custom shapes) from accidental external removal. To permanently delete a Lapis annotation, remove it inside Lapis.
 
 ## [1.3.0] - 2026/11/08 
 

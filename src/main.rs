@@ -785,7 +785,7 @@ fn render_to_image(
             &Matrix::new_scale(scale, scale),
             &Colorspace::device_rgb(),
             false,
-            false,
+            false, // show_extras=false: do not paint PDF annotation appearances; Lapis draws its own layer.
         )
         .ok()?;
     let size = [pix.width() as usize, pix.height() as usize];
@@ -1196,6 +1196,8 @@ struct Lapis {
     current_note: String,
     notes: HashMap<u32, String>,
     note_is_dirty: bool,
+    /// Last successful local checkpoint; detects edits from every UI tool, not just notes.
+    last_local_checkpoint_hash: Option<u64>,
     pdf_path: PathBuf,
     pdf_name: String,
     texture_handle: Option<egui::TextureHandle>,
@@ -1393,6 +1395,7 @@ impl Lapis {
             current_note: String::new(),
             notes: HashMap::new(),
             note_is_dirty: false,
+            last_local_checkpoint_hash: None,
             pdf_path: PathBuf::new(),
             pdf_name: String::new(),
             texture_handle: None,
@@ -1600,6 +1603,9 @@ impl Lapis {
         }
 
         self.current_page = page;
+        // Reading position belongs to state.json, not to the PDF's annotation payload.
+        // Persist it on navigation, including when no notes were edited.
+        self.save_session_state();
         if !self.audio_engine.is_recording()
             && !self.audio_engine.is_playing()
             && !self.is_transcribing
@@ -1888,25 +1894,50 @@ impl Lapis {
         }
     }
 
-    fn sync_and_save(&mut self) {
-        if !self.has_pdf() {
-            return;
-        }
+    /// Compute a content-only fingerprint every UI frame. This catches edits made by any
+    /// annotation/sketch action, undo/redo, cut/paste or note control even if that action
+    /// did not explicitly call save_doc_data. The PDF itself is never written here.
+    fn local_checkpoint_hash(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let bytes = serde_json::to_vec(&(
+            &self.notes, &self.annotations, &self.blank_pages, &self.sketches,
+            self.note_page, &self.current_note,
+        )).ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(hasher.finish())
+    }
 
+    fn sync_and_save(&mut self) {
+        if !self.has_pdf() { return; }
         if self.current_note.trim().is_empty() {
             self.notes.remove(&self.note_page);
         } else {
             self.notes.insert(self.note_page, self.current_note.clone());
         }
+        match notes::save_doc_data(
+            &self.pdf_path, &self.notes, &self.annotations,
+            self.blank_pages.clone(), &self.sketches,
+        ) {
+            Ok(()) => {
+                self.note_is_dirty = false;
+                self.last_local_checkpoint_hash = self.local_checkpoint_hash();
+            }
+            Err(err) => eprintln!("Lapis: failed to checkpoint document locally: {err}"),
+        }
+    }
 
-        let _ = notes::save_doc_data(
-            &self.pdf_path,
-            &self.notes,
-            &self.annotations,
-            self.blank_pages.clone(),
-            &self.sketches,
-        );
-        self.note_is_dirty = false;
+    /// Explicit Save and graceful document transitions commit the PDF; background
+    /// editing and per-frame local checkpoints never call this method.
+    fn save_pdf_explicitly(&mut self) -> std::io::Result<()> {
+        if !self.has_pdf() { return Ok(()); }
+        self.finish_sketch_edit();
+        self.sync_and_save();
+        self.save_session_state();
+        notes::commit_doc_data(
+            &self.pdf_path, &self.notes, &self.annotations,
+            self.blank_pages.clone(), &self.sketches,
+        )
     }
 
     /// Persist notes, annotations and sketches (after a change made in the Sketch tab).
@@ -2839,6 +2870,15 @@ impl Lapis {
 
         if self.has_pdf() {
             self.sync_and_save();
+            if let Err(err) = notes::commit_doc_data(
+                &self.pdf_path, &self.notes, &self.annotations,
+                self.blank_pages.clone(), &self.sketches,
+            ) {
+                self.toast_message = Some((
+                    format!("Could not commit PDF annotations: {err}"),
+                    std::time::Instant::now(),
+                ));
+            }
             self.save_session_state();
         }
         if let Some(l) = new_lock {
@@ -2941,6 +2981,7 @@ impl Lapis {
         self.last_page_req = None;
         self.last_thumb_req = None;
         self.visible_pages = (0, 0);
+        self.last_local_checkpoint_hash = None;
         self.pdf_path = path.clone();
         self.pdf_name = name;
         self.total_pages = total_pages;
@@ -2966,8 +3007,14 @@ impl Lapis {
         self.render_tx = page_tx;
         self.thumb_tx = thumb_tx;
         self.render_rx = res_rx;
-        self.continuous_anchor_page = 1;
+        // Do not reset a restored continuous-view session to page one.
+        self.continuous_anchor_page = start_page;
         self.continuous_anchor_frac = 0.0;
+        self.continuous_scroll_to_page = if self.view_mode == ViewMode::Continuous {
+            Some(start_page)
+        } else {
+            None
+        };
         self.continuous_prev_layout = (0.0, 0.0, 0.0);
         self.jump_lock_y = None;
         self.flashcards_deck.clear();
@@ -2995,6 +3042,15 @@ impl Lapis {
         }
         self.finish_sketch_edit();
         self.sync_and_save();
+        if let Err(err) = notes::commit_doc_data(
+            &self.pdf_path, &self.notes, &self.annotations,
+            self.blank_pages.clone(), &self.sketches,
+        ) {
+            self.toast_message = Some((
+                format!("Could not commit PDF annotations: {err}"),
+                std::time::Instant::now(),
+            ));
+        }
         self.save_session_state();
 
         // Release the per-document lock, otherwise the file stays marked as open
@@ -5793,6 +5849,30 @@ impl Lapis {
                                                         ui.label(egui::RichText::new("Stored Data & Cleanup").size(15.0).strong());
                                                         ui.add_space(4.0);
                                                         ui.weak("Notes, audio and original-PDF copies per document, largest first.");
+                                                        ui.add_space(8.0);
+                                                        ui.separator();
+                                                        ui.label(egui::RichText::new("PDF revision history").strong());
+                                                        ui.weak("Rebuild the current PDF to remove historical Lapis incremental updates. Keeps a copy of the original alongside the PDF. Signed and encrypted PDFs are not supported.");
+                                                        if ui.add_enabled(self.has_pdf(), egui::Button::new("󰐻  Compact Lapis PDF history..."))
+                                                            .on_hover_text("Compact the current PDF (may rewrite external PDF revision history)")
+                                                            .clicked()
+                                                        {
+                                                            self.finish_sketch_edit();
+                                                            self.sync_and_save();
+                                                            self.save_session_state();
+                                                            let result = notes::compact_doc_data(
+                                                                &self.pdf_path, &self.notes, &self.annotations,
+                                                                self.blank_pages.clone(), &self.sketches,
+                                                            );
+                                                            self.toast_message = Some((
+                                                                match result {
+                                                                    Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
+                                                                    Err(err) => format!("PDF compaction failed: {err}"),
+                                                                },
+                                                                std::time::Instant::now(),
+                                                            ));
+                                                        }
+                                                        ui.separator();
                                                         ui.add_space(8.0);
                                                     
                                                         let total: u64 = entries.iter().map(|e| e.total()).sum();
@@ -12868,8 +12948,19 @@ impl Lapis {
 
                                 if trigger_save {
                                     self.sync_and_save();
-                                    self.toast_message =
-                                        Some(("󰄬 Saved".to_string(), std::time::Instant::now()));
+                                    let commit_result = if self.has_pdf() {
+                                        notes::commit_doc_data(
+                                            &self.pdf_path, &self.notes, &self.annotations,
+                                            self.blank_pages.clone(), &self.sketches,
+                                        )
+                                    } else { Ok(()) };
+                                    self.toast_message = Some((
+                                        match commit_result {
+                                            Ok(()) => "󰄬 Saved".to_string(),
+                                            Err(err) => format!("PDF save failed: {err}"),
+                                        },
+                                        std::time::Instant::now(),
+                                    ));
                                 }
                             }
 
@@ -13578,7 +13669,16 @@ impl Lapis {
 
 impl eframe::App for Lapis {
     fn on_exit(&mut self) {
+        self.finish_sketch_edit();
         self.sync_and_save();
+        if self.has_pdf() {
+            if let Err(err) = notes::commit_doc_data(
+                &self.pdf_path, &self.notes, &self.annotations,
+                self.blank_pages.clone(), &self.sketches,
+            ) {
+                eprintln!("Lapis: failed to commit PDF annotations on exit: {err}");
+            }
+        }
         self.save_session_state();
     }
 
@@ -14027,8 +14127,14 @@ impl eframe::App for Lapis {
         }
 
         if act_save {
-            self.sync_and_save();
-            self.toast_message = Some(("󰄬 Saved".to_string(), std::time::Instant::now()));
+            let result = self.save_pdf_explicitly();
+            self.toast_message = Some((
+                match result {
+                    Ok(()) => "󰄬 Saved".to_string(),
+                    Err(err) => format!("PDF save failed: {err}"),
+                },
+                std::time::Instant::now(),
+            ));
         }
         if act_toggle_toc {
             self.show_toc = !self.show_toc;
@@ -14617,12 +14723,15 @@ impl eframe::App for Lapis {
                                     }
 
                                     if menu_item(ui, "󰆓  Save Notes", true)
-                                        .on_hover_text("Save notes on disk")
+                                        .on_hover_text("Checkpoint locally and commit the PDF")
                                         .clicked()
                                     {
-                                        self.sync_and_save();
+                                        let result = self.save_pdf_explicitly();
                                         self.toast_message = Some((
-                                            "󰄬 Saved".to_string(),
+                                            match result {
+                                                Ok(()) => "󰄬 Saved".to_string(),
+                                                Err(err) => format!("PDF save failed: {err}"),
+                                            },
                                             std::time::Instant::now(),
                                         ));
                                         close_requested = true;
@@ -16905,6 +17014,7 @@ impl eframe::App for Lapis {
                 self.sync_and_save();
                 self.current_page = vis_p;
                 self.target_page = vis_p;
+                self.save_session_state();
                 if !self.lock_note_page {
                     self.note_page = vis_p;
                     self.current_note = self.notes.get(&vis_p).cloned().unwrap_or_default();
@@ -17007,6 +17117,7 @@ impl eframe::App for Lapis {
                                         self.sync_and_save();
                                         self.current_page = p;
                                         self.target_page = p;
+                                        self.save_session_state();
                                         if !self.lock_note_page {
                                             self.note_page = p;
                                             self.current_note =
@@ -17295,6 +17406,14 @@ impl eframe::App for Lapis {
 
         if self.radial_menu_pos.is_some() && self.has_pdf() {
             self.render_radial_tools_menu(ui);
+        }
+        // End-of-frame local-only checkpoint. A SIGKILL/pkill -9 cannot invoke
+        // on_exit, so the most recent completed UI action must already be on disk.
+        if self.has_pdf() {
+            let snapshot = self.local_checkpoint_hash();
+            if snapshot.is_some() && snapshot != self.last_local_checkpoint_hash {
+                self.sync_and_save();
+            }
         }
     }
 }
