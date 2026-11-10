@@ -192,25 +192,20 @@ impl SpellChecker {
         self.dictionaries.is_empty() || self.dictionaries.iter().any(|dict| dict.check(word))
     }
 
-    /// Suggestions retain the origin language for presentation in the context menu.
+    /// Collect candidates from every enabled language before ranking. Hunspell's own
+    /// order is useful within one dictionary, but must not give the first loaded
+    /// language priority over suggestions from other languages.
     pub fn suggest_with_languages(&self, misspelled: &str, max_suggestions: usize) -> Vec<(String, String)> {
-        let mut suggestions: Vec<(String, String)> = Vec::new();
         if max_suggestions == 0 {
-            return suggestions;
+            return Vec::new();
         }
+        let mut candidates = Vec::new();
         for (dict, code) in self.dictionaries.iter().zip(&self.dictionary_codes) {
             let mut local = Vec::new();
             dict.suggest(misspelled, &mut local);
-            for suggestion in local {
-                if !suggestions.iter().any(|(s, _)| s.eq_ignore_ascii_case(&suggestion)) {
-                    suggestions.push((suggestion, code.clone()));
-                    if suggestions.len() >= max_suggestions {
-                        return suggestions;
-                    }
-                }
-            }
+            candidates.extend(local.into_iter().map(|word| (word, code.clone())));
         }
-        suggestions
+        rank_suggestions(misspelled, candidates, max_suggestions)
     }
 
     pub fn suggest(&self, misspelled: &str, max_suggestions: usize) -> Vec<String> {
@@ -290,4 +285,143 @@ pub fn replace_char_range(text: &mut String, start: usize, end: usize, with: &st
 fn language_code(stem: &str) -> String {
     let code = stem.split(['_', '-']).next().unwrap_or(stem);
     code.chars().take(2).collect::<String>().to_uppercase()
+}
+
+/// Rank across languages using the same case-insensitive spelling distance.
+/// An adjacent transposition counts as one edit (e.g. "teh" -> "the").
+fn spelling_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.to_lowercase().chars().collect();
+    let b: Vec<char> = b.to_lowercase().chars().collect();
+    let mut distances = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in distances.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=b.len() {
+        distances[0][j] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (distances[i - 1][j] + 1)
+                .min(distances[i][j - 1] + 1)
+                .min(distances[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(distances[i - 2][j - 2] + 1);
+            }
+            distances[i][j] = best;
+        }
+    }
+    distances[a.len()][b.len()]
+}
+
+fn rank_suggestions(
+    misspelled: &str,
+    candidates: Vec<(String, String)>,
+    limit: usize,
+) -> Vec<(String, String)> {
+    use std::collections::BTreeMap;
+
+    // Keep one entry per case-insensitive spelling, regardless of dictionary.
+    let mut unique = BTreeMap::new();
+    for (word, language) in candidates {
+        unique.entry(word.to_lowercase()).or_insert((word, language));
+    }
+    let target_len = misspelled.chars().count();
+    let source_spaces = misspelled.chars().filter(|c| c.is_whitespace()).count();
+    let mut ranked: Vec<_> = unique.into_iter().map(|(key, (word, language))| {
+        // Hunspell can propose two valid words separated by a space. That is useful,
+        // but a simple letter correction should rank ahead of splitting one word.
+        // Charge two extra edits for each new word boundary, including hyphens.
+        // Existing hyphens are not penalized when correcting hyphenated words.
+        let added_spaces = word.chars().filter(|c| c.is_whitespace()).count()
+            .saturating_sub(source_spaces);
+        let added_hyphens = word.chars().filter(|&c| c == '-').count()
+            .saturating_sub(misspelled.chars().filter(|&c| c == '-').count());
+        let distance = spelling_distance(misspelled, &word)
+            + 2 * (added_spaces + added_hyphens);
+        let length_delta = target_len.abs_diff(word.chars().count());
+        (distance, length_delta, key, word, language)
+    }).collect();
+    // Alphabetical tie-breaking is independent of dictionary load order.
+    ranked.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    ranked.into_iter().take(limit).map(|(_, _, _, word, language)| (word, language)).collect()
+}
+
+#[cfg(test)]
+mod suggestion_ranking_tests {
+    use super::{rank_suggestions, spelling_distance};
+
+    #[test]
+    fn transpositions_and_case_are_handled() {
+        assert_eq!(spelling_distance("teh", "The"), 1);
+        assert_eq!(spelling_distance("ciaoo", "ciao"), 1);
+        assert_eq!(spelling_distance("casa", "CASA"), 0);
+    }
+
+    #[test]
+    fn best_candidates_win_regardless_of_dictionary_order() {
+        let candidates = vec![
+            ("castle".into(), "EN".into()),
+            ("costume".into(), "EN".into()),
+            ("cattle".into(), "EN".into()),
+            ("canister".into(), "EN".into()),
+            ("casual".into(), "EN".into()),
+            ("casa".into(), "IT".into()),
+        ];
+        let first = rank_suggestions("casa", candidates.clone(), 5);
+        let mut reversed = candidates;
+        reversed.reverse();
+        assert_eq!(first, rank_suggestions("casa", reversed, 5));
+        assert_eq!(first[0], ("casa".into(), "IT".into()));
+    }
+
+    #[test]
+    fn simple_edits_beat_splits_but_splits_remain_available() {
+        let candidates = vec![
+            ("in the".into(), "EN".into()),
+            ("int he".into(), "EN".into()),
+            ("intoe".into(), "EN".into()),
+            ("into".into(), "EN".into()),
+        ];
+        let ranked = rank_suggestions("inthe", candidates, 4);
+        assert_eq!(ranked[0].0, "intoe");
+        assert!(ranked.iter().any(|(word, _)| word == "in the"));
+        assert!(ranked.iter().position(|(word, _)| word == "intoe")
+            < ranked.iter().position(|(word, _)| word == "in the"));
+    }
+
+    #[test]
+    fn simple_edits_beat_new_hyphens_but_hyphenated_suggestions_remain() {
+        let candidates = vec![
+            ("in-the".into(), "EN".into()),
+            ("intoe".into(), "EN".into()),
+            ("into".into(), "EN".into()),
+        ];
+        let ranked = rank_suggestions("inthe", candidates, 3);
+        assert_eq!(ranked[0].0, "intoe");
+        assert!(ranked.iter().any(|(word, _)| word == "in-the"));
+        assert!(ranked.iter().position(|(word, _)| word == "intoe")
+            < ranked.iter().position(|(word, _)| word == "in-the"));
+    }
+
+    #[test]
+    fn existing_hyphen_is_not_penalized() {
+        let ranked = rank_suggestions("re-enter", vec![
+            ("re-enter".into(), "EN".into()),
+            ("reenter".into(), "EN".into()),
+        ], 2);
+        assert_eq!(ranked[0].0, "re-enter");
+    }
+
+    #[test]
+    fn duplicates_and_limit() {
+        let candidates = vec![
+            ("ciao".into(), "IT".into()),
+            ("CIAO".into(), "EN".into()),
+            ("cia".into(), "IT".into()),
+        ];
+        let results = rank_suggestions("ciao", candidates, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.to_lowercase(), "ciao");
+    }
 }
