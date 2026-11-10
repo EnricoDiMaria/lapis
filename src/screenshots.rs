@@ -164,31 +164,31 @@ pub fn clipboard_has_image() -> bool {
         .map_or(false, |mut cb| cb.get_image().is_ok())
 }
 
-/*
 #[cfg(target_os = "linux")]
 pub fn clipboard_has_image() -> bool {
+    if arboard::Clipboard::new()
+        .ok()
+        .is_some_and(|mut cb| cb.get_image().is_ok())
+    {
+        return true;
+    }
+    // Query advertised MIME types rather than reading/decompressing an image.
     let attempts: [(&str, &[&str]); 2] = [
         ("wl-paste", &["--list-types"]),
         ("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]),
     ];
-    for (cmd, args) in attempts {
-        if let Ok(out) = Command::new(cmd)
-            .args(args)
+    attempts.iter().any(|(cmd, args)| {
+        Command::new(cmd)
+            .args(*args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-        {
-            if out.status.success() {
-                let types = String::from_utf8_lossy(&out.stdout);
-                if types.lines().any(|l| l.trim().starts_with("image/")) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+            .ok()
+            .filter(|out| out.status.success())
+            .is_some_and(|out| String::from_utf8_lossy(&out.stdout)
+                .lines().any(|line| line.trim().starts_with("image/")))
+    })
 }
- */
 
 pub fn is_image_placeholder(text: &str) -> bool {
     let t = text.trim();

@@ -1311,6 +1311,7 @@ struct Lapis {
     toast_message: Option<(String, std::time::Instant)>,
     clipboard: SystemClipboard,
     paste_handled_on_press: bool,
+    radial_clipboard_image_available: bool,
     theme: SuiteTheme,
     dialogs: Dialogs,
     pending_delete_page: Option<u32>,
@@ -1512,6 +1513,7 @@ impl Lapis {
             toast_message: None,
             clipboard: SystemClipboard::new(),
             paste_handled_on_press: false,
+            radial_clipboard_image_available: false,
             theme,
             dialogs: Dialogs::default(),
             pending_delete_page: None,
@@ -4550,7 +4552,21 @@ impl Lapis {
             )
         };
 
-        if self.app_state.settings.radial_menu_enabled && img_resp.secondary_clicked() {
+        // A PDF text selection owns right-click; never open the radial tool menu over it.
+        let selected_pdf_text = self.selection_text();
+        if selected_pdf_text.is_some() {
+            self.radial_menu_pos = None;
+            let glass_style = self.menu_glass().modifier();
+            egui::Popup::context_menu(img_resp).style(glass_style).show(|ui| {
+                if ui.button("󰆏  Copy").clicked() {
+                    if let Some(text) = &selected_pdf_text {
+                        self.clipboard.set_text(text);
+                    }
+                    ui.close();
+                }
+            });
+        } else if self.app_state.settings.radial_menu_enabled && img_resp.secondary_clicked() {
+            self.radial_clipboard_image_available = screenshots::clipboard_has_image();
             self.radial_menu_pos = ui.input(|i| i.pointer.hover_pos());
         }
 
@@ -10904,7 +10920,9 @@ impl Lapis {
                 painter.circle_stroke(c, 52.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
 
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
-                let clicked = bg_resp.clicked();
+                let left_clicked = bg_resp.clicked_by(egui::PointerButton::Primary);
+                let right_clicked = bg_resp.clicked_by(egui::PointerButton::Secondary);
+                let clicked = left_clicked || right_clicked;
                 let mut label_hover: Option<String> = None;
 
                 // Central hub: Undo
@@ -10990,7 +11008,7 @@ impl Lapis {
                         if clicked && is_hov {
                             self.shape_kind = *sk;
                             self.annotation_tool = AnnotationTool::Shape;
-                            close_menu = true;
+                            close_menu = left_clicked;
                         }
                     }
                 } else {
@@ -11016,7 +11034,7 @@ impl Lapis {
                         }
                         if clicked && is_hov {
                             self.annotation_color = col;
-                            close_menu = true;
+                            close_menu = left_clicked;
                         }
                     }
                 }
@@ -11094,10 +11112,34 @@ impl Lapis {
                     if clicked && is_hov {
                         self.annotation_tool = tool;
                         if tool == AnnotationTool::Shape {
-                            // First click opens the shape picker and keeps the menu open.
+                            // Shape picker stays open so its shape can be chosen next.
                             ui.data_mut(|d| d.insert_temp(pick_id, raw_center));
                         } else {
-                            close_menu = true;
+                            close_menu = left_clicked;
+                        }
+                    }
+                }
+
+                // A small satellite action, not another annotation tool.
+                // Only display it if an image was available when the menu opened.
+                if self.radial_clipboard_image_available {
+                    let paste_pos = c + egui::vec2(79.0, -75.0);
+                    let paste_hovered = hover_pos.map(|p| p.distance(paste_pos) <= 12.0).unwrap_or(false);
+                    painter.circle_filled(
+                        paste_pos, 12.0,
+                        if paste_hovered { rgb(self.theme.bg_active) } else { rgb(self.theme.bg_elevated) },
+                    );
+                    painter.circle_stroke(paste_pos, 12.0, egui::Stroke::new(1.2, rgb(self.theme.accent)));
+                    painter.text(
+                        paste_pos, egui::Align2::CENTER_CENTER, "󰆒",
+                        egui::FontId::proportional(12.0), rgb(self.theme.fg_primary),
+                    );
+                    if paste_hovered {
+                        label_hover = Some("Paste image".to_string());
+                        if clicked {
+                            let (page, center) = self.page_at_pos(Some(raw_center));
+                            self.shots.request_clipboard(ui.ctx(), ShotTarget::Pdf { page, center });
+                            close_menu = left_clicked;
                         }
                     }
                 }
@@ -11142,7 +11184,7 @@ impl Lapis {
             }
         });
         if let Some(p) = press_pos
-            && p.distance(center) > 106.0
+            && p.distance(center) > if self.radial_clipboard_image_available { 122.0 } else { 106.0 }
         {
             close_menu = true;
         }
@@ -13480,6 +13522,21 @@ impl Lapis {
                                     ui.fonts_mut(|f| f.layout_job(job))
                                 };
 
+                            // Right-click can collapse TextEdit's range during `show`.
+                            // Snapshot the persisted range BEFORE the widget processes the click.
+                            let selection_id = ui.make_persistent_id("note_context_selection");
+                            let right_press = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+                            let selection_before_click = if right_press {
+                                egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                    .and_then(|st| st.cursor.char_range())
+                                    .map(|range| (
+                                        usize::from(range.primary.index.min(range.secondary.index)),
+                                        usize::from(range.primary.index.max(range.secondary.index)),
+                                    ))
+                            } else {
+                                None
+                            };
+
                             let text_edit = egui::TextEdit::multiline(&mut self.current_note)
                                 .id(text_edit_id)
                                 .desired_width(editor_width)
@@ -13492,6 +13549,12 @@ impl Lapis {
                                 .hint_text("Write your Markdown & $LaTeX$ notes here...");
 
                             let output = text_edit.show(ui);
+                            if right_press && output.response.hovered() {
+                                // Store on mouse *press*: `secondary_clicked` fires on release,
+                                // after TextEdit may already have collapsed its selection.
+                                let range = selection_before_click.unwrap_or((0, 0));
+                                ui.data_mut(|d| d.insert_temp(selection_id, range));
+                            }
 
                             // Bring the current search hit into view.
                             if self.search_note_scroll {
@@ -13553,6 +13616,17 @@ impl Lapis {
                             }
 
                             let ctx_id = ui.make_persistent_id("spell_ctx_word");
+                            // The response's cursor range may already be collapsed by the
+                            // secondary click, so prefer the pre-widget snapshot. A collapsed
+                            // range also records the insertion point for Paste.
+                            if output.response.secondary_clicked() {
+                                // Retain the range captured on mouse-down. Do not substitute
+                                // `output.cursor_range`, which reflects the collapsed selection.
+                                if ui.data(|d| d.get_temp::<(usize, usize)>(selection_id)).is_none() {
+                                    let range = selection_before_click.unwrap_or((0, 0));
+                                    ui.data_mut(|d| d.insert_temp(selection_id, range));
+                                }
+                            }
 
                             if output.response.secondary_clicked() {
                                 let picked: Option<(usize, usize, String)> = ui
@@ -13586,11 +13660,35 @@ impl Lapis {
                             let ctx_word: Option<(usize, usize, String)> =
                                 ui.data(|d| d.get_temp(ctx_id));
                             let mut spell_action: Option<SpellAction> = None;
+                            let mut context_clipboard: Option<&'static str> = None;
+                            let (selection_start, selection_end) = ui.data(|d| {
+                                d.get_temp::<(usize, usize)>(selection_id).unwrap_or((0, 0))
+                            });
+                            let has_selection = selection_end > selection_start;
+                            let clipboard_menu = |ui: &mut egui::Ui, action: &mut Option<&'static str>| {
+                                if has_selection {
+                                    if ui.button("󰆏  Copy").clicked() {
+                                        *action = Some("copy");
+                                        ui.close();
+                                    }
+                                    if ui.button("󰆴  Cut").clicked() {
+                                        *action = Some("cut");
+                                        ui.close();
+                                    }
+                                }
+                                
+                                if ui.button("󰆒  Paste").clicked() {
+                                    *action = Some("paste");
+                                    ui.close();
+                                }
+                            };
 
                             if let Some((_, _, word)) = &ctx_word {
                                 let glass_style = self.menu_glass().modifier();
                                 egui::Popup::context_menu(&output.response).style(glass_style).show(|ui| {
                                     ui.set_min_width(170.0);
+                                    clipboard_menu(ui, &mut context_clipboard);
+                                    ui.separator();
                                     ui.label(
                                         egui::RichText::new(format!("“{}”", word))
                                             .weak()
@@ -13632,6 +13730,46 @@ impl Lapis {
                                         ui.close();
                                     }
                                 });
+                            }
+
+                            if ctx_word.is_none() {
+                                let glass_style = self.menu_glass().modifier();
+                                egui::Popup::context_menu(&output.response).style(glass_style).show(|ui| {
+                                    ui.set_min_width(150.0);
+                                    clipboard_menu(ui, &mut context_clipboard);
+                                });
+                            }
+
+                            if let Some(action) = context_clipboard {
+                                let mut state = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                    .unwrap_or_default();
+                                let len = self.current_note.chars().count();
+                                let start = selection_start.min(len);
+                                let end = selection_end.min(len).max(start);
+                                {
+                                    let selected: String = self.current_note.chars().skip(start).take(end - start).collect();
+                                    if (action == "copy" || action == "cut") && !selected.is_empty() {
+                                        self.clipboard.set_text(&selected);
+                                    }
+                                    let replacement = match action {
+                                        "paste" => self.clipboard.get_text()
+                                            .filter(|text| !screenshots::is_image_placeholder(text)),
+                                        "cut" if start < end => Some(String::new()),
+                                        _ => None,
+                                    };
+                                    if let Some(replacement) = replacement {
+                                        replace_char_range(&mut self.current_note, start, end, &replacement);
+                                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                            egui::text::CCursor::new(start + replacement.chars().count()),
+                                        )));
+                                        state.store(ui.ctx(), text_edit_id);
+                                        self.note_is_dirty = true;
+                                        self.sync_and_save();
+                                    }
+                                }
+                                ui.data_mut(|d| d.remove::<(usize, usize)>(selection_id));
+                                ui.ctx().memory_mut(|m| m.request_focus(text_edit_id));
+                                ui.ctx().request_repaint();
                             }
 
                             if let (Some(act), Some((s, e, word))) = (spell_action, ctx_word) {
@@ -13692,6 +13830,10 @@ impl Lapis {
                                 // width so they do not retain a wider layout while resizing.
                                 let preview_width = ui.available_width().max(1.0);
                                 ui.take_available_width();
+                                let preview_context_press = ui.input(|i| {
+                                    i.pointer.button_pressed(egui::PointerButton::Secondary)
+                                        && i.pointer.hover_pos().is_some_and(|p| ui.clip_rect().contains(p))
+                                });
                                 ui.scope(|ui| {
                                     let style = ui.style_mut();
                                     style.visuals.override_text_color = None;
@@ -13722,11 +13864,34 @@ impl Lapis {
                                         notes::preprocess_definitions(&self.current_note);
                                     let rendered_md = notes::preprocess_markdown_view(&pre_defs);
 
+                                    // Capture the label selection on secondary press, before
+                                    // clicking the popup (a primary click clears label selection).
+                                    // The result is cached until the user chooses Copy.
+                                    if preview_context_press {
+                                        ui.input_mut(|i| i.events.push(egui::Event::Copy));
+                                    }
+
                                     egui_commonmark::CommonMarkViewer::new()
                                         .max_image_width(Some(preview_width.ceil() as usize))
                                         .show(ui, &mut self.commonmark_cache, &rendered_md);
 
                                     ui.add_space(28.0);
+                                });
+                                // CommonMark uses selectable labels; egui owns their selection.
+                                // The menu's Copy command delegates to egui's native text-selection action.
+                                let preview_response = ui.interact(
+                                    ui.min_rect(), ui.scope_id().with("notes_preview_context"), egui::Sense::click());
+                                let glass_style = self.menu_glass().modifier();
+                                egui::Popup::context_menu(&preview_response).style(glass_style).show(|ui| {
+                                    if ui.button("󰆏  Copy").clicked() {
+                                        let selection_id = ui.make_persistent_id("lapis_preview_context_copied_text");
+                                        if let Some(selected) = ui.data(|d| d.get_temp::<String>(selection_id))
+                                            .or_else(|| self.clipboard.get_text())
+                                        {
+                                            self.clipboard.set_text(&selected);
+                                        }
+                                        ui.close();
+                                    }
                                 });
 
                                 let copied_texts = ui.ctx().output_mut(|output| {
@@ -13742,8 +13907,20 @@ impl Lapis {
                                     copied
                                 });
 
-                                for text in copied_texts {
-                                    self.clipboard.set_text(&text);
+                                if preview_context_press {
+                                    let selected = copied_texts.join("\n");
+                                    let selection_id = ui.make_persistent_id("lapis_preview_context_copied_text");
+                                    ui.data_mut(|d| {
+                                        if selected.is_empty() {
+                                            d.remove::<String>(selection_id);
+                                        } else {
+                                            d.insert_temp(selection_id, selected);
+                                        }
+                                    });
+                                } else {
+                                    for text in copied_texts {
+                                        self.clipboard.set_text(&text);
+                                    }
                                 }
                             }
                         }

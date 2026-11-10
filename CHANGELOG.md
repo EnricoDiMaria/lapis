@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+* **Context menus and radial tools:** PDF text selection offers Copy; notes Edit offers Copy/Cut/Paste and Preview offers Copy. The radial menu includes Paste and supports right-click selections without closing.
+
 ### Added
 
 * **Standard PDF Annotation Interoperability (Import & Export):**
@@ -27,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **Unified glass UI:** The FILE, zoom, view-mode, overflow (`⋯`), bookmark, and right-click menus (page style, spelling, voice memos) now replace the default egui frame with a rounded, translucent glass style controlled by `MENU_GLASS_ALPHA`.
 
 ### Fixed
+
+* **Notes context-menu selection:** Preserve the editor range before right-click handling and cache Preview label selections for explicit clipboard Copy.
+* **Context menu fixes:** Notes Edit preserves selection for working Copy/Cut, offers Paste without a selection, and Preview Copy writes to the system clipboard. Radial image paste appears as a small satellite only when image data is available.
+
 
 * **Preserved external PDF annotations:** Lapis no longer truncates bytes after the first `%%EOF`, preserving incremental updates appended by external viewers like Microsoft Edge.
 * **Eraser icon:** Now displays properly in the main PDF area.
