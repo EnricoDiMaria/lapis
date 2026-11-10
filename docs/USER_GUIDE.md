@@ -408,9 +408,13 @@ You can also add or remove custom words manually from that section.
 
 ### Additional dictionaries
 
-The Dictionaries settings section allows you to load additional dictionary files.
+The Dictionaries settings section lets you install full Hunspell dictionaries, including prefixes, suffixes, conjugated forms and inflections. Each language requires **both** a `.dic` word/flag file and its matching `.aff` rules file, with identical filenames before the extension (for example `it_IT.dic` and `it_IT.aff`).
 
-This is useful for technical vocabulary, scientific terminology, and languages not covered by the currently installed dictionaries.
+1. Download both files for the language you need. You can get them directly from the LibreOffice dictionary repositories: [Italian `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.aff); [French `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.aff); [German `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff). Keep each downloaded pair's original matching basenames.
+2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting either file in the pair.
+3. Lapis copies both files into its local dictionary directory. English and every installed language remain active at the same time: a word is accepted if any language recognizes it.
+
+A legacy `.txt` word list can still be loaded without affix rules. Dictionaries work offline after installation.
 
 Spellchecking can also be enabled or disabled through the application settings.
 

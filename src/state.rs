@@ -515,7 +515,7 @@ pub struct AppSettings {
     pub note_font_size: f32,
     /// Optional path to a user-loaded .ttf / .otf font file
     pub custom_font_path: Option<PathBuf>,
-    /// Extra dictionary files (.dic / .txt) loaded for spellcheck
+    /// Installed Hunspell dictionary pairs (stored by .aff path), or legacy .txt lists
     pub extra_dictionaries: Vec<PathBuf>,
     pub spellcheck_enabled: bool,
     pub slideshow_empty_mode: SlideshowEmptyMode,

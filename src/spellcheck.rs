@@ -44,7 +44,7 @@ pub fn write_user_words(words: &[String]) -> io::Result<()> {
 pub struct SpellChecker {
     pub enabled: bool,
     pub loaded_languages: Vec<String>,
-    dict: Option<spellbook::Dictionary>,
+    dictionaries: Vec<spellbook::Dictionary>,
 }
 
 impl SpellChecker {
@@ -52,7 +52,7 @@ impl SpellChecker {
         let mut checker = Self {
             enabled: true,
             loaded_languages: Vec::new(),
-            dict: None,
+            dictionaries: Vec::new(),
         };
 
         checker.load_default_english();
@@ -86,7 +86,7 @@ impl SpellChecker {
 
         match spellbook::Dictionary::new(aff, dic) {
             Ok(d) => {
-                self.dict = Some(d);
+                self.dictionaries.push(d);
                 self.loaded_languages.push("English (built-in)".to_string());
             }
             Err(e) => {
@@ -95,37 +95,48 @@ impl SpellChecker {
         }
     }
 
+    /// Load a full Hunspell .aff + .dic pair. A .dic may be selected in the file dialog;
+    /// a plain .txt user word list is retained for backward compatibility.
     pub fn load_dictionary_file(&mut self, path: &Path) -> Result<String, String> {
-        // Ci aspettiamo che `path` punti al file .aff; il .dic deve avere lo stesso nome base.
-        let aff_path = path;
-        let dic_path = path.with_extension("dic");
-        if !dic_path.exists() {
-            return Err(format!("File .dic non trovato: {:?}", dic_path));
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Custom").to_string();
+        if self.loaded_languages.contains(&name) {
+            return Ok(name);
         }
-        let aff = fs::read_to_string(aff_path).map_err(|e| e.to_string())?;
-        let dic = fs::read_to_string(&dic_path).map_err(|e| e.to_string())?;
-
-        match spellbook::Dictionary::new(&aff, &dic) {
-            Ok(d) => {
-                self.dict = Some(d);
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Custom")
-                    .to_string();
-                if !self.loaded_languages.contains(&name) {
-                    self.loaded_languages.push(name.clone());
-                }
-                Ok(name)
+        let (aff, dic) = if extension.eq_ignore_ascii_case("txt") {
+            let words = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let words: Vec<&str> = words.lines().map(str::trim)
+                .filter(|w| !w.is_empty() && !w.starts_with('#')).collect();
+            ("SET UTF-8\n".to_string(), format!("{}\n{}", words.len(), words.join("\n")))
+        } else if extension.eq_ignore_ascii_case("dic") || extension.eq_ignore_ascii_case("aff") {
+            let aff_path = path.with_extension("aff");
+            let dic_path = path.with_extension("dic");
+            if !aff_path.is_file() || !dic_path.is_file() {
+                return Err(format!(
+                    "Both {} and {} are required (download the matching Hunspell pair)",
+                    aff_path.display(), dic_path.display()
+                ));
             }
-            Err(e) => Err(format!("Errore di parsing: {:?}", e)),
+            (fs::read_to_string(&aff_path).map_err(|e| e.to_string())?,
+             fs::read_to_string(&dic_path).map_err(|e| e.to_string())?)
+        } else {
+            return Err("Select a .dic or .aff Hunspell dictionary (or a legacy .txt word list)".into());
+        };
+        let mut dictionary = spellbook::Dictionary::new(&aff, &dic)
+            .map_err(|e| format!("Hunspell parsing failed: {e:?}"))?;
+        for word in read_user_words() {
+            let _ = dictionary.add(&word);
         }
+        self.dictionaries.push(dictionary);
+        self.loaded_languages.push(name.clone());
+        Ok(name)
     }
 
     fn load_user_words(&mut self) {
-        if let Some(dict) = &mut self.dict {
-            for w in read_user_words() {
-                let _ = dict.add(&w);
+        let words = read_user_words();
+        for dict in &mut self.dictionaries {
+            for word in &words {
+                let _ = dict.add(word);
             }
         }
     }
@@ -135,7 +146,7 @@ impl SpellChecker {
         if clean.is_empty() {
             return;
         }
-        if let Some(dict) = &mut self.dict {
+        for dict in &mut self.dictionaries {
             let _ = dict.add(&clean);
         }
         if let Ok(mut f) = fs::OpenOptions::new()
@@ -161,32 +172,36 @@ impl SpellChecker {
             return true;
         }
 
-        match &self.dict {
-            Some(d) => d.check(word),
-            None => true, // Se il dizionario non è caricato, non segnalare errori
-        }
+        // A word is correct if ANY active language accepts it.
+        self.dictionaries.is_empty() || self.dictionaries.iter().any(|dict| dict.check(word))
     }
 
     pub fn suggest(&self, misspelled: &str, max_suggestions: usize) -> Vec<String> {
+        let mut suggestions = Vec::new();
         if max_suggestions == 0 {
-            return Vec::new();
+            return suggestions;
         }
-        if let Some(dict) = &self.dict {
-            let mut suggestions = Vec::new();
-            dict.suggest(misspelled, &mut suggestions);
-            suggestions.truncate(max_suggestions);
-            suggestions
-        } else {
-            Vec::new()
+        for dict in &self.dictionaries {
+            let mut local = Vec::new();
+            dict.suggest(misspelled, &mut local);
+            for suggestion in local {
+                if !suggestions.iter().any(|s: &String| s.eq_ignore_ascii_case(&suggestion)) {
+                    suggestions.push(suggestion);
+                    if suggestions.len() >= max_suggestions {
+                        return suggestions;
+                    }
+                }
+            }
         }
+        suggestions
     }
 
     pub fn ignore_word(&mut self, word: &str) {
         let clean = word.trim().to_lowercase();
-        if !clean.is_empty()
-            && let Some(dict) = &mut self.dict
-        {
-            let _ = dict.add(&clean);
+        if !clean.is_empty() {
+            for dict in &mut self.dictionaries {
+                let _ = dict.add(&clean);
+            }
         }
     }
 }

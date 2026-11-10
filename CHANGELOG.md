@@ -5,7 +5,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+* **Multilingual Hunspell:** Load matching `.aff`/`.dic` pairs with affix rules; check across all installed languages simultaneously, merge suggestions, and manage installed dictionary pairs together.
+
 * **Sketch Spacebar drawing:** Hold Space and move the pointer to sketch with the pen, shapes, or eraser without a mouse drag.
+
 * **Context menus and radial tools:** PDF text selection offers Copy; notes Edit offers Copy/Cut/Paste and Preview offers Copy. The radial menu includes Paste and supports right-click selections without closing.
 
 ### Added

@@ -6403,8 +6403,8 @@ impl Lapis {
                                                     
                                                         ui.add_space(6.0);
                                                         ui.weak(format!(
-                                                            "{} words loaded · {}",
-                                                            self.spellchecker.word_count(),
+                                                            "{} active dictionaries · {}",
+                                                            self.spellchecker.loaded_languages.len(),
                                                             self.spellchecker.loaded_languages.join(", ")
                                                         ));
                                                     
@@ -6506,7 +6506,7 @@ impl Lapis {
                                                             self.dialogs.open(
                                                                 ui.ctx(),
                                                                 DialogKind::AddDictionary,
-                                                                DialogSpec::open_file().filter("Dictionary / word list", &["dic", "txt", "dict", "words"]),
+                                                                DialogSpec::open_file().filter("Hunspell dictionary (.dic + .aff)", &["dic", "aff", "txt"]),
                                                             );
                                                         }
                                                     
@@ -6515,6 +6515,9 @@ impl Lapis {
                                                             // Delete only app-owned copies, never external files.
                                                             if p.starts_with(spellcheck::dict_dir()) {
                                                                 let _ = std::fs::remove_file(&p);
+                                                                if p.extension().and_then(|e| e.to_str()) == Some("aff") {
+                                                                    let _ = std::fs::remove_file(p.with_extension("dic"));
+                                                                }
                                                             }
                                                             self.rebuild_spellchecker();
                                                             settings_dirty = true;
@@ -12122,34 +12125,47 @@ impl Lapis {
         self.spellchecker = sc;
     }
     fn add_dictionary_file(&mut self, src: &std::path::Path) -> Result<String, String> {
-        let file_name = src
-            .file_name()
-            .ok_or_else(|| "Invalid file name".to_string())?
-            .to_string_lossy()
-            .to_string();
-
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         let dir = spellcheck::dict_dir();
-        let mut dest = dir.join(&file_name);
-        let mut n = 1;
-        while dest.exists() {
-            // Do not duplicate an existing entry for the same file.
-            if std::fs::read(&dest).ok() == std::fs::read(src).ok() {
-                return Err(format!("{} is already installed", file_name));
+        if ext == "txt" {
+            let filename = src.file_name().ok_or("Invalid filename")?;
+            let dest = dir.join(filename);
+            if dest.exists() {
+                return Err("Dictionary already installed".into());
             }
-            n += 1;
-            dest = dir.join(format!("{}_{}", n, file_name));
+            std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+            let result = self.spellchecker.load_dictionary_file(&dest);
+            if result.is_err() { let _ = std::fs::remove_file(&dest); }
+            let name = result?;
+            self.app_state.settings.extra_dictionaries.push(dest);
+            return Ok(name);
         }
-
-        std::fs::copy(src, &dest).map_err(|e| format!("Copy failed: {}", e))?;
-        let name = match self.spellchecker.load_dictionary_file(&dest) {
-            Ok(name) => name,
-            Err(e) => {
-                let _ = std::fs::remove_file(&dest);
-                return Err(format!("Could not read dictionary: {}", e));
-            }
-        };
-
-        self.app_state.settings.extra_dictionaries.push(dest);
+        if ext != "dic" && ext != "aff" {
+            return Err("Choose a Hunspell .dic or .aff file".into());
+        }
+        let source_aff = src.with_extension("aff");
+        let source_dic = src.with_extension("dic");
+        if !source_aff.is_file() || !source_dic.is_file() {
+            return Err("Missing matching .aff or .dic file in the selected folder".into());
+        }
+        let stem = src.file_stem().and_then(|s| s.to_str()).ok_or("Invalid dictionary name")?;
+        let dest_aff = dir.join(format!("{stem}.aff"));
+        let dest_dic = dir.join(format!("{stem}.dic"));
+        if dest_aff.exists() || dest_dic.exists() {
+            return Err(format!("Dictionary {stem} is already installed"));
+        }
+        std::fs::copy(&source_aff, &dest_aff).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::copy(&source_dic, &dest_dic) {
+            let _ = std::fs::remove_file(&dest_aff);
+            return Err(e.to_string());
+        }
+        let result = self.spellchecker.load_dictionary_file(&dest_aff);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&dest_aff);
+            let _ = std::fs::remove_file(&dest_dic);
+        }
+        let name = result?;
+        self.app_state.settings.extra_dictionaries.push(dest_aff);
         Ok(name)
     }
 

@@ -343,6 +343,10 @@ Lapis metadata is delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END` and
 
 For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a full-file read if the metadata is not found there.
 
+## Additional spelling languages
+
+Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download the matching files into one folder, then choose either file in **Add dictionary**. See the [user guide](docs/USER_GUIDE.md) for a step to step explanation.
+
 ## Development
 
 ```bash
