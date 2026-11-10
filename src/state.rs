@@ -518,6 +518,10 @@ pub struct AppSettings {
     /// Installed Hunspell dictionary pairs (stored by .aff path), or legacy .txt lists
     pub extra_dictionaries: Vec<PathBuf>,
     pub spellcheck_enabled: bool,
+    /// The bundled dictionary can be disabled without uninstalling it.
+    pub english_dictionary_enabled: bool,
+    /// Installed dictionaries omitted from spellchecking; files are retained.
+    pub disabled_dictionaries: Vec<PathBuf>,
     pub slideshow_empty_mode: SlideshowEmptyMode,
     pub tools_layout: ToolsLayoutMode,
     pub tools_button: bool,
@@ -540,6 +544,8 @@ impl Default for AppSettings {
             custom_font_path: None,
             extra_dictionaries: Vec::new(),
             spellcheck_enabled: true,
+            english_dictionary_enabled: true,
+            disabled_dictionaries: Vec::new(),
             slideshow_empty_mode: SlideshowEmptyMode::StaticEmpty,
             tools_layout: ToolsLayoutMode::SubTopbar,
             tools_button: true,

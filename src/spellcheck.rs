@@ -45,19 +45,33 @@ pub struct SpellChecker {
     pub enabled: bool,
     pub loaded_languages: Vec<String>,
     dictionaries: Vec<spellbook::Dictionary>,
+    dictionary_codes: Vec<String>,
 }
 
 impl SpellChecker {
     pub fn new(extra_dict_paths: &[PathBuf]) -> Self {
+        Self::with_preferences(extra_dict_paths, true, &[])
+    }
+
+    pub fn with_preferences(
+        extra_dict_paths: &[PathBuf],
+        english_enabled: bool,
+        disabled_paths: &[PathBuf],
+    ) -> Self {
         let mut checker = Self {
             enabled: true,
             loaded_languages: Vec::new(),
             dictionaries: Vec::new(),
+            dictionary_codes: Vec::new(),
         };
 
-        checker.load_default_english();
+        if english_enabled {
+            checker.load_default_english();
+        }
         for p in extra_dict_paths {
-            let _ = checker.load_dictionary_file(p);
+            if !disabled_paths.contains(p) {
+                let _ = checker.load_dictionary_file(p);
+            }
         }
         checker.load_user_words();
         checker
@@ -87,6 +101,7 @@ impl SpellChecker {
         match spellbook::Dictionary::new(aff, dic) {
             Ok(d) => {
                 self.dictionaries.push(d);
+                self.dictionary_codes.push("EN".to_string());
                 self.loaded_languages.push("English (built-in)".to_string());
             }
             Err(e) => {
@@ -128,6 +143,7 @@ impl SpellChecker {
             let _ = dictionary.add(&word);
         }
         self.dictionaries.push(dictionary);
+        self.dictionary_codes.push(language_code(&name));
         self.loaded_languages.push(name.clone());
         Ok(name)
     }
@@ -176,17 +192,18 @@ impl SpellChecker {
         self.dictionaries.is_empty() || self.dictionaries.iter().any(|dict| dict.check(word))
     }
 
-    pub fn suggest(&self, misspelled: &str, max_suggestions: usize) -> Vec<String> {
-        let mut suggestions = Vec::new();
+    /// Suggestions retain the origin language for presentation in the context menu.
+    pub fn suggest_with_languages(&self, misspelled: &str, max_suggestions: usize) -> Vec<(String, String)> {
+        let mut suggestions: Vec<(String, String)> = Vec::new();
         if max_suggestions == 0 {
             return suggestions;
         }
-        for dict in &self.dictionaries {
+        for (dict, code) in self.dictionaries.iter().zip(&self.dictionary_codes) {
             let mut local = Vec::new();
             dict.suggest(misspelled, &mut local);
             for suggestion in local {
-                if !suggestions.iter().any(|s: &String| s.eq_ignore_ascii_case(&suggestion)) {
-                    suggestions.push(suggestion);
+                if !suggestions.iter().any(|(s, _)| s.eq_ignore_ascii_case(&suggestion)) {
+                    suggestions.push((suggestion, code.clone()));
                     if suggestions.len() >= max_suggestions {
                         return suggestions;
                     }
@@ -194,6 +211,11 @@ impl SpellChecker {
             }
         }
         suggestions
+    }
+
+    pub fn suggest(&self, misspelled: &str, max_suggestions: usize) -> Vec<String> {
+        self.suggest_with_languages(misspelled, max_suggestions)
+            .into_iter().map(|(word, _)| word).collect()
     }
 
     pub fn ignore_word(&mut self, word: &str) {
@@ -262,4 +284,10 @@ pub fn replace_char_range(text: &mut String, start: usize, end: usize, with: &st
         .map(|(i, _)| i)
         .unwrap_or(text.len());
     text.replace_range(b0..b1, with);
+}
+
+/// Normalize a Hunspell filename such as it_IT, en-US, or fr_FR to a compact tag.
+fn language_code(stem: &str) -> String {
+    let code = stem.split(['_', '-']).next().unwrap_or(stem);
+    code.chars().take(2).collect::<String>().to_uppercase()
 }

@@ -1468,7 +1468,11 @@ impl Lapis {
         let (export_tx, export_rx) = channel::<Result<PathBuf, String>>();
         let (asr_tx, asr_rx) = channel::<audio::AsrJobResult>();
         let (home_thumb_tx, home_thumb_rx) = channel::<(PathBuf, egui::ColorImage)>();
-        let spellchecker = spellcheck::SpellChecker::new(&app_state.settings.extra_dictionaries);
+        let spellchecker = spellcheck::SpellChecker::with_preferences(
+            &app_state.settings.extra_dictionaries,
+            app_state.settings.english_dictionary_enabled,
+            &app_state.settings.disabled_dictionaries,
+        );
 
         let mut app = Self {
             current_page: 1,
@@ -6391,7 +6395,7 @@ impl Lapis {
                                                     
                                                         ui.label(egui::RichText::new("Spellcheck Dictionaries").size(15.0).strong());
                                                         ui.add_space(4.0);
-                                                        ui.weak("English is built in. Add more languages as Hunspell .dic files or plain word lists (.txt, one word per line).");
+                                                        ui.weak("Enable any combination of installed Hunspell language pairs. Disabling a language keeps its files.");
                                                         ui.add_space(8.0);
                                                     
                                                         if ui
@@ -6426,8 +6430,14 @@ impl Lapis {
                                                             .inner_margin(egui::Margin::same(8))
                                                             .show(ui, |ui| {
                                                                 ui.set_width(ui.available_width());
-                                                                ui.label(egui::RichText::new("English (built-in)").strong());
-                                                                ui.weak("Always loaded. Cannot be removed.");
+                                                                if ui.checkbox(
+                                                                    &mut self.app_state.settings.english_dictionary_enabled,
+                                                                    "English (built-in) · EN",
+                                                                ).changed() {
+                                                                    self.rebuild_spellchecker();
+                                                                    settings_dirty = true;
+                                                                }
+                                                                ui.weak("Bundled en_US.aff + en_US.dic · retained when disabled");
                                                             });
                                                         ui.add_space(4.0);
                                                     
@@ -6435,10 +6445,11 @@ impl Lapis {
                                                         let mut remove_idx: Option<usize> = None;
                                                     
                                                         for (i, p) in extras.iter().enumerate() {
-                                                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                                                            let missing = if p.extension().and_then(|e| e.to_str()) == Some("aff") {
-                                                                !p.is_file() || !p.with_extension("dic").is_file()
-                                                            } else { !p.is_file() };
+                                                            let is_pair = p.extension().and_then(|e| e.to_str()) == Some("aff");
+                                                            let dic_path = p.with_extension("dic");
+                                                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+                                                                + if is_pair { std::fs::metadata(&dic_path).map(|m| m.len()).unwrap_or(0) } else { 0 };
+                                                            let missing = !p.is_file() || (is_pair && !dic_path.is_file());
                                                             let name = p
                                                                 .file_stem()
                                                                 .map(|s| s.to_string_lossy().to_string())
@@ -6472,12 +6483,20 @@ impl Lapis {
                                                                                 },
                                                                             );
                                                                         });
-                                                                        ui.add(
-                                                                            egui::Label::new(
-                                                                                egui::RichText::new(p.display().to_string()).size(11.0).weak(),
-                                                                            )
-                                                                            .truncate(),
-                                                                        );
+                                                                        let mut active = !self.app_state.settings.disabled_dictionaries.contains(p);
+                                                                        if ui.checkbox(&mut active, "Enable").changed() {
+                                                                            if active {
+                                                                                self.app_state.settings.disabled_dictionaries.retain(|item| item != p);
+                                                                            } else {
+                                                                                self.app_state.settings.disabled_dictionaries.push(p.clone());
+                                                                            }
+                                                                            self.rebuild_spellchecker();
+                                                                            settings_dirty = true;
+                                                                        }
+                                                                        ui.label(egui::RichText::new(format!(".aff / dictionary: {}", p.display())).size(11.0).weak());
+                                                                        if is_pair {
+                                                                            ui.label(egui::RichText::new(format!(".dic / word list: {}", dic_path.display())).size(11.0).weak());
+                                                                        }
                                                                         if missing {
                                                                             ui.label(
                                                                                 egui::RichText::new("⚠ Missing .dic or .aff file — use Add dictionary to complete this pair")
@@ -6520,6 +6539,7 @@ impl Lapis {
                                                     
                                                         if let Some(i) = remove_idx {
                                                             let p = self.app_state.settings.extra_dictionaries.remove(i);
+                                                            self.app_state.settings.disabled_dictionaries.retain(|item| item != &p);
                                                             // Delete only app-owned copies, never external files.
                                                             if p.starts_with(spellcheck::dict_dir()) {
                                                                 let _ = std::fs::remove_file(&p);
@@ -12128,7 +12148,11 @@ impl Lapis {
             })
     }
     fn rebuild_spellchecker(&mut self) {
-        let mut sc = spellcheck::SpellChecker::new(&self.app_state.settings.extra_dictionaries);
+        let mut sc = spellcheck::SpellChecker::with_preferences(
+            &self.app_state.settings.extra_dictionaries,
+            self.app_state.settings.english_dictionary_enabled,
+            &self.app_state.settings.disabled_dictionaries,
+        );
         sc.enabled = self.app_state.settings.spellcheck_enabled;
         self.spellchecker = sc;
     }
@@ -13758,7 +13782,10 @@ impl Lapis {
                             if let Some((_, _, word)) = &ctx_word {
                                 let glass_style = self.menu_glass().modifier();
                                 egui::Popup::context_menu(&output.response).style(glass_style).show(|ui| {
-                                    ui.set_min_width(170.0);
+                                    // Keep the popup as compact as the other context menus.
+                                    // A right-to-left layout here expands to the popup's available
+                                    // width (often a large fraction of the notes pane).
+                                    ui.set_width(180.0);
                                     clipboard_menu(ui, &mut context_clipboard);
                                     ui.separator();
                                     ui.label(
@@ -13769,14 +13796,15 @@ impl Lapis {
                                     ui.separator();
 
                                     let cache_id = ui.make_persistent_id("spell_sugg_cache");
-                                    let cached: Option<(String, Vec<String>)> =
+                                    let active_languages = self.spellchecker.loaded_languages.join("|");
+                                    let cached: Option<(String, String, Vec<(String, String)>)> =
                                         ui.data(|d| d.get_temp(cache_id));
                                     let sugg = match cached {
-                                        Some((w, v)) if w == *word => v,
+                                        Some((w, langs, v)) if w == *word && langs == active_languages => v,
                                         _ => {
-                                            let v = self.spellchecker.suggest(word, 5);
+                                            let v = self.spellchecker.suggest_with_languages(word, 5);
                                             ui.data_mut(|d| {
-                                                d.insert_temp(cache_id, (word.clone(), v.clone()))
+                                                d.insert_temp(cache_id, (word.clone(), active_languages, v.clone()))
                                             });
                                             v
                                         }
@@ -13785,11 +13813,29 @@ impl Lapis {
                                     if sugg.is_empty() {
                                         ui.weak("No suggestions");
                                     }
-                                    for s in &sugg {
-                                        if ui.button(egui::RichText::new(s).strong()).clicked() {
-                                            spell_action = Some(SpellAction::Replace(s.clone()));
-                                            ui.close();
-                                        }
+                                    for (suggestion, language) in &sugg {
+                                        ui.horizontal(|ui| {
+                                             let (rect, response) = ui.allocate_exact_size(
+                                                egui::vec2(164.0, 22.0),
+                                                egui::Sense::click(),
+                                            );
+                                            let visuals = ui.style().interact(&response);
+                                            if response.hovered() || response.has_focus() {
+                                                ui.painter().rect_filled(rect, 3.0, visuals.bg_fill);
+                                            }
+                                            ui.painter().text(
+                                                egui::pos2(rect.left() + 8.0, rect.center().y),
+                                                egui::Align2::LEFT_CENTER,
+                                                suggestion,
+                                                egui::FontId::proportional(14.0),
+                                                visuals.text_color(),
+                                            );
+                                            if response.clicked() {
+                                                spell_action = Some(SpellAction::Replace(suggestion.clone()));
+                                                ui.close();
+                                            }
+                                            ui.label(egui::RichText::new(language).weak().size(10.0));
+                                        });
                                     }
 
                                     ui.separator();

@@ -421,7 +421,8 @@ The Dictionaries settings section lets you install full Hunspell dictionaries, i
 
 2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting both `.dic` and `.aff` files at once (multi-select). You can also select only one file now and add the missing partner later; Lapis warns about incomplete pairs and activates the language only after both files are present.
 
-3. Lapis copies both files into its local dictionary directory. English and every installed language remain active at the same time: a word is accepted if any language recognizes it.
+3. Lapis copies both files into its local dictionary directory and shows the full path to each `.aff` and `.dic` file in the installed dictionaries list. Use **Enable spellchecking** beside any added dictionary, or the checkbox for **English (built-in)**, to enable or disable that language without deleting its files. A word is accepted if any enabled dictionary recognizes it; suggestions display their source language (for example **IT** or **EN**) on the right.
+
 
 A legacy `.txt` word list can still be loaded without affix rules. Dictionaries work offline after installation.
 
