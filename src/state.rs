@@ -527,6 +527,8 @@ pub struct AppSettings {
     pub tools_button: bool,
     pub radial_menu_enabled: bool,
     pub flash_button: bool,
+    /// Show the document-wide flashcard indicator dot on the toolbar.
+    pub flash_notification_dot: bool,
     pub restore_show_notes: bool,
     pub restore_show_toc: bool,
     pub audio_dock: bool,
@@ -551,6 +553,7 @@ impl Default for AppSettings {
             tools_button: true,
             radial_menu_enabled: true,
             flash_button: true,
+            flash_notification_dot: true,
             restore_show_notes: true,
             restore_show_toc: true,
             audio_dock: true,

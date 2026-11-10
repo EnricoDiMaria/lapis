@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+* **Flashcard notification preference:** Advanced settings can hide the toolbar flashcard dot while leaving the Flashcards button visible.
+
 * **Multilingual Hunspell:** Load matching `.aff`/`.dic` pairs with affix rules; check across all installed languages simultaneously, merge suggestions, and manage installed dictionary pairs together. Select `.dic` and `.aff` together, or import either file now and complete its pair later; incomplete dictionaries show a warning and remain inactive. Show both Hunspell file paths, retain disabled dictionaries (including bundled English), and tag spelling suggestions by source language. Merge suggestions from all enabled dictionaries, then show the five closest matches independent of dictionary load order. Prefer simple letter edits over splitting a word into multiple words or adding a `-`, while retaining split suggestions.
 
 * **Sketch Spacebar drawing:** Hold Space and move the pointer to sketch with the pen, shapes, or eraser without a mouse drag.

@@ -2647,7 +2647,7 @@ impl Lapis {
             .selected(self.show_flashcards_modal)
             .min_size(btn_size),
         );
-        if has_flashcards {
+        if has_flashcards && self.app_state.settings.flash_notification_dot {
             // Same dot as the Notes button.
             let dot_center =
                 egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);
@@ -5361,6 +5361,12 @@ impl Lapis {
                                                             )
                                                             .changed()
                                                         {
+                                                            settings_dirty = true;
+                                                        }
+                                                        if ui.checkbox(
+                                                            &mut self.app_state.settings.flash_notification_dot,
+                                                            "Show flashcard notification dot when document has cards",
+                                                        ).changed() {
                                                             settings_dirty = true;
                                                         }
                                                         ui.horizontal_wrapped(|ui| {
