@@ -77,10 +77,6 @@ impl SpellChecker {
         checker
     }
 
-    pub fn word_count(&self) -> usize {
-        0
-    }
-
     pub fn load_default_english(&mut self) {
         // Converte i byte in &str. Se il file non è UTF-8 valido, questo fallisce.
         let aff = match std::str::from_utf8(BUNDLED_AFF) {
@@ -206,11 +202,6 @@ impl SpellChecker {
             candidates.extend(local.into_iter().map(|word| (word, code.clone())));
         }
         rank_suggestions(misspelled, candidates, max_suggestions)
-    }
-
-    pub fn suggest(&self, misspelled: &str, max_suggestions: usize) -> Vec<String> {
-        self.suggest_with_languages(misspelled, max_suggestions)
-            .into_iter().map(|(word, _)| word).collect()
     }
 
     pub fn ignore_word(&mut self, word: &str) {
