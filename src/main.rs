@@ -2436,6 +2436,9 @@ impl Lapis {
                 ui.close();
             }
             self.show_tools_rail = !self.show_tools_rail;
+            if !self.show_tools_rail && self.app_state.settings.reset_tool_on_bar_close {
+                self.annotation_tool = AnnotationTool::Cursor;
+            }
         }
     }
 
@@ -5218,6 +5221,13 @@ impl Lapis {
                                                             settings_dirty = true;
                                                         }
 
+                                                        if ui.checkbox(
+                                                            &mut self.app_state.settings.reset_tool_on_bar_close,
+                                                            "Switch to Cursor when closing the annotation bar",
+                                                        ).changed() {
+                                                            settings_dirty = true;
+                                                        }
+
                                                         ui.add_space(10.0);
                                                         ui.label(egui::RichText::new("Annotation Tools Layout").size(13.5).strong());
                                                         ui.add_space(4.0);
@@ -5285,6 +5295,22 @@ impl Lapis {
                                                         }
                                                         if ui
                                                             .checkbox(
+                                                                &mut self.app_state.settings.sketch_enabled,
+                                                                "Enable Sketch (per-page scratchpad tab in the Notes panel)",
+                                                            )
+                                                            .on_hover_text("Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.")
+                                                            .changed()
+                                                        {
+                                                            settings_dirty = true;
+                                                            if !self.app_state.settings.sketch_enabled {
+                                                                self.finish_sketch_edit();
+                                                                if self.note_mode == NoteMode::Sketch {
+                                                                    self.note_mode = NoteMode::Edit;
+                                                                }
+                                                            }
+                                                        }
+                                                        if ui
+                                                            .checkbox(
                                                                 &mut self.app_state.settings.audio_notes,
                                                                 "Enable Audio notes",
                                                             )
@@ -5300,22 +5326,6 @@ impl Lapis {
                                                             .changed()
                                                         {
                                                             settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.sketch_enabled,
-                                                                "Enable Sketch (per-page scratchpad tab in the Notes panel)",
-                                                            )
-                                                            .on_hover_text("Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.")
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                            if !self.app_state.settings.sketch_enabled {
-                                                                self.finish_sketch_edit();
-                                                                if self.note_mode == NoteMode::Sketch {
-                                                                    self.note_mode = NoteMode::Edit;
-                                                                }
-                                                            }
                                                         }
                                                         
 

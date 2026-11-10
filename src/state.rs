@@ -525,6 +525,8 @@ pub struct AppSettings {
     pub slideshow_empty_mode: SlideshowEmptyMode,
     pub tools_layout: ToolsLayoutMode,
     pub tools_button: bool,
+    /// Return to Cursor / Select when the annotation bar is closed.
+    pub reset_tool_on_bar_close: bool,
     pub radial_menu_enabled: bool,
     pub flash_button: bool,
     /// Show the document-wide flashcard indicator dot on the toolbar.
@@ -551,6 +553,7 @@ impl Default for AppSettings {
             slideshow_empty_mode: SlideshowEmptyMode::StaticEmpty,
             tools_layout: ToolsLayoutMode::SubTopbar,
             tools_button: true,
+            reset_tool_on_bar_close: true,
             radial_menu_enabled: true,
             flash_button: true,
             flash_notification_dot: true,
