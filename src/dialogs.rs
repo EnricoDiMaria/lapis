@@ -40,6 +40,7 @@ pub enum DialogKind {
 #[derive(Clone, Copy)]
 enum Mode {
     PickFile,
+    PickFiles,
     SaveFile,
     PickFolder,
 }
@@ -65,6 +66,9 @@ impl DialogSpec {
 
     pub fn open_file() -> Self {
         Self::new(Mode::PickFile)
+    }
+    pub fn open_files() -> Self {
+        Self::new(Mode::PickFiles)
     }
     pub fn save_file() -> Self {
         Self::new(Mode::SaveFile)
@@ -96,7 +100,7 @@ impl DialogSpec {
         self
     }
 
-    fn run(self) -> Option<PathBuf> {
+    fn run(self) -> Option<Vec<PathBuf>> {
         let mut d = rfd::FileDialog::new();
         if let Some(t) = &self.title {
             d = d.set_title(t.as_str());
@@ -112,16 +116,17 @@ impl DialogSpec {
             d = d.set_directory(dir);
         }
         match self.mode {
-            Mode::PickFile => d.pick_file(),
-            Mode::SaveFile => d.save_file(),
-            Mode::PickFolder => d.pick_folder(),
+            Mode::PickFile => d.pick_file().map(|path| vec![path]),
+            Mode::PickFiles => d.pick_files(),
+            Mode::SaveFile => d.save_file().map(|path| vec![path]),
+            Mode::PickFolder => d.pick_folder().map(|path| vec![path]),
         }
     }
 }
 
 struct Pending {
     kind: DialogKind,
-    rx: Receiver<Option<PathBuf>>,
+    rx: Receiver<Option<Vec<PathBuf>>>,
 }
 
 #[derive(Default)]
@@ -149,7 +154,7 @@ impl Dialogs {
         true
     }
 
-    pub fn poll(&mut self) -> Option<(DialogKind, Option<PathBuf>)> {
+    pub fn poll(&mut self) -> Option<(DialogKind, Option<Vec<PathBuf>>)> {
         let res = match self.pending.as_ref()?.rx.try_recv() {
             Ok(r) => r,
             Err(TryRecvError::Empty) => return None,

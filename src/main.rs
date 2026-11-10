@@ -2318,9 +2318,23 @@ impl Lapis {
     fn handle_dialog_result(
         &mut self,
         kind: DialogKind,
-        result: Option<PathBuf>,
+        result: Option<Vec<PathBuf>>,
         ctx: &egui::Context,
     ) {
+        if matches!(kind, DialogKind::AddDictionary) {
+            if let Some(paths) = result {
+                let msg = match self.add_dictionary_files(&paths) {
+                    Ok(msg) => {
+                        self.app_state.save();
+                        msg
+                    }
+                    Err(err) => format!("󰅚 {err}"),
+                };
+                self.toast_message = Some((msg, std::time::Instant::now()));
+            }
+            return;
+        }
+        let result = result.and_then(|paths| paths.into_iter().next());
         match kind {
             DialogKind::PickAsrModelDir { retry } => match result {
                 Some(dir) => {
@@ -2379,17 +2393,7 @@ impl Lapis {
                     DialogKind::ImportLectureMedia { media_dir } => {
                         self.finish_import_lecture_media(path, &media_dir)
                     }
-                    DialogKind::AddDictionary => {
-                        let msg = match self.add_dictionary_file(&path) {
-                            Ok(name) => {
-                                self.app_state.save();
-                                format!("󰄬 Dictionary {} added", name)
-                            }
-                            Err(e) => format!("󰅚 {}", e),
-                        };
-
-                        self.toast_message = Some((msg, std::time::Instant::now()));
-                    }
+                    DialogKind::AddDictionary => unreachable!(),
                     DialogKind::ExportTheme => self.finish_export_theme(path),
                     DialogKind::ImportTheme => self.finish_import_theme(path, ctx),
                     DialogKind::ExportNotes => self.finish_export_notes(path),
@@ -6432,7 +6436,9 @@ impl Lapis {
                                                     
                                                         for (i, p) in extras.iter().enumerate() {
                                                             let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                                                            let missing = !p.exists();
+                                                            let missing = if p.extension().and_then(|e| e.to_str()) == Some("aff") {
+                                                                !p.is_file() || !p.with_extension("dic").is_file()
+                                                            } else { !p.is_file() };
                                                             let name = p
                                                                 .file_stem()
                                                                 .map(|s| s.to_string_lossy().to_string())
@@ -6474,7 +6480,7 @@ impl Lapis {
                                                                         );
                                                                         if missing {
                                                                             ui.label(
-                                                                                egui::RichText::new("⚠ File not found, it is skipped at startup")
+                                                                                egui::RichText::new("⚠ Missing .dic or .aff file — use Add dictionary to complete this pair")
                                                                                     .size(11.0)
                                                                                     .color(egui::Color32::from_rgb(251, 191, 36)),
                                                                             );
@@ -6506,7 +6512,9 @@ impl Lapis {
                                                             self.dialogs.open(
                                                                 ui.ctx(),
                                                                 DialogKind::AddDictionary,
-                                                                DialogSpec::open_file().filter("Hunspell dictionary (.dic + .aff)", &["dic", "aff", "txt"]),
+                                                                DialogSpec::open_files()
+                                                                    .title("Select both .dic and .aff (or add a missing partner)")
+                                                                    .filter("Hunspell dictionaries", &["dic", "aff", "txt"]),
                                                             );
                                                         }
                                                     
@@ -12124,49 +12132,97 @@ impl Lapis {
         sc.enabled = self.app_state.settings.spellcheck_enabled;
         self.spellchecker = sc;
     }
-    fn add_dictionary_file(&mut self, src: &std::path::Path) -> Result<String, String> {
-        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    /// Import multiple Hunspell files. Incomplete pairs remain installed but inactive,
+    /// so the missing partner can be provided in a later selection.
+    fn add_dictionary_files(&mut self, paths: &[std::path::PathBuf]) -> Result<String, String> {
+        use std::collections::BTreeMap;
         let dir = spellcheck::dict_dir();
-        if ext == "txt" {
+        let mut sources: BTreeMap<String, (Option<std::path::PathBuf>, Option<std::path::PathBuf>)> = BTreeMap::new();
+        let mut text_files = Vec::new();
+        for src in paths {
+            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext == "txt" { text_files.push(src.clone()); continue; }
+            if ext != "aff" && ext != "dic" {
+                return Err(format!("Unsupported dictionary file: {}", src.display()));
+            }
+            let stem = src.file_stem().and_then(|s| s.to_str())
+                .ok_or_else(|| format!("Invalid dictionary name: {}", src.display()))?;
+            let pair = sources.entry(stem.to_string()).or_default();
+            if ext == "aff" { pair.0 = Some(src.clone()); } else { pair.1 = Some(src.clone()); }
+        }
+        if sources.is_empty() && text_files.is_empty() {
+            return Err("Select a .dic, .aff, or .txt dictionary file".into());
+        }
+        let mut added = Vec::new();
+        let mut warnings = Vec::new();
+        for src in text_files {
             let filename = src.file_name().ok_or("Invalid filename")?;
             let dest = dir.join(filename);
-            if dest.exists() {
-                return Err("Dictionary already installed".into());
+            if !dest.exists() {
+                std::fs::copy(&src, &dest).map_err(|e| format!("Copy failed: {e}"))?;
+            } else if src != dest && std::fs::read(&src).ok() != std::fs::read(&dest).ok() {
+                return Err(format!("{} already exists with different contents", dest.display()));
             }
-            std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
-            let result = self.spellchecker.load_dictionary_file(&dest);
-            if result.is_err() { let _ = std::fs::remove_file(&dest); }
-            let name = result?;
-            self.app_state.settings.extra_dictionaries.push(dest);
-            return Ok(name);
+            if !self.app_state.settings.extra_dictionaries.contains(&dest) {
+                self.spellchecker.load_dictionary_file(&dest)?;
+                self.app_state.settings.extra_dictionaries.push(dest);
+                added.push(filename.to_string_lossy().to_string());
+            }
         }
-        if ext != "dic" && ext != "aff" {
-            return Err("Choose a Hunspell .dic or .aff file".into());
+        for (stem, (mut aff, mut dic)) in sources {
+            // The picker may include just one file when its partner is next to it.
+            if aff.is_none() {
+                if let Some(path) = &dic {
+                    let sibling = path.with_extension("aff");
+                    if sibling.is_file() { aff = Some(sibling); }
+                }
+            }
+            if dic.is_none() {
+                if let Some(path) = &aff {
+                    let sibling = path.with_extension("dic");
+                    if sibling.is_file() { dic = Some(sibling); }
+                }
+            }
+            let dest_aff = dir.join(format!("{stem}.aff"));
+            let dest_dic = dir.join(format!("{stem}.dic"));
+            let mut copied = Vec::new();
+            for (src, dest) in [(aff, &dest_aff), (dic, &dest_dic)] {
+                if let Some(src) = src {
+                    if dest.exists() {
+                        if src.as_path() != dest.as_path() && std::fs::read(&src).ok() != std::fs::read(dest).ok() {
+                            warnings.push(format!("{stem}: {} already exists with different contents", dest.display()));
+                            continue;
+                        }
+                    } else {
+                        if let Err(err) = std::fs::copy(&src, dest) {
+                            for file in &copied { let _ = std::fs::remove_file(file); }
+                            return Err(format!("Could not import {stem}: {err}"));
+                        }
+                        copied.push(dest.to_path_buf());
+                    }
+                }
+            }
+            if !self.app_state.settings.extra_dictionaries.contains(&dest_aff) {
+                self.app_state.settings.extra_dictionaries.push(dest_aff.clone());
+            }
+            if dest_aff.is_file() && dest_dic.is_file() {
+                // Validate before enabling; retain already installed halves on failure.
+                match spellcheck::SpellChecker::new(&[dest_aff.clone()]).loaded_languages
+                    .iter().any(|name| name == &stem) {
+                    true => { added.push(stem); }
+                    false => warnings.push(format!("{stem}: dictionary pair could not be loaded")),
+                }
+            } else {
+                let missing = if !dest_aff.is_file() { ".aff" } else { ".dic" };
+                warnings.push(format!("{stem}: missing {missing} — select it later to finish installation"));
+            }
         }
-        let source_aff = src.with_extension("aff");
-        let source_dic = src.with_extension("dic");
-        if !source_aff.is_file() || !source_dic.is_file() {
-            return Err("Missing matching .aff or .dic file in the selected folder".into());
+        self.rebuild_spellchecker();
+        if warnings.is_empty() {
+            Ok(format!("󰄬 Dictionaries installed: {}", added.join(", ")))
+        } else {
+            Ok(format!("⚠ {}", warnings.join("; ")))
         }
-        let stem = src.file_stem().and_then(|s| s.to_str()).ok_or("Invalid dictionary name")?;
-        let dest_aff = dir.join(format!("{stem}.aff"));
-        let dest_dic = dir.join(format!("{stem}.dic"));
-        if dest_aff.exists() || dest_dic.exists() {
-            return Err(format!("Dictionary {stem} is already installed"));
-        }
-        std::fs::copy(&source_aff, &dest_aff).map_err(|e| e.to_string())?;
-        if let Err(e) = std::fs::copy(&source_dic, &dest_dic) {
-            let _ = std::fs::remove_file(&dest_aff);
-            return Err(e.to_string());
-        }
-        let result = self.spellchecker.load_dictionary_file(&dest_aff);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&dest_aff);
-            let _ = std::fs::remove_file(&dest_dic);
-        }
-        let name = result?;
-        self.app_state.settings.extra_dictionaries.push(dest_aff);
-        Ok(name)
     }
 
     // Screenshots from the clipboard or files become image annotations or notes.

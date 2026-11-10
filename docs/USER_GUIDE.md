@@ -410,8 +410,17 @@ You can also add or remove custom words manually from that section.
 
 The Dictionaries settings section lets you install full Hunspell dictionaries, including prefixes, suffixes, conjugated forms and inflections. Each language requires **both** a `.dic` word/flag file and its matching `.aff` rules file, with identical filenames before the extension (for example `it_IT.dic` and `it_IT.aff`).
 
-1. Download both files for the language you need. You can get them directly from the LibreOffice dictionary repositories: [Italian `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.aff); [French `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.aff); [German `.dic`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic) and [`.aff`](https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff). Keep each downloaded pair's original matching basenames.
-2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting either file in the pair.
+1. Download both files for the language you need. You can get them directly from the LibreOffice dictionary repositories: 
+  >    *To prevent the browser from opening the file as raw text, **right-click** on the links below and select **"Save link as..."** (or "Download linked file"):*
+   * **Italian:** <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.dic" download>`.dic`</a> and <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/it_IT/it_IT.aff" download>`.aff`</a>
+   * **French:** <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.dic" download>`.dic`</a> and <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/dictionaries/fr.aff" download>`.aff`</a>
+   * **German:** <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic" download>`.dic`</a> and <a href="https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff" download>`.aff`</a>
+   * **Other Languages:** You can find dictionary files for many other languages in the official <a href="https://github.com/LibreOffice/dictionaries" target="_blank">LibreOffice Dictionaries Repository</a>.
+   
+   Keep each downloaded pair's original matching basenames.
+
+2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting both `.dic` and `.aff` files at once (multi-select). You can also select only one file now and add the missing partner later; Lapis warns about incomplete pairs and activates the language only after both files are present.
+
 3. Lapis copies both files into its local dictionary directory. English and every installed language remain active at the same time: a word is accepted if any language recognizes it.
 
 A legacy `.txt` word list can still be loaded without affix rules. Dictionaries work offline after installation.
