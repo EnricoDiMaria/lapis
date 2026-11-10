@@ -13,16 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **Two-way edit sync:** Exported Lapis annotations embed a lightweight content signature (`/LapisSig` and `/LapisKind`). If you move, resize, or edit a Lapis text box or annotation in an external editor, Lapis detects the change on reopen and updates the local annotation accordingly.
     - **Immediate FreeText rendering (`/AP` streams):** Exported text boxes include a standard PDF Form XObject appearance stream with `WinAnsiEncoding` (supporting Latin-1 accented characters), ensuring text is immediately visible.
 
+- **Redesigned Global Search (`Ctrl + F`):** The search popup has been rebuilt to be clearer and nicer to use.
+  - **Cleaner layout:** A rounded search box with a clear button, a live "n of m" counter and a scrollable result list. The old tri-modal indication is gone: every result now shows what it is (Note, Slide, Audio with its timestamp, or Memo) and its page, so the kind of content is obvious at a glance.
+  - **Readable results:** Each result shows the text around the match with the matched words highlighted.
+  - **Keyboard cycling:** `Enter` jumps to the next result and `Shift + Enter` (or `↑` / `↓`) moves between them, wrapping around at the ends, without leaving the search box. Previous / next buttons are available as well.
+  - **Live search:** Results update while typing and the first match is shown right away, like a browser's find. Edits to the note being written are picked up too.
+  - **Reset on close:** Closing the popup (`Esc`, the close button or `Ctrl + F` again) clears the query, the results and every highlight.
+- **Current match highlighting:** The selected result is highlighted where it lives. On PDF pages the matching text is marked (the current hit in a stronger color, the other hits on the page more faintly), and in the notes editor the match is highlighted and scrolled into view. Selecting a note result opens the notes panel in Edit mode, since Preview cannot show the highlight.
+
 ### Changed
 
 - **Zero-bloat hybrid persistence:** Periodic background autosaves now write exclusively to the local backup (`~/.local/share/lapis` / `%LOCALAPPDATA%\lapis`), keeping editing instantaneous and preventing the PDF file from growing on every stroke. The PDF file itself is updated in a single atomic commit on explicit Save (`Ctrl + S`), document switch, or application exit. When committing to a PDF whose last revision was already written by Lapis, Lapis replaces its own previous trailing incremental update instead of stacking new revisions on every session.
 - **Stream-based metadata & fast ID lookup:** Lapis's portable metadata block (`%LAPIS_CUSTOM_START` ... `%LAPIS_CUSTOM_END`) is now stored inside an uncompressed PDF stream object rather than as raw bytes after `%%EOF`, keeping `startxref` and `%%EOF` at the physical end of the file. Document ID lookup scans the last 16 MiB first and falls back to a full read only when needed.
+- **Jump back / forward moved into the search popup:** The two navigation-history buttons no longer take space in the topbar; they now live in the footer of the search popup. The `Alt + Backspace` shortcuts are unchanged. Moving through results is recorded as a single step in the history, so **Back** returns to the page the search started from instead of replaying every result.
 
 ### Fixed
 
 - **External PDF annotations no longer overwritten:** Lapis no longer truncates bytes after the first `%%EOF` marker. Incremental updates appended by external software (such as Microsoft Edge) are preserved intact across saves.
 - **The eraser icon now displays properly in the main PDF area as well.**
-
+- **Search results that did not contain the searched text:** Results used to show the beginning of the matching line instead of the match, so most entries looked unrelated to the query. Results now show the text around the match and always contain it.
+- **More reliable matching:** Searches are case-insensitive, ignore differences in whitespace and can match phrases that wrap onto the next line of a PDF page. Each occurrence is listed separately, and the results are computed only when the query or the content changes instead of on every frame.
+- **PDFs without text:** The PDF text index of a document without any extractable text was rebuilt on every frame while the search was open.
 
 ### Compatibility and upgrade notes
 

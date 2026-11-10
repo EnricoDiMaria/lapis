@@ -31,13 +31,12 @@ const COMPACT_TOOLBAR_W: f32 = 150.0;
 const ERASER_RADIUS_PX: f32 = 7.0;
 
 /// Colors readable on the (always light) paper.
-const PALETTE: [[u8; 3]; 6] = [
+const PALETTE: [[u8; 3]; 5] = [
     [17, 24, 39],
     [220, 38, 38],
     [37, 99, 235],
     [22, 163, 74],
-    [234, 88, 12],
-    [147, 51, 234],
+    [192, 132, 252],
 ];
 /// Stroke widths in sketch units.
 const STROKE_PRESETS: [f32; 4] = [1.5, 3.0, 5.5, 10.0];
@@ -59,13 +58,13 @@ pub enum SketchTool {
 
 impl SketchTool {
     const ALL: [(SketchTool, &'static str, &'static str); 8] = [
-        (SketchTool::Hand, "\u{F0E47}", "Move the canvas (hand)"),
+        (SketchTool::Hand, "󰹆 ", "Move the canvas (hand)"),
         (SketchTool::Pen, "󱦹", "Pen"),
-        (SketchTool::Eraser, "󰇾", "Eraser"),
-        (SketchTool::Line, "󰕞", "Line"),
+        (SketchTool::Eraser, "󰇾 ", "Eraser"),
+        (SketchTool::Line, "󰕞 ", "Line"),
         (SketchTool::Arrow, "󰁔", "Arrow"),
-        (SketchTool::Rect, "󰝣", "Rectangle"),
-        (SketchTool::Circle, "󰝥", "Circle"),
+        (SketchTool::Rect, "󰝣 ", "Rectangle"),
+        (SketchTool::Circle, "󰝥 ", "Circle"),
         (SketchTool::Text, "󰊄", "Text"),
     ];
 

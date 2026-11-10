@@ -30,6 +30,7 @@ use crate::spellcheck::*;
 mod clipboard;
 use crate::clipboard::*;
 mod screenshots;
+mod search;
 use screenshots::{ShotJobs, ShotTarget};
 mod doc_lock;
 mod docid;
@@ -565,6 +566,53 @@ struct TextLine {
 struct PageText {
     chars: Vec<PdfCharItem>,
     lines: Vec<TextLine>,
+}
+
+/// Text of every PDF page prepared for the global search. The characters keep their
+/// positions, so a hit can be highlighted on the page.
+#[derive(Default)]
+struct PdfSearchIndex {
+    built: bool,
+    pages: HashMap<u32, search::SearchPage>,
+    texts: HashMap<u32, Arc<PageText>>,
+}
+
+impl PdfSearchIndex {
+    fn clear(&mut self) {
+        self.built = false;
+        self.pages.clear();
+        self.texts.clear();
+    }
+}
+
+/// Appends `s[a..b]` to `job`; the parts covered by `hl` (byte ranges, sorted) get a background.
+fn append_highlighted(
+    job: &mut egui::text::LayoutJob,
+    s: &str,
+    a: usize,
+    b: usize,
+    fmt: egui::TextFormat,
+    hl: &[(usize, usize, bool)],
+    (bg_cur, bg_other): (egui::Color32, egui::Color32),
+) {
+    let mut pos = a;
+    for &(hs, he, cur) in hl {
+        if he <= pos || hs >= b {
+            continue;
+        }
+        let s0 = hs.max(pos);
+        let e0 = he.min(b);
+        if s0 > pos {
+            job.append(&s[pos..s0], 0.0, fmt.clone());
+        }
+        let mut f = fmt.clone();
+        f.background = if cur { bg_cur } else { bg_other };
+        job.append(&s[s0..e0], 0.0, f);
+        pos = e0;
+    }
+    if pos < b {
+        job.append(&s[pos..b], 0.0, fmt);
+    }
 }
 
 /// A caret sits BETWEEN characters: `idx` in `0..=chars.len()` of the given page.
@@ -1145,13 +1193,13 @@ enum SidebarTab {
 }
 
 const ANNOTATION_PALETTE: [([u8; 3], &str); 8] = [
-    ([0, 0, 0], "Black"),
+    ([17, 24, 39], "Black"),
     ([156, 163, 175], "Gray"),
     ([255, 255, 255], "White"),
     ([250, 204, 21], "Yellow"),
-    ([248, 113, 113], "Coral Red"),
-    ([74, 222, 128], "Mint Green"),
-    ([56, 189, 248], "Sky Blue"),
+    ([220, 38, 38], "Red"),
+    ([22, 163, 74], "Green"),
+    ([37, 99, 235], "Blue"),
     ([192, 132, 252], "Lavender"),
 ];
 
@@ -1268,6 +1316,18 @@ struct Lapis {
     show_search: bool,
     focus_search_input: bool,
     search_query: String,
+    /// Query the current `search_hits` were computed for.
+    search_last_query: String,
+    search_hits: Vec<search::Hit>,
+    search_sel: usize,
+    /// Hash of everything the hits depend on (query, notes, ...): hits are recomputed when it changes.
+    search_key: u64,
+    search_scroll_y: f32,
+    search_scroll_to_sel: bool,
+    /// The location the search started from is pushed on the history stack only once.
+    search_history_pushed: bool,
+    /// Ask the notes editor to scroll to the current hit.
+    search_note_scroll: bool,
     pdf_dark_mode: bool,
     hidden_pages: HashSet<u32>,
     shape_kind: ShapeKind,
@@ -1296,7 +1356,7 @@ struct Lapis {
     trim_end_ms: u64,
     /// `None` = trimming the main Lecture Track; `Some((page, memo_idx))` = trimming a specific Voice Memo
     trim_memo_target: Option<(u32, usize)>,
-    pdf_full_text_index: HashMap<u32, String>,
+    pdf_search_index: PdfSearchIndex,
     spellchecker: spellcheck::SpellChecker,
     blank_pages: std::collections::HashSet<u32>,
     /// Per-page sketch sheets shown in the notes panel "Sketch" tab.
@@ -1460,6 +1520,14 @@ impl Lapis {
             show_search: false,
             focus_search_input: false,
             search_query: String::new(),
+            search_last_query: String::new(),
+            search_hits: Vec::new(),
+            search_sel: 0,
+            search_key: 0,
+            search_scroll_y: 0.0,
+            search_scroll_to_sel: false,
+            search_history_pushed: false,
+            search_note_scroll: false,
             pdf_dark_mode: false,
             hidden_pages: HashSet::new(),
             shape_kind: ShapeKind::Rect,
@@ -1486,7 +1554,7 @@ impl Lapis {
             trim_start_ms: 0,
             trim_end_ms: 0,
             trim_memo_target: None,
-            pdf_full_text_index: HashMap::new(),
+            pdf_search_index: PdfSearchIndex::default(),
             spellchecker,
             blank_pages: HashSet::new(),
             sketches: HashMap::new(),
@@ -2344,50 +2412,6 @@ impl Lapis {
         }
     }
 
-    fn topbar_jump_buttons(&mut self, ui: &mut egui::Ui, sq_btn: egui::Vec2, labeled: bool) {
-        let btn_size = if labeled {
-            egui::vec2(200.0, sq_btn.y)
-        } else {
-            sq_btn
-        };
-        if ui
-            .add_enabled(
-                !self.nav_back_stack.is_empty(),
-                egui::Button::new(if labeled {
-                    format!("{}  Jump back", "󰁍")
-                } else {
-                    "󰁍".to_string()
-                })
-                .min_size(btn_size),
-            )
-            .on_hover_text("Jump Back to previous location [Alt+Backspace]")
-            .clicked()
-        {
-            if labeled {
-                ui.close();
-            }
-            self.nav_back(ui.ctx());
-        }
-        if ui
-            .add_enabled(
-                !self.nav_forward_stack.is_empty(),
-                egui::Button::new(if labeled {
-                    format!("{}  Jump forward", "󰁔")
-                } else {
-                    "󰁔".to_string()
-                })
-                .min_size(btn_size),
-            )
-            .on_hover_text("Jump Forward")
-            .clicked()
-        {
-            if labeled {
-                ui.close();
-            }
-            self.nav_forward(ui.ctx());
-        }
-    }
-
     fn topbar_view_mode_menu(&mut self, ui: &mut egui::Ui) {
         // View Mode Dropdown
         let view_label = match self.view_mode {
@@ -2568,9 +2592,10 @@ impl Lapis {
             if labeled {
                 ui.close();
             }
-            self.show_search = !self.show_search;
             if self.show_search {
-                self.focus_search_input = true;
+                self.close_search();
+            } else {
+                self.open_search();
             }
         }
     }
@@ -2925,7 +2950,7 @@ impl Lapis {
         self.annotations = doc_data.annotations;
         self.active_stroke = None;
         self.selected_textbox = None;
-        self.pdf_full_text_index.clear();
+        self.pdf_search_index.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.revealed_tapes.clear();
@@ -3080,7 +3105,7 @@ impl Lapis {
         self.current_note.clear();
         self.selected_textbox = None;
         self.is_rendering = false;
-        self.pdf_full_text_index.clear();
+        self.pdf_search_index.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.revealed_tapes.clear();
@@ -4319,7 +4344,8 @@ impl Lapis {
         let Some((lo, hi)) = sel.range_on_page(page, text.chars.len()) else {
             return;
         };
-        let fill = egui::Color32::from_rgba_unmultiplied(125, 156, 255, 85);
+        let [r, g, b] = self.theme.accent;
+        let fill = egui::Color32::from_rgba_unmultiplied(r, g, b, 85);
         let (w, h) = (slide_rect.width(), slide_rect.height());
         for l in &text.lines {
             let a = l.start.max(lo);
@@ -4337,6 +4363,52 @@ impl Lapis {
                 egui::pos2(slide_rect.left() + x1 * w, slide_rect.top() + l.bbox[3] * h),
             );
             painter.rect_filled(r, egui::CornerRadius::same(1), fill);
+        }
+    }
+
+    /// Highlights the search hits of one page: the current one stands out, the others are faint.
+    fn paint_search_highlight(&self, painter: &egui::Painter, page: u32, slide_rect: egui::Rect) {
+        if !self.show_search || self.search_hits.is_empty() {
+            return;
+        }
+        let Some(text) = self.pdf_search_index.texts.get(&page) else {
+            return;
+        };
+        let warn = rgb(self.theme.accent);
+        let (w, h) = (slide_rect.width(), slide_rect.height());
+        for (i, hit) in self.search_hits.iter().enumerate() {
+            if hit.page != page || hit.source != search::Source::Pdf {
+                continue;
+            }
+            let cur = i == self.search_sel;
+            let alpha = if cur { 140 } else { 60 };
+            let fill = egui::Color32::from_rgba_unmultiplied(warn.r(), warn.g(), warn.b(), alpha);
+            for l in &text.lines {
+                let a = l.start.max(hit.start);
+                let b = l.end.min(hit.end);
+                if a >= b {
+                    continue;
+                }
+                let (mut x0, mut x1) = (f32::MAX, f32::MIN);
+                for c in &text.chars[a..b] {
+                    x0 = x0.min(c.rect[0]);
+                    x1 = x1.max(c.rect[2]);
+                }
+                let r = egui::Rect::from_min_max(
+                    egui::pos2(slide_rect.left() + x0 * w, slide_rect.top() + l.bbox[1] * h),
+                    egui::pos2(slide_rect.left() + x1 * w, slide_rect.top() + l.bbox[3] * h),
+                )
+                .expand2(egui::vec2(1.0, 0.5));
+                painter.rect_filled(r, egui::CornerRadius::same(1), fill);
+                if cur {
+                    painter.rect_stroke(
+                        r,
+                        egui::CornerRadius::same(1),
+                        egui::Stroke::new(1.5, warn),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
         }
     }
 
@@ -4953,6 +5025,7 @@ impl Lapis {
         }
 
         self.paint_text_selection(&painter, page_num, slide_rect);
+        self.paint_search_highlight(&painter, page_num, slide_rect);
     }
 
     fn render_settings_modal(&mut self, ui: &mut egui::Ui) {
@@ -5684,7 +5757,7 @@ impl Lapis {
                                                         ui.add_space(4.0);
                                                         for (name, keys) in [
                                                             ("Command Palette", "Ctrl + P / Ctrl + K"),
-                                                            ("Global Tri-Modal Search", "Ctrl + F"),
+                                                            ("Global Search", "Ctrl + F"),
                                                             ("Undo / Redo Annotation", "Ctrl + Z / Ctrl + Y"),
                                                         ] {
                                                             ui.horizontal(|ui| {
@@ -6517,184 +6590,483 @@ impl Lapis {
             });
     }
 
+    fn open_search(&mut self) {
+        if !self.show_search {
+            self.show_search = true;
+            self.search_history_pushed = false;
+        }
+        self.focus_search_input = true;
+    }
+
+    /// Closing the search also resets it: query, results and highlights are dropped.
+    fn close_search(&mut self) {
+        self.show_search = false;
+        self.focus_search_input = false;
+        self.search_query.clear();
+        self.search_last_query.clear();
+        self.search_hits.clear();
+        self.search_sel = 0;
+        self.search_key = 0;
+        self.search_scroll_y = 0.0;
+        self.search_scroll_to_sel = false;
+        self.search_history_pushed = false;
+        self.search_note_scroll = false;
+    }
+
+    /// Everything the search results depend on, hashed: when it changes they are recomputed.
+    fn search_state_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.search_query.hash(&mut h);
+        self.current_note.hash(&mut h);
+        self.note_page.hash(&mut h);
+        self.notes.len().hash(&mut h);
+        self.total_pages.hash(&mut h);
+        self.audio_index.segments.len().hash(&mut h);
+        self.audio_index.page_memos.len().hash(&mut h);
+        self.pdf_search_index.built.hash(&mut h);
+        h.finish()
+    }
+
+    fn recompute_search_hits(&mut self) {
+        let needle = search::fold_query(&self.search_query);
+        let mut hits: Vec<search::Hit> = Vec::new();
+        if needle.is_empty() {
+            self.search_hits = hits;
+            return;
+        }
+        self.ensure_pdf_search_index();
+
+        'pages: for p in 1..=self.total_pages {
+            // The note being edited lives in `current_note`, not in `notes`, until it is saved.
+            let note: &str = if p == self.note_page {
+                &self.current_note
+            } else {
+                self.notes.get(&p).map(|s| s.as_str()).unwrap_or("")
+            };
+            if !note.trim().is_empty() {
+                for m in search::SearchPage::from_text(note).find(&needle, search::MAX_HITS) {
+                    hits.push(search::Hit {
+                        page: p,
+                        source: search::Source::Note,
+                        start: m.start,
+                        end: m.end,
+                        snippet: m.snippet,
+                        snip_match: m.snip_match,
+                        ts_ms: None,
+                        tag: String::new(),
+                    });
+                    if hits.len() >= search::MAX_HITS {
+                        break 'pages;
+                    }
+                }
+            }
+            if let Some(pg) = self.pdf_search_index.pages.get(&p) {
+                for m in pg.find(&needle, search::MAX_HITS) {
+                    hits.push(search::Hit {
+                        page: p,
+                        source: search::Source::Pdf,
+                        start: m.start,
+                        end: m.end,
+                        snippet: m.snippet,
+                        snip_match: m.snip_match,
+                        ts_ms: None,
+                        tag: String::new(),
+                    });
+                    if hits.len() >= search::MAX_HITS {
+                        break 'pages;
+                    }
+                }
+            }
+        }
+
+        if hits.len() < search::MAX_HITS {
+            for seg in &self.audio_index.segments {
+                if let Some(m) = search::SearchPage::from_text(&seg.text)
+                    .find(&needle, 1)
+                    .into_iter()
+                    .next()
+                {
+                    hits.push(search::Hit {
+                        page: seg.page,
+                        source: search::Source::Audio,
+                        start: 0,
+                        end: 0,
+                        snippet: m.snippet,
+                        snip_match: m.snip_match,
+                        ts_ms: Some(seg.start_ms),
+                        tag: audio::format_ms(seg.start_ms),
+                    });
+                }
+            }
+            for (&p, memos) in &self.audio_index.page_memos {
+                for memo in memos {
+                    let Some(tr) = memo.transcript.as_deref() else {
+                        continue;
+                    };
+                    if let Some(m) = search::SearchPage::from_text(tr)
+                        .find(&needle, 1)
+                        .into_iter()
+                        .next()
+                    {
+                        hits.push(search::Hit {
+                            page: p,
+                            source: search::Source::Memo,
+                            start: 0,
+                            end: 0,
+                            snippet: m.snippet,
+                            snip_match: m.snip_match,
+                            ts_ms: None,
+                            tag: memo.id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Stable: within a page the order stays note, slide, audio, memo.
+        hits.sort_by_key(|h| h.page);
+        hits.truncate(search::MAX_HITS);
+        self.search_hits = hits;
+    }
+
+    fn search_step(&mut self, delta: i64, ctx: &egui::Context) {
+        let n = self.search_hits.len() as i64;
+        if n == 0 {
+            return;
+        }
+        self.search_sel = (self.search_sel as i64 + delta).rem_euclid(n) as usize;
+        self.search_goto_selected(ctx);
+    }
+
+    /// Shows the selected hit: page, note (edit mode, scrolled to the match) or audio position.
+    fn search_goto_selected(&mut self, ctx: &egui::Context) {
+        let Some(hit) = self.search_hits.get(self.search_sel).cloned() else {
+            return;
+        };
+        self.search_scroll_to_sel = true;
+
+        if hit.page != self.current_page && (1..=self.total_pages).contains(&hit.page) {
+            // Cycling through the hits is one single step in the history: "back" returns to
+            // where the search started.
+            if !self.search_history_pushed {
+                self.nav_back_stack.push(self.current_page);
+                if self.nav_back_stack.len() > 50 {
+                    self.nav_back_stack.remove(0);
+                }
+                self.nav_forward_stack.clear();
+                self.search_history_pushed = true;
+            }
+            self.go_to_page(hit.page, ctx);
+        }
+
+        if hit.source == search::Source::Note {
+            if self.note_page != hit.page {
+                self.switch_note_page(hit.page);
+            }
+            self.show_notes = true;
+            // Only the editor can highlight the match.
+            self.note_mode = NoteMode::Edit;
+            self.search_note_scroll = true;
+        }
+
+        if let Some(ts_ms) = hit.ts_ms {
+            if self.audio_engine.total_duration_ms == 0 {
+                if let Some(ref wav_name) = self.audio_index.lecture_wav {
+                    let wav_path =
+                        audio::AudioDocIndex::media_dir_for_pdf(&self.pdf_path).join(wav_name);
+                    let _ =
+                        self.audio_engine
+                            .load_and_play(&wav_path, "Lecture".to_string(), ts_ms);
+                }
+            } else {
+                self.audio_engine.seek_to_ms(ts_ms);
+            }
+        }
+        ctx.request_repaint();
+    }
+
     fn render_search_popup(&mut self, ui: &mut egui::Ui) {
         if !self.show_search {
             return;
         }
+        let ctx = ui.ctx().clone();
+        let input_id = ui.make_persistent_id("global_search_input");
+        let input_had_focus = ctx.memory(|m| m.has_focus(input_id));
 
-        let (esc_pressed, enter_pressed) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Escape),
-                i.key_pressed(egui::Key::Enter),
-            )
-        });
-
-        if esc_pressed {
-            self.show_search = false;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.close_search();
             return;
         }
 
-        let mut jump_action: Option<(u32, Option<u64>)> = None;
+        // Enter / Shift+Enter (and the arrows) cycle through the results while the search box has
+        // the focus. They are consumed so the box keeps its focus.
+        let mut step: i64 = 0;
+        if input_had_focus {
+            ctx.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter) {
+                    step -= 1;
+                } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                    step += 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    step += 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    step -= 1;
+                }
+            });
+        }
+
+        if self.focus_search_input {
+            ctx.memory_mut(|m| m.request_focus(input_id));
+            self.focus_search_input = false;
+        }
+
+        let accent = rgb(self.theme.accent);
+        let weak = rgb(self.theme.fg_muted);
+        let colors = search::RowColors {
+            accent,
+            text: rgb(self.theme.fg_primary),
+            weak,
+            hover: rgb(self.theme.bg_hover),
+        };
+        let (mut close, mut go_back, mut go_forward, mut refocus) = (false, false, false, false);
+        let mut clicked_row: Option<usize> = None;
+        let mut nav_step: i64 = 0;
+        let can_back = !self.nav_back_stack.is_empty();
+        let can_forward = !self.nav_forward_stack.is_empty();
+        const LIST_MAX_H: f32 = 180.0;
 
         egui::Area::new(ui.make_persistent_id("global_search_popover"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
             .order(egui::Order::Foreground)
             .constrain(true)
-            .show(ui.ctx(), |ui| {
-                self.modal_glass_frame(238).show(ui, |ui| {
-                    ui.set_width(420.0);
-                    ui.set_max_height(390.0);
+            .show(&ctx, |ui| {
+                self.modal_glass_frame(200)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(440.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
 
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("󰍉")
-                                .size(15.0)
-                                .color(rgb(self.theme.accent)),
-                        );
-                        ui.label(egui::RichText::new("Tri-Modal Search").size(13.5).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Search box.
+                        egui::Frame::NONE
+                            .fill(rgb(self.theme.bg_widget))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if input_had_focus {
+                                    accent
+                                } else {
+                                    rgb(self.theme.border)
+                                },
+                            ))
+                            .inner_margin(egui::Margin::symmetric(10, 7))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    ui.label(
+                                        egui::RichText::new("\u{f0349}").size(15.0).color(accent),
+                                    );
+                                    let clear_w = if self.search_query.is_empty() {
+                                        0.0
+                                    } else {
+                                        26.0
+                                    };
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.search_query)
+                                            .id(input_id)
+                                            .hint_text("Search notes, slides, audio…")
+                                            .font(egui::FontId::proportional(14.5))
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(
+                                                (ui.available_width() - clear_w).max(40.0),
+                                            ),
+                                    );
+                                    if !self.search_query.is_empty()
+                                        && ui
+                                            .add(egui::Button::new("\u{f0156}").frame(false))
+                                            .on_hover_text("Clear")
+                                            .clicked()
+                                    {
+                                        self.search_query.clear();
+                                        refocus = true;
+                                    }
+                                });
+                            });
+
+                        ui.add_space(8.0);
+                        let n = self.search_hits.len();
+                        ui.horizontal(|ui| {
+                            let status = if self.search_query.trim().is_empty() {
+                                "Type to search notes, slides and audio".to_string()
+                            } else if n == 0 {
+                                "No matches".to_string()
+                            } else if n >= search::MAX_HITS {
+                                format!("{} of {}+", self.search_sel + 1, n)
+                            } else {
+                                format!("{} of {}", self.search_sel + 1, n)
+                            };
+                            ui.label(egui::RichText::new(status).size(12.0).color(weak));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("\u{f0156}")
+                                        .on_hover_text("Close and reset the search [Esc]")
+                                        .clicked()
+                                    {
+                                        close = true;
+                                    }
+                                    if ui
+                                        .add_enabled(n > 0, egui::Button::new("\u{f0140}").small())
+                                        .on_hover_text("Next result [Enter]")
+                                        .clicked()
+                                    {
+                                        nav_step = 1;
+                                        refocus = true;
+                                    }
+                                    if ui
+                                        .add_enabled(n > 0, egui::Button::new("\u{f0143}").small())
+                                        .on_hover_text("Previous result [Shift+Enter]")
+                                        .clicked()
+                                    {
+                                        nav_step = -1;
+                                        refocus = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        if n > 0 {
+                            ui.add_space(4.0);
+                            let step_h = search::ROW_H + ui.spacing().item_spacing.y;
+                            let view_h = LIST_MAX_H.min(n as f32 * step_h);
+                            let mut area = egui::ScrollArea::vertical()
+                                .id_salt("global_search_results_scroll")
+                                .max_height(LIST_MAX_H)
+                                .auto_shrink([false, true]);
+                            if self.search_scroll_to_sel {
+                                self.search_scroll_to_sel = false;
+                                let top = self.search_sel as f32 * step_h;
+                                let bottom = top + search::ROW_H;
+                                let off = self.search_scroll_y;
+                                let new_off = if top < off {
+                                    top
+                                } else if bottom > off + view_h {
+                                    bottom - view_h
+                                } else {
+                                    off
+                                };
+                                area = area.vertical_scroll_offset(new_off);
+                            }
+                            let hits = &self.search_hits;
+                            let sel = self.search_sel;
+                            let out = area.show_rows(ui, search::ROW_H, n, |ui, range| {
+                                for i in range {
+                                    if search::result_row(ui, &hits[i], i == sel, &colors).clicked()
+                                    {
+                                        clicked_row = Some(i);
+                                    }
+                                }
+                            });
+                            self.search_scroll_y = out.state.clamped_offset().y;
+                        }
+
+                        // Footer: history navigation lives here, with the keyboard hints.
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
                             if ui
-                                .small_button("󰅖")
-                                .on_hover_text("Close search [Esc]")
+                                .add_enabled(
+                                    can_back,
+                                    egui::Button::new(format!("{} Back", "\u{f004d}")).small(),
+                                )
+                                .on_hover_text("Return to the previous location [Alt+Backspace]")
                                 .clicked()
                             {
-                                self.show_search = false;
+                                go_back = true;
                             }
-                            ui.label(
-                                egui::RichText::new("Click results to preview")
-                                    .size(11.0)
-                                    .weak(),
+                            if ui
+                                .add_enabled(
+                                    can_forward,
+                                    egui::Button::new(format!("Forward {}", "\u{f0054}")).small(),
+                                )
+                                .on_hover_text("Go forward in the location history")
+                                .clicked()
+                            {
+                                go_forward = true;
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new("Enter next · Shift+Enter previous")
+                                            .size(11.0)
+                                            .color(weak),
+                                    );
+                                },
                             );
                         });
                     });
-
-                    ui.add_space(6.0);
-
-                    let edit_resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.search_query)
-                            .hint_text("Search Notes, PDF slides, Audio transcripts...")
-                            .desired_width(f32::INFINITY),
-                    );
-                    // Request focus only when first opened.
-                    if self.search_query.is_empty() && !edit_resp.has_focus() {
-                        edit_resp.request_focus();
-                    }
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    self.ensure_pdf_search_index();
-                    let q = self.search_query.trim().to_lowercase();
-                    let mut matches: Vec<(u32, String, String, Option<u64>)> = Vec::new();
-
-                    if !q.is_empty() {
-                        for p in 1..=self.total_pages {
-                            if let Some(note_text) = self.notes.get(&p) {
-                                for line in note_text.lines() {
-                                    let clean = line.trim();
-                                    if clean.to_lowercase().contains(&q) {
-                                        let prev: String = clean.chars().take(46).collect();
-                                        matches.push((p, " Note".to_string(), prev, None));
-                                    }
-                                }
-                            }
-                            if let Some(pdf_text) = self.pdf_full_text_index.get(&p) {
-                                for line in pdf_text.lines() {
-                                    let clean = line.trim();
-                                    if clean.to_lowercase().contains(&q) {
-                                        let prev: String = clean.chars().take(46).collect();
-                                        matches.push((p, "󰈙 PDF".to_string(), prev, None));
-                                    }
-                                }
-                            }
-                        }
-
-                        for seg in &self.audio_index.segments {
-                            if seg.text.to_lowercase().contains(&q) {
-                                let prev: String = seg.text.chars().take(42).collect();
-                                let badge = format!("󰕾 {}", audio::format_ms(seg.start_ms));
-                                matches.push((seg.page, badge, prev, Some(seg.start_ms)));
-                            }
-                        }
-
-                        for (&p, memos) in &self.audio_index.page_memos {
-                            for m in memos {
-                                if let Some(ref tr) = m.transcript
-                                    && tr.to_lowercase().contains(&q)
-                                {
-                                    let prev: String = tr.chars().take(42).collect();
-                                    matches.push((p, format!("🎙 {}", m.id), prev, None));
-                                }
-                            }
-                        }
-                    }
-
-                    if enter_pressed
-                        && edit_resp.lost_focus()
-                        && let Some((first_p, _, _, first_ts)) = matches.first()
-                    {
-                        jump_action = Some((*first_p, *first_ts));
-                    }
-
-                    // Keep the window compact when there are few results.
-                    egui::ScrollArea::vertical()
-                        .id_salt("global_search_results_scroll")
-                        .max_height(260.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            if q.is_empty() {
-                                ui.add_space(6.0);
-                                ui.weak("Type a keyword to filter slides, notes & audio...");
-                                ui.add_space(6.0);
-                            } else if matches.is_empty() {
-                                ui.add_space(6.0);
-                                ui.weak("No matches found.");
-                                ui.add_space(6.0);
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(format!("{} results found", matches.len()))
-                                        .size(11.0)
-                                        .weak(),
-                                );
-                                ui.add_space(2.0);
-                                for (p, kind_badge, snippet, opt_ts) in matches {
-                                    let is_cur = p == self.current_page;
-                                    let label = format!("p.{} [{}] – {}", p, kind_badge, snippet);
-                                    let btn =
-                                        egui::Button::new(egui::RichText::new(label).size(12.2))
-                                            .selected(is_cur)
-                                            .min_size(egui::vec2(ui.available_width(), 26.0));
-
-                                    if ui.add(btn).clicked() {
-                                        jump_action = Some((p, opt_ts));
-                                    }
-                                }
-                            }
-                        });
-                });
             });
 
-        // Jump to the page or timestamp without closing search.
-        if let Some((target_p, opt_ts)) = jump_action {
-            self.jump_with_history(target_p, ui.ctx());
-            if let Some(ts_ms) = opt_ts {
-                if self.audio_engine.total_duration_ms == 0 {
-                    if let Some(ref wav_name) = self.audio_index.lecture_wav {
-                        let wav_path =
-                            audio::AudioDocIndex::media_dir_for_pdf(&self.pdf_path).join(wav_name);
-                        let _ = self.audio_engine.load_and_play(
-                            &wav_path,
-                            "Lecture".to_string(),
-                            ts_ms,
-                        );
-                    }
-                } else {
-                    self.audio_engine.seek_to_ms(ts_ms);
-                }
+        if close {
+            self.close_search();
+            return;
+        }
+        if go_back {
+            self.nav_back(&ctx);
+            self.search_history_pushed = false;
+        }
+        if go_forward {
+            self.nav_forward(&ctx);
+            self.search_history_pushed = false;
+        }
+
+        // Results follow the query (and the notes) live.
+        let key = self.search_state_key();
+        if key != self.search_key {
+            self.search_key = key;
+            let query_changed = self.search_query != self.search_last_query;
+            let previous = self
+                .search_hits
+                .get(self.search_sel)
+                .map(|h| (h.page, h.source, h.start));
+            self.recompute_search_hits();
+            if query_changed {
+                self.search_last_query = self.search_query.clone();
+                self.search_sel = 0;
+                self.search_scroll_to_sel = true;
+                // Like a browser's find: show the first hit while typing.
+                self.search_goto_selected(&ctx);
+            } else {
+                self.search_sel = previous
+                    .and_then(|pv| {
+                        self.search_hits
+                            .iter()
+                            .position(|h| (h.page, h.source, h.start) == pv)
+                    })
+                    .unwrap_or(self.search_sel)
+                    .min(self.search_hits.len().saturating_sub(1));
             }
         }
+
+        if let Some(i) = clicked_row {
+            self.search_sel = i;
+            self.search_goto_selected(&ctx);
+            refocus = true;
+        }
+        let total_step = step + nav_step;
+        if total_step != 0 {
+            self.search_step(total_step.signum(), &ctx);
+        }
+        if refocus {
+            ctx.memory_mut(|m| m.request_focus(input_id));
+        }
     }
+
     fn render_command_palette(&mut self, ui: &mut egui::Ui) {
         if !self.show_command_palette {
             return;
@@ -6770,7 +7142,7 @@ impl Lapis {
                 "󰇚  Download / Save Original Unmodified PDF...",
                 "Document",
             ),
-            ("global_search", "󰍉  Open Global Tri-Modal Search", "Search"),
+            ("global_search", "󰍉  Search notes, slides & audio", "Search"),
             (
                 "flashcards",
                 "󰘸  Open Active Recall Flashcards Deck",
@@ -6991,7 +7363,7 @@ impl Lapis {
             "delete_page" => self.request_delete_page(self.current_page, ctx),
             "download_orig" => self.prompt_download_original_pdf(ctx),
             "global_search" => {
-                self.show_search = true;
+                self.open_search();
             }
             "flashcards" => {
                 self.sync_and_save();
@@ -9777,30 +10149,34 @@ impl Lapis {
         ctx.set_fonts(fonts);
     }
     fn ensure_pdf_search_index(&mut self) {
-        if !self.pdf_full_text_index.is_empty() || !self.has_pdf() {
+        if self.pdf_search_index.built || !self.has_pdf() {
             return;
         }
-        if let Ok(doc) = Document::open(self.pdf_path.to_str().unwrap_or_default()) {
-            for idx in 0..(self.total_pages as i32) {
-                if let Ok(page) = doc.load_page(idx)
-                    && let Ok(tp) = page.to_text_page(mupdf::TextPageFlags::empty())
-                {
-                    let mut page_str = String::new();
-                    for block in tp.blocks() {
-                        for line in block.lines() {
-                            for ch in line.chars() {
-                                if let Some(c) = ch.char() {
-                                    page_str.push(c);
-                                }
-                            }
-                            page_str.push('\n');
-                        }
-                    }
-                    if !page_str.trim().is_empty() {
-                        self.pdf_full_text_index.insert((idx + 1) as u32, page_str);
-                    }
-                }
+        self.pdf_search_index.built = true;
+        let Ok(doc) = Document::open(self.pdf_path.to_str().unwrap_or_default()) else {
+            return;
+        };
+        for idx in 0..(self.total_pages as i32) {
+            let Some(text) = extract_text(&doc, idx) else {
+                continue;
+            };
+            if text.chars.is_empty() {
+                continue;
             }
+            // Lines are joined with a space so a phrase can match across a line break.
+            let mut items: Vec<(char, usize)> =
+                Vec::with_capacity(text.chars.len() + text.lines.len());
+            for l in &text.lines {
+                for i in l.start..l.end {
+                    items.push((text.chars[i].ch, i));
+                }
+                items.push((' ', search::SYNTHETIC));
+            }
+            let page = (idx + 1) as u32;
+            self.pdf_search_index
+                .pages
+                .insert(page, search::SearchPage::new(items));
+            self.pdf_search_index.texts.insert(page, Arc::new(text));
         }
     }
 
@@ -10226,7 +10602,7 @@ impl Lapis {
         self.cache_order.clear();
         self.page_text.clear();
         self.page_links.clear();
-        self.pdf_full_text_index.clear();
+        self.pdf_search_index.clear();
         self.last_page_req = None;
         self.last_thumb_req = None;
         self.visible_pages = (0, 0);
@@ -12700,7 +13076,7 @@ impl Lapis {
                     && ui
                         .add_sized(
                             [sketch_width, 22.0],
-                            egui::Button::new(egui::RichText::new("󰠱").size(11.0).strong())
+                            egui::Button::new(egui::RichText::new(" ").size(11.0).strong())
                                 .selected(self.note_mode == NoteMode::Sketch)
                                 .corner_radius(button_radius),
                         )
@@ -12975,6 +13351,35 @@ impl Lapis {
                                 egui::Stroke::new(1.3, egui::Color32::from_rgb(240, 85, 85));
                             let checker_ref = &self.spellchecker;
 
+                            // Search hits of this note (char ranges) painted by the layouter.
+                            let note_hl: Vec<(usize, usize, bool)> = if self.show_search {
+                                self.search_hits
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, h)| {
+                                        h.source == search::Source::Note && h.page == self.note_page
+                                    })
+                                    .map(|(i, h)| (h.start, h.end, i == self.search_sel))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let hl_warn = rgb(self.theme.accent);
+                            let hl_bg = (
+                                egui::Color32::from_rgba_unmultiplied(
+                                    hl_warn.r(),
+                                    hl_warn.g(),
+                                    hl_warn.b(),
+                                    150,
+                                ),
+                                egui::Color32::from_rgba_unmultiplied(
+                                    hl_warn.r(),
+                                    hl_warn.g(),
+                                    hl_warn.b(),
+                                    60,
+                                ),
+                            );
+
                             // A finite desired width is essential here: INFINITY disables
                             // automatic wrapping and causes the editor to be clipped when the
                             // resizable panel becomes narrower.
@@ -12989,15 +13394,34 @@ impl Lapis {
                                     // paragraphs wrap at nearly the same points in both modes.
                                     let font_id = egui::FontId::proportional(note_font_sz);
 
+                                    // Char ranges of the search hits -> byte ranges of `s`.
+                                    let hl_bytes: Vec<(usize, usize, bool)> = if note_hl.is_empty()
+                                    {
+                                        Vec::new()
+                                    } else {
+                                        let idx: Vec<usize> = s
+                                            .char_indices()
+                                            .map(|(i, _)| i)
+                                            .chain(std::iter::once(s.len()))
+                                            .collect();
+                                        note_hl
+                                            .iter()
+                                            .filter(|(a, b, _)| a < b && *b < idx.len())
+                                            .map(|&(a, b, cur)| (idx[a], idx[b], cur))
+                                            .collect()
+                                    };
+
                                     let mut last_end = 0;
                                     for (idx, ch) in s.char_indices() {
                                         if !ch.is_alphabetic() && ch != '\'' {
                                             if idx > last_end {
                                                 let word = &s[last_end..idx];
                                                 let ok = checker_ref.check_word(word);
-                                                job.append(
-                                                    word,
-                                                    0.0,
+                                                append_highlighted(
+                                                    &mut job,
+                                                    s,
+                                                    last_end,
+                                                    idx,
                                                     egui::TextFormat {
                                                         font_id: font_id.clone(),
                                                         color: text_col,
@@ -13008,17 +13432,23 @@ impl Lapis {
                                                         },
                                                         ..Default::default()
                                                     },
+                                                    &hl_bytes,
+                                                    hl_bg,
                                                 );
                                             }
                                             let ch_end = idx + ch.len_utf8();
-                                            job.append(
-                                                &s[idx..ch_end],
-                                                0.0,
+                                            append_highlighted(
+                                                &mut job,
+                                                s,
+                                                idx,
+                                                ch_end,
                                                 egui::TextFormat {
                                                     font_id: font_id.clone(),
                                                     color: text_col,
                                                     ..Default::default()
                                                 },
+                                                &hl_bytes,
+                                                hl_bg,
                                             );
                                             last_end = ch_end;
                                         }
@@ -13026,9 +13456,11 @@ impl Lapis {
                                     if last_end < s.len() {
                                         let word = &s[last_end..];
                                         let ok = checker_ref.check_word(word);
-                                        job.append(
-                                            word,
-                                            0.0,
+                                        append_highlighted(
+                                            &mut job,
+                                            s,
+                                            last_end,
+                                            s.len(),
                                             egui::TextFormat {
                                                 font_id,
                                                 color: text_col,
@@ -13039,6 +13471,8 @@ impl Lapis {
                                                 },
                                                 ..Default::default()
                                             },
+                                            &hl_bytes,
+                                            hl_bg,
                                         );
                                     }
                                     ui.fonts_mut(|f| f.layout_job(job))
@@ -13056,6 +13490,24 @@ impl Lapis {
                                 .hint_text("Write your Markdown & $LaTeX$ notes here...");
 
                             let output = text_edit.show(ui);
+
+                            // Bring the current search hit into view.
+                            if self.search_note_scroll {
+                                self.search_note_scroll = false;
+                                if let Some(h) = self.search_hits.get(self.search_sel)
+                                    && h.source == search::Source::Note
+                                    && h.page == self.note_page
+                                {
+                                    let local = output
+                                        .galley
+                                        .pos_from_cursor(egui::text::CCursor::new(h.start));
+                                    let r = local.translate(output.galley_pos.to_vec2());
+                                    ui.scroll_to_rect(
+                                        r.expand2(egui::vec2(0.0, r.height() * 3.0)),
+                                        Some(egui::Align::Center),
+                                    );
+                                }
+                            }
 
                             // Spazio extra sotto il TextEdit per mantenere lo scrolloff anche sull'ultima riga
                             ui.add_space(edit_bottom_pad);
@@ -14109,9 +14561,10 @@ impl eframe::App for Lapis {
                 }
                 //10. Search
                 if self.app_state.shortcuts.search_notes.consume(i) {
-                    self.show_search = !self.show_search;
                     if self.show_search {
-                        self.focus_search_input = true;
+                        self.close_search();
+                    } else {
+                        self.open_search();
                     }
                 }
 
@@ -14242,7 +14695,6 @@ impl eframe::App for Lapis {
                 let widths_id = ui.make_persistent_id("topbar_stage_widths");
                 let stage = ui.data(|d| d.get_temp::<usize>(stage_id).unwrap_or(0)).min(3);
                 let menu_id = ui.make_persistent_id("file_menu_open_state");
-                let has_jump = !self.nav_back_stack.is_empty() || !self.nav_forward_stack.is_empty();
  
                 let mut left_end_x = row_rect.left();
                 let mut right_start_x = row_rect.right();
@@ -14471,9 +14923,6 @@ impl eframe::App for Lapis {
                         {
                             self.prev_page(ui.ctx());
                         }
-                        if stage < 3 && has_jump {
-                            self.topbar_jump_buttons(ui, sq_btn, false);
-                        }
                         ui.separator();
  
                         if stage < 1 {
@@ -14488,9 +14937,6 @@ impl eframe::App for Lapis {
                                 self.topbar_newpage_button(ui, sq_btn, true);
                                 if stage >= 3 {
                                     self.topbar_flash_button(ui, sq_btn, true);
-                                    if has_jump {
-                                        self.topbar_jump_buttons(ui, sq_btn, true);
-                                    }
                                 }
                                 if stage >= 4 {
                                     self.topbar_tools_button(ui, sq_btn, true);
@@ -17274,6 +17720,8 @@ impl eframe::App for Lapis {
         // Search
         if self.show_search && self.has_pdf() {
             self.render_search_popup(ui);
+        } else if self.show_search {
+            self.close_search();
         }
 
         //Command Palette
