@@ -619,6 +619,8 @@ impl SuiteTheme {
         v.widgets.open.corner_radius = radius;
         v.widgets.open.expansion = 0.0;
 
+        v.text_cursor.stroke = egui::Stroke::new(2.0, accent); // color and thickness
+
         ctx.set_style_of(egui::Theme::Dark, style.clone());
         ctx.set_style_of(egui::Theme::Light, style);
     }
