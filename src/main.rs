@@ -11114,15 +11114,15 @@ impl Lapis {
                 // Outer ring: tools (77 px radius).
                 let tools: &[(AnnotationTool, &str, &str)] = &[
                     (AnnotationTool::Cursor, "󰇀", "Cursor"),
-                    (AnnotationTool::Highlight, "", "Highlight"),
+                    (AnnotationTool::Highlight, " ", "Highlight"),
                     (AnnotationTool::Underline, "󰊇", "Underline"),
                     (AnnotationTool::Draw, "󱦹", "Pen"),
-                    (AnnotationTool::Shape, "󰠱", "Shapes"),
+                    (AnnotationTool::Shape, "󰠱 ", "Shapes"),
                     (AnnotationTool::TextBox, "󰊄", "Text"),
-                    (AnnotationTool::Tape, "󰝤", "Tape"),
-                    (AnnotationTool::Snip, "󰆞", "Snip"),
-                    (AnnotationTool::Laser, "󰐾", "Laser"),
-                    (AnnotationTool::Eraser, "󰇾", "Eraser"),
+                    (AnnotationTool::Tape, "󰝤 ", "Tape"),
+                    (AnnotationTool::Snip, "󰆞 ", "Snip"),
+                    (AnnotationTool::Laser, "󰐾 ", "Laser"),
+                    (AnnotationTool::Eraser, "󰇾 ", "Eraser"),
                 ];
                 let outer_r = 77.0;
                 let node_r = 18.0;
@@ -11204,7 +11204,7 @@ impl Lapis {
                     );
                     painter.circle_stroke(paste_pos, 12.0, egui::Stroke::new(1.2, rgb(self.theme.accent)));
                     painter.text(
-                        paste_pos, egui::Align2::CENTER_CENTER, "󰆒",
+                        paste_pos, egui::Align2::CENTER_CENTER, "󰆒 ",
                         egui::FontId::proportional(12.0), rgb(self.theme.fg_primary),
                     );
                     if paste_hovered {
