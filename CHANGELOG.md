@@ -7,39 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Standard PDF annotation interoperability (Import & Export):**
-    - **Visible in external viewers:** On save or exit, Lapis exports freehand strokes, shapes, highlights, and text boxes as standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText`) inside a single PDF incremental update. Your markup is now natively visible in other PDF readers/editors without needing a separate export.
-    - **Import from external readers:** Annotations created in external PDF viewers (`/Ink`, `/Highlight`, `/FreeText`, `/Text`) are automatically imported into Lapis's vector layer when opening the document, handling page rotations and coordinate conversions.
-    - **Two-way edit sync:** Exported Lapis annotations embed a lightweight content signature (`/LapisSig` and `/LapisKind`). If you move, resize, or edit a Lapis text box or annotation in an external editor, Lapis detects the change on reopen and updates the local annotation accordingly.
-    - **Immediate FreeText rendering (`/AP` streams):** Exported text boxes include a standard PDF Form XObject appearance stream with `WinAnsiEncoding` (supporting Latin-1 accented characters), ensuring text is immediately visible.
+* **Standard PDF Annotation Interoperability (Import & Export):**
+  * **External export & immediate rendering:** On save or exit, freehand strokes, shapes, highlights, and text boxes export as standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText`) in a single incremental update for native visibility in external viewers. Text boxes include a `WinAnsiEncoding` Form XObject appearance stream (`/AP`) supporting Latin-1 accents for immediate visibility.
+  * **External import & two-way sync:** External annotations (`/Ink`, `/Highlight`, `/FreeText`, `/Text`) import into Lapis's vector layer on open, handling page rotations and coordinate conversions. Exported items embed `/LapisSig` and `/LapisKind` signatures so external moves, resizes, or edits are detected and synced locally on reopen.
 
-- **Redesigned Global Search (`Ctrl + F`):** The search popup has been rebuilt to be clearer and nicer to use.
-  - **Cleaner layout:** A rounded search box with a clear button, a live "n of m" counter and a scrollable result list. The old tri-modal indication is gone: every result now shows what it is (Note, Slide, Audio with its timestamp, or Memo) and its page, so the kind of content is obvious at a glance.
-  - **Readable results:** Each result shows the text around the match with the matched words highlighted.
-  - **Keyboard cycling:** `Enter` jumps to the next result and `Shift + Enter` (or `↑` / `↓`) moves between them, wrapping around at the ends, without leaving the search box. Previous / next buttons are available as well.
-  - **Live search:** Results update while typing and the first match is shown right away, like a browser's find. Edits to the note being written are picked up too.
-  - **Reset on close:** Closing the popup (`Esc`, the close button or `Ctrl + F` again) clears the query, the results and every highlight.
-- **Current match highlighting:** The selected result is highlighted where it lives. On PDF pages the matching text is marked (the current hit in a stronger color, the other hits on the page more faintly), and in the notes editor the match is highlighted and scrolled into view. Selecting a note result opens the notes panel in Edit mode, since Preview cannot show the highlight.
+
+* **Redesigned Global Search (`Ctrl + F`):**
+  * **Cleaner layout & readable snippets:** Rebuilt with a rounded search box, clear button, live "n of m" counter, and scrollable results. Replacing the old tri-modal indicator, entries now badge their content type (Note, Slide, Audio with timestamp, or Memo), page number, and surrounding context with matched words highlighted.
+  * **Live search & navigation:** Results update as you type (including live edits in the active note) and immediately jump to the first match. Cycle results with wrap-around via `Enter`, `Shift + Enter`, `↑` / `↓`, or UI buttons without leaving the input box.
+  * **In-place highlighting & reset on close:** PDF pages highlight all matches (stronger color for the active hit, fainter for others), while note matches scroll into view and open in Edit mode (as Preview cannot display highlights). Closing via `Esc`, the close button, or `Ctrl + F` clears the query, results, and all highlights.
+
+
 
 ### Changed
 
-- **Zero-bloat hybrid persistence:** Periodic background autosaves now write exclusively to the local backup (`~/.local/share/lapis` / `%LOCALAPPDATA%\lapis`), keeping editing instantaneous and preventing the PDF file from growing on every stroke. The PDF file itself is updated in a single atomic commit on explicit Save (`Ctrl + S`), document switch, or application exit. When committing to a PDF whose last revision was already written by Lapis, Lapis replaces its own previous trailing incremental update instead of stacking new revisions on every session.
-- **Stream-based metadata & fast ID lookup:** Lapis's portable metadata block (`%LAPIS_CUSTOM_START` ... `%LAPIS_CUSTOM_END`) is now stored inside an uncompressed PDF stream object rather than as raw bytes after `%%EOF`, keeping `startxref` and `%%EOF` at the physical end of the file. Document ID lookup scans the last 16 MiB first and falls back to a full read only when needed.
-- **Jump back / forward moved into the search popup:** The two navigation-history buttons no longer take space in the topbar; they now live in the footer of the search popup. The `Alt + Backspace` shortcuts are unchanged. Moving through results is recorded as a single step in the history, so **Back** returns to the page the search started from instead of replaying every result.
+* **Zero-bloat hybrid persistence:** Background autosaves write exclusively to the local backup (`~/.local/share/lapis` / `%LOCALAPPDATA%\lapis`) for instant editing without file bloat. The PDF updates in a single atomic commit on explicit Save (`Ctrl + S`), document switch, or exit, replacing Lapis's own prior trailing incremental update rather than stacking revisions.
+* **Stream-based metadata & fast ID lookup:** Portable metadata (`%LAPIS_CUSTOM_START` ... `%LAPIS_CUSTOM_END`) is now stored inside an uncompressed PDF stream object instead of raw bytes after `%%EOF`, keeping `startxref` and `%%EOF` at the physical end of the file. Document ID lookup scans the last 16 MiB before falling back to a full read.
+* **Fixing UI:** Topbar back/forward buttons are removed. They were rarely useful.
+* **Unified glass UI:** The FILE, zoom, view-mode, overflow (`⋯`), bookmark, and right-click menus (page style, spelling, voice memos) now replace the default egui frame with a rounded, translucent glass style controlled by `MENU_GLASS_ALPHA`.
 
 ### Fixed
 
-- **External PDF annotations no longer overwritten:** Lapis no longer truncates bytes after the first `%%EOF` marker. Incremental updates appended by external software (such as Microsoft Edge) are preserved intact across saves.
-- **The eraser icon now displays properly in the main PDF area as well.**
-- **Search results that did not contain the searched text:** Results used to show the beginning of the matching line instead of the match, so most entries looked unrelated to the query. Results now show the text around the match and always contain it.
-- **More reliable matching:** Searches are case-insensitive, ignore differences in whitespace and can match phrases that wrap onto the next line of a PDF page. Each occurrence is listed separately, and the results are computed only when the query or the content changes instead of on every frame.
-- **PDFs without text:** The PDF text index of a document without any extractable text was rebuilt on every frame while the search was open.
+* **Preserved external PDF annotations:** Lapis no longer truncates bytes after the first `%%EOF`, preserving incremental updates appended by external viewers like Microsoft Edge.
+* **Eraser icon:** Now displays properly in the main PDF area.
+* **Accurate search snippets & matching:** Snippets now center around the matched text rather than the start of the line. Searches are case-insensitive, whitespace-agnostic, match across wrapped PDF lines, list every occurrence separately, and recompute only when the query or content changes (rather than every frame).
+* **Textless PDF indexing:** Fixed an issue where PDFs without extractable text rebuilt their text index on every frame while search was open.
 
-### Compatibility and upgrade notes
+### Compatibility and Upgrade Notes
 
-- **Automatic migration of existing documents (Backward Compatibility):** PDFs annotated with Lapis 1.3.0 and earlier (using the legacy `---Lapis_NOTES_V1---` trailer after `%%EOF`) are recognized and migrated automatically the first time they are opened and saved in 1.4.0. No manual action is required.
-- **Opening 1.4.0 files in older Lapis versions (Forward Compatibility):** Because 1.4.0 stores portable metadata inside a standard PDF stream using the new `%LAPIS_CUSTOM_START` delimiters, Lapis 1.3.0 and earlier will not read the new embedded metadata block from the PDF (though standard PDF annotations will still be visible if rendered). Please update Lapis to 1.4.0 across all your machines.
-- **Deletion safety net:** Deleting a Lapis-created annotation inside an external viewer (e.g. Microsoft Edge) does not delete it from Lapis's local backup on reopen, protecting study-specific items (such as Occlusion Tapes and custom shapes) from accidental external removal. To permanently delete a Lapis annotation, remove it inside Lapis.
+* **Automatic backward migration:** Documents from Lapis 1.3.0 and earlier (using the legacy `---Lapis_NOTES_V1---` trailer after `%%EOF`) migrate automatically on their first open and save in 1.4.0.
+* **Forward compatibility:** Lapis 1.3.0 and earlier cannot read 1.4.0's stream-based `%LAPIS_CUSTOM_START` metadata block (though standard rendered PDF annotations remain visible). Update all machines to 1.4.0.
+* **Deletion safety net:** Deleting a Lapis annotation in an external viewer will not remove it from Lapis's local backup on reopen, protecting study-specific items like Occlusion Tapes and custom shapes. Permanent deletion must be done inside Lapis.
+
 
 ## [1.3.0] - 2026/11/08 
 

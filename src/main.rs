@@ -568,6 +568,33 @@ struct PageText {
     lines: Vec<TextLine>,
 }
 
+/// Background alpha of the menus and popups opened from the main page (0 = invisible).
+const MENU_GLASS_ALPHA: u8 = 200;
+
+/// Frame look of the built-in egui menus, taken from `modal_glass_frame`.
+#[derive(Clone, Copy)]
+struct MenuGlass {
+    fill: egui::Color32,
+    stroke: egui::Stroke,
+    radius: egui::CornerRadius,
+    shadow: egui::Shadow,
+}
+
+impl MenuGlass {
+    /// egui draws the frame of a menu from the style the menu is opened with, not from the
+    /// style of the button, so the look has to be passed as a style modifier.
+    fn modifier(self) -> egui::style::StyleModifier {
+        egui::style::StyleModifier::new(move |style| {
+            egui::containers::menu::menu_style(style);
+            let v = &mut style.visuals;
+            v.window_fill = self.fill;
+            v.window_stroke = self.stroke;
+            v.menu_corner_radius = self.radius;
+            v.popup_shadow = self.shadow;
+        })
+    }
+}
+
 /// Text of every PDF page prepared for the global search. The characters keep their
 /// positions, so a hit can be highlighted on the page.
 #[derive(Default)]
@@ -1322,10 +1349,7 @@ struct Lapis {
     search_sel: usize,
     /// Hash of everything the hits depend on (query, notes, ...): hits are recomputed when it changes.
     search_key: u64,
-    search_scroll_y: f32,
     search_scroll_to_sel: bool,
-    /// The location the search started from is pushed on the history stack only once.
-    search_history_pushed: bool,
     /// Ask the notes editor to scroll to the current hit.
     search_note_scroll: bool,
     pdf_dark_mode: bool,
@@ -1374,9 +1398,6 @@ struct Lapis {
     page_links: HashMap<u32, Vec<PdfLinkZone>>,
     /// Active rectangle `[start_norm, cur_norm]` while dragging with the Snip tool
     active_snip_rect: Option<(u32, (f32, f32), (f32, f32))>,
-    /// Navigation history stacks for internal PDF link jumps
-    nav_back_stack: Vec<u32>,
-    nav_forward_stack: Vec<u32>,
     show_tools_rail: bool,
     radial_menu_pos: Option<egui::Pos2>,
     show_flashcards_modal: bool,
@@ -1506,7 +1527,7 @@ impl Lapis {
             active_stroke: None,
             stroke_width: 2.5,
             selected_textbox: None,
-            textbox_font_size: 18.0,
+            textbox_font_size: 16.0,
             textbox_bold: false,
             textbox_italic: false,
             page_text: HashMap::new(),
@@ -1524,9 +1545,7 @@ impl Lapis {
             search_hits: Vec::new(),
             search_sel: 0,
             search_key: 0,
-            search_scroll_y: 0.0,
             search_scroll_to_sel: false,
-            search_history_pushed: false,
             search_note_scroll: false,
             pdf_dark_mode: false,
             hidden_pages: HashSet::new(),
@@ -1568,8 +1587,6 @@ impl Lapis {
             laser_trail: Vec::new(),
             page_links: HashMap::new(),
             active_snip_rect: None,
-            nav_back_stack: Vec::new(),
-            nav_forward_stack: Vec::new(),
             show_tools_rail: false,
             radial_menu_pos: None,
             show_flashcards_modal: false,
@@ -2422,7 +2439,7 @@ impl Lapis {
             ViewMode::SlideshowWithNotes => "󰠮 Present+Notes",
         };
 
-        ui.menu_button(view_label, |ui| {
+        Self::glass_menu_button(ui, self.menu_glass(), view_label, |ui| {
             ui.set_min_width(215.0);
             if ui
                 .selectable_label(
@@ -2668,7 +2685,8 @@ impl Lapis {
             );
 
         let mut chosen_style = None;
-        response.context_menu(|ui| {
+        let glass_style = self.menu_glass().modifier();
+        egui::Popup::context_menu(&response).style(glass_style).show(|ui| {
             ui.set_min_width(190.0);
             ui.label(egui::RichText::new("New page style").strong());
             ui.add_space(4.0);
@@ -2794,7 +2812,7 @@ impl Lapis {
                 .pivot(egui::Align2::CENTER_TOP)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
-                    egui::Frame::menu(ui.style())
+                    self.modal_glass_frame(MENU_GLASS_ALPHA)
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             ui.set_width(220.0);
@@ -4600,7 +4618,7 @@ impl Lapis {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     if img_resp.clicked() {
                         if let Some(tp) = link.target_page {
-                            self.jump_with_history(tp, ui.ctx());
+                            self.go_to_page(tp, ui.ctx());
                         } else if let Some(ref url) = link.external_uri {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                         }
@@ -6591,10 +6609,7 @@ impl Lapis {
     }
 
     fn open_search(&mut self) {
-        if !self.show_search {
-            self.show_search = true;
-            self.search_history_pushed = false;
-        }
+        self.show_search = true;
         self.focus_search_input = true;
     }
 
@@ -6607,9 +6622,7 @@ impl Lapis {
         self.search_hits.clear();
         self.search_sel = 0;
         self.search_key = 0;
-        self.search_scroll_y = 0.0;
         self.search_scroll_to_sel = false;
-        self.search_history_pushed = false;
         self.search_note_scroll = false;
     }
 
@@ -6747,16 +6760,6 @@ impl Lapis {
         self.search_scroll_to_sel = true;
 
         if hit.page != self.current_page && (1..=self.total_pages).contains(&hit.page) {
-            // Cycling through the hits is one single step in the history: "back" returns to
-            // where the search started.
-            if !self.search_history_pushed {
-                self.nav_back_stack.push(self.current_page);
-                if self.nav_back_stack.len() > 50 {
-                    self.nav_back_stack.remove(0);
-                }
-                self.nav_forward_stack.clear();
-                self.search_history_pushed = true;
-            }
             self.go_to_page(hit.page, ctx);
         }
 
@@ -6818,9 +6821,8 @@ impl Lapis {
             });
         }
 
-        if self.focus_search_input {
-            ctx.memory_mut(|m| m.request_focus(input_id));
-            self.focus_search_input = false;
+        if step != 0 {
+            self.search_step(step.signum(), &ctx);
         }
 
         let accent = rgb(self.theme.accent);
@@ -6831,28 +6833,29 @@ impl Lapis {
             weak,
             hover: rgb(self.theme.bg_hover),
         };
-        let (mut close, mut go_back, mut go_forward, mut refocus) = (false, false, false, false);
+        let (mut close, mut refocus) = (false, false);
         let mut clicked_row: Option<usize> = None;
         let mut nav_step: i64 = 0;
-        let can_back = !self.nav_back_stack.is_empty();
-        let can_forward = !self.nav_forward_stack.is_empty();
-        const LIST_MAX_H: f32 = 180.0;
+        // Rows visible before the list scrolls. The half row shows that there is more below.
+        const LIST_ROWS: f32 = 3.5;
 
         egui::Area::new(ui.make_persistent_id("global_search_popover"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
             .order(egui::Order::Foreground)
             .constrain(true)
             .show(&ctx, |ui| {
-                self.modal_glass_frame(200)
-                    .inner_margin(egui::Margin::same(12))
+                self.modal_glass_frame(MENU_GLASS_ALPHA)
+                    .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.set_width(440.0);
+                        ui.set_width(340.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        let n = self.search_hits.len();
 
-                        // Search box.
+                        // One row: icon, text box, counter and result buttons. Every piece has a
+                        // fixed width and the row a fixed height, so nothing overlaps or stretches.
                         egui::Frame::NONE
                             .fill(rgb(self.theme.bg_widget))
-                            .corner_radius(egui::CornerRadius::same(8))
+                            .corner_radius(egui::CornerRadius::same(7))
                             .stroke(egui::Stroke::new(
                                 1.0,
                                 if input_had_focus {
@@ -6861,168 +6864,157 @@ impl Lapis {
                                     rgb(self.theme.border)
                                 },
                             ))
-                            .inner_margin(egui::Margin::symmetric(10, 7))
+                            .inner_margin(egui::Margin::symmetric(8, 3))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 8.0;
-                                    ui.label(
-                                        egui::RichText::new("\u{f0349}").size(15.0).color(accent),
-                                    );
-                                    let clear_w = if self.search_query.is_empty() {
-                                        0.0
-                                    } else {
-                                        26.0
-                                    };
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.search_query)
-                                            .id(input_id)
-                                            .hint_text("Search notes, slides, audio…")
-                                            .font(egui::FontId::proportional(14.5))
-                                            .frame(egui::Frame::NONE)
-                                            .desired_width(
-                                                (ui.available_width() - clear_w).max(40.0),
+                                const ROW_H: f32 = 24.0;
+                                const GAP: f32 = 4.0;
+                                const ICON_W: f32 = 18.0;
+                                const BTN: f32 = 22.0;
+                                const COUNTER_W: f32 = 56.0;
+                                let row_w = ui.available_width();
+                                let status = if self.search_query.trim().is_empty() {
+                                    String::new()
+                                } else if n == 0 {
+                                    "No match".to_string()
+                                } else if n >= search::MAX_HITS {
+                                    format!("{}/{}+", self.search_sel + 1, n)
+                                } else {
+                                    format!("{}/{}", self.search_sel + 1, n)
+                                };
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(row_w, ROW_H),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.x = GAP;
+                                        ui.add_sized(
+                                            [ICON_W, ROW_H],
+                                            egui::Label::new(
+                                                egui::RichText::new("\u{f0349}")
+                                                    .size(14.0)
+                                                    .color(accent),
                                             ),
-                                    );
-                                    if !self.search_query.is_empty()
-                                        && ui
-                                            .add(egui::Button::new("\u{f0156}").frame(false))
-                                            .on_hover_text("Clear")
+                                        );
+                                        let text_w = (row_w
+                                            - ICON_W
+                                            - COUNTER_W
+                                            - 3.0 * BTN
+                                            - 5.0 * GAP)
+                                            .max(40.0);
+                                        let te = ui.add(
+                                            egui::TextEdit::singleline(&mut self.search_query)
+                                                .id(input_id)
+                                                .hint_text("Search notes, slides, audio…")
+                                                .font(egui::FontId::proportional(14.0))
+                                                .frame(egui::Frame::NONE)
+                                                .desired_width(text_w),
+                                        );
+                                        // A new popup spends its first frame(s) measuring itself and
+                                        // drops focus requests, so keep asking until the box has it.
+                                        if self.focus_search_input {
+                                            if te.has_focus() {
+                                                self.focus_search_input = false;
+                                            } else {
+                                                te.request_focus();
+                                            }
+                                        }
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(COUNTER_W, ROW_H),
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(status)
+                                                        .size(11.0)
+                                                        .color(weak),
+                                                );
+                                            },
+                                        );
+                                        let icon_btn = |glyph: &str| {
+                                            egui::Button::new(
+                                                egui::RichText::new(glyph).size(12.0),
+                                            )
+                                            .frame(false)
+                                            .min_size(egui::vec2(BTN, BTN))
+                                        };
+                                        if ui
+                                            .add_enabled(n > 0, icon_btn("\u{f0143}"))
+                                            .on_hover_text("Previous result [Shift+Enter]")
                                             .clicked()
-                                    {
-                                        self.search_query.clear();
-                                        refocus = true;
-                                    }
-                                });
+                                        {
+                                            nav_step = -1;
+                                            refocus = true;
+                                        }
+                                        if ui
+                                            .add_enabled(n > 0, icon_btn("\u{f0140}"))
+                                            .on_hover_text("Next result [Enter]")
+                                            .clicked()
+                                        {
+                                            nav_step = 1;
+                                            refocus = true;
+                                        }
+                                        if ui
+                                            .add(icon_btn("\u{f0156}"))
+                                            .on_hover_text("Close and reset the search [Esc]")
+                                            .clicked()
+                                        {
+                                            close = true;
+                                        }
+                                    },
+                                );
                             });
 
-                        ui.add_space(8.0);
-                        let n = self.search_hits.len();
-                        ui.horizontal(|ui| {
-                            let status = if self.search_query.trim().is_empty() {
-                                "Type to search notes, slides and audio".to_string()
-                            } else if n == 0 {
-                                "No matches".to_string()
-                            } else if n >= search::MAX_HITS {
-                                format!("{} of {}+", self.search_sel + 1, n)
-                            } else {
-                                format!("{} of {}", self.search_sel + 1, n)
-                            };
-                            ui.label(egui::RichText::new(status).size(12.0).color(weak));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button("\u{f0156}")
-                                        .on_hover_text("Close and reset the search [Esc]")
-                                        .clicked()
-                                    {
-                                        close = true;
-                                    }
-                                    if ui
-                                        .add_enabled(n > 0, egui::Button::new("\u{f0140}").small())
-                                        .on_hover_text("Next result [Enter]")
-                                        .clicked()
-                                    {
-                                        nav_step = 1;
-                                        refocus = true;
-                                    }
-                                    if ui
-                                        .add_enabled(n > 0, egui::Button::new("\u{f0143}").small())
-                                        .on_hover_text("Previous result [Shift+Enter]")
-                                        .clicked()
-                                    {
-                                        nav_step = -1;
-                                        refocus = true;
-                                    }
-                                },
+                        if self.search_query.trim().is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Enter next  ·  Shift+Enter previous  ·  Esc close",
+                                )
+                                .size(11.0)
+                                .color(weak),
                             );
-                        });
+                        }
 
                         if n > 0 {
                             ui.add_space(4.0);
-                            let step_h = search::ROW_H + ui.spacing().item_spacing.y;
-                            let view_h = LIST_MAX_H.min(n as f32 * step_h);
-                            let mut area = egui::ScrollArea::vertical()
-                                .id_salt("global_search_results_scroll")
-                                .max_height(LIST_MAX_H)
-                                .auto_shrink([false, true]);
-                            if self.search_scroll_to_sel {
-                                self.search_scroll_to_sel = false;
-                                let top = self.search_sel as f32 * step_h;
-                                let bottom = top + search::ROW_H;
-                                let off = self.search_scroll_y;
-                                let new_off = if top < off {
-                                    top
-                                } else if bottom > off + view_h {
-                                    bottom - view_h
-                                } else {
-                                    off
-                                };
-                                area = area.vertical_scroll_offset(new_off);
-                            }
+                            let list_max_h =
+                                (search::ROW_H + ui.spacing().item_spacing.y) * LIST_ROWS;
                             let hits = &self.search_hits;
                             let sel = self.search_sel;
-                            let out = area.show_rows(ui, search::ROW_H, n, |ui, range| {
-                                for i in range {
-                                    if search::result_row(ui, &hits[i], i == sel, &colors).clicked()
-                                    {
-                                        clicked_row = Some(i);
-                                    }
-                                }
+                            let follow = self.search_scroll_to_sel;
+                            ui.scope(|ui| {
+                                // A solid scroll bar, so it is clear when there is more to scroll.
+                                ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+                                ui.visuals_mut().widgets.inactive.bg_fill = accent;
+                                ui.visuals_mut().widgets.hovered.bg_fill = accent.gamma_multiply(1.2); // brighter on hover
+                                ui.visuals_mut().widgets.active.bg_fill = accent.gamma_multiply(0.8);  // darker while dragging
+                                egui::ScrollArea::vertical()
+                                    .id_salt("global_search_results_scroll")
+                                    .max_height(list_max_h)
+                                    // An Area only offers the size it had last frame, which for a popup
+                                    // that opened empty is tiny: ask for the full height explicitly.
+                                    .min_scrolled_height(list_max_h)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
+                                        for (i, hit) in hits.iter().enumerate() {
+                                            let resp =
+                                                search::result_row(ui, hit, i == sel, &colors);
+                                            if resp.clicked() {
+                                                clicked_row = Some(i);
+                                            }
+                                            // Keep the selected result in view while cycling.
+                                            if follow && i == sel {
+                                                resp.scroll_to_me(None);
+                                            }
+                                        }
+                                    });
                             });
-                            self.search_scroll_y = out.state.clamped_offset().y;
+                            self.search_scroll_to_sel = false;
                         }
-
-                        // Footer: history navigation lives here, with the keyboard hints.
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    can_back,
-                                    egui::Button::new(format!("{} Back", "\u{f004d}")).small(),
-                                )
-                                .on_hover_text("Return to the previous location [Alt+Backspace]")
-                                .clicked()
-                            {
-                                go_back = true;
-                            }
-                            if ui
-                                .add_enabled(
-                                    can_forward,
-                                    egui::Button::new(format!("Forward {}", "\u{f0054}")).small(),
-                                )
-                                .on_hover_text("Go forward in the location history")
-                                .clicked()
-                            {
-                                go_forward = true;
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new("Enter next · Shift+Enter previous")
-                                            .size(11.0)
-                                            .color(weak),
-                                    );
-                                },
-                            );
-                        });
                     });
             });
 
         if close {
             self.close_search();
             return;
-        }
-        if go_back {
-            self.nav_back(&ctx);
-            self.search_history_pushed = false;
-        }
-        if go_forward {
-            self.nav_forward(&ctx);
-            self.search_history_pushed = false;
         }
 
         // Results follow the query (and the notes) live.
@@ -7058,9 +7050,8 @@ impl Lapis {
             self.search_goto_selected(&ctx);
             refocus = true;
         }
-        let total_step = step + nav_step;
-        if total_step != 0 {
-            self.search_step(total_step.signum(), &ctx);
+        if nav_step != 0 {
+            self.search_step(nav_step, &ctx);
         }
         if refocus {
             ctx.memory_mut(|m| m.request_focus(input_id));
@@ -7316,7 +7307,7 @@ impl Lapis {
         match cmd_id {
             "__jump_page__" => {
                 if let Some(p) = opt_page {
-                    self.jump_with_history(p, ctx);
+                    self.go_to_page(p, ctx);
                 }
             }
             "toggle_split" => {
@@ -8116,7 +8107,7 @@ impl Lapis {
                             row.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |right| {
-                                    right.menu_button("⋯", |menu| {
+                                    Self::glass_menu_button(right, self.menu_glass(), "⋯", |menu| {
                                         menu.set_min_width(150.0);
 
                                         if menu.button("󰑕 Rename").clicked() {
@@ -10515,9 +10506,6 @@ impl Lapis {
                 self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
                 self.note_page = remap(self.note_page);
                 self.split_secondary_page = remap(self.split_secondary_page);
-                self.nav_back_stack = self.nav_back_stack.iter().copied().map(remap).collect();
-                self.nav_forward_stack =
-                    self.nav_forward_stack.iter().copied().map(remap).collect();
                 self.revealed_tapes = std::mem::take(&mut self.revealed_tapes)
                     .into_iter()
                     .map(|(p, i)| (remap(p), i))
@@ -10686,31 +10674,6 @@ impl Lapis {
             self.toast_message = Some(("󰑎 Redo annotation".to_string(), std::time::Instant::now()));
         }
     }
-    fn jump_with_history(&mut self, target_page: u32, ctx: &egui::Context) {
-        if target_page != self.current_page && (1..=self.total_pages).contains(&target_page) {
-            self.nav_back_stack.push(self.current_page);
-            if self.nav_back_stack.len() > 50 {
-                self.nav_back_stack.remove(0);
-            }
-            self.nav_forward_stack.clear();
-            self.go_to_page(target_page, ctx);
-        }
-    }
-
-    fn nav_back(&mut self, ctx: &egui::Context) {
-        if let Some(prev) = self.nav_back_stack.pop() {
-            self.nav_forward_stack.push(self.current_page);
-            self.go_to_page(prev, ctx);
-        }
-    }
-
-    fn nav_forward(&mut self, ctx: &egui::Context) {
-        if let Some(next) = self.nav_forward_stack.pop() {
-            self.nav_back_stack.push(self.current_page);
-            self.go_to_page(next, ctx);
-        }
-    }
-
     fn render_sub_topbar_tools(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("sub_topbar_tools")
             .exact_size(36.0)
@@ -10922,18 +10885,22 @@ impl Lapis {
                 let c = box_rect.min + egui::vec2(105.0, 105.0);
                 let painter = ui.painter();
 
-                // Soft circular backdrop halo + ring guides
+                // Glass backdrop like the other popups: soft shadow, translucent fill, hairline
+                // border, then the inner ring guide.
+                for k in 0..8 {
+                    painter.circle_filled(
+                        c + egui::vec2(0.0, 8.0),
+                        104.0 + (8 - k) as f32 * 2.5,
+                        egui::Color32::from_black_alpha(10),
+                    );
+                }
+                let [gr, gg, gb] = self.theme.bg_elevated;
                 painter.circle_filled(
                     c,
                     102.0,
-                    egui::Color32::from_rgba_unmultiplied(
-                        self.theme.bg_panel[0],
-                        self.theme.bg_panel[1],
-                        self.theme.bg_panel[2],
-                        235,
-                    ),
+                    egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
                 );
-                painter.circle_stroke(c, 102.0, egui::Stroke::new(1.5, rgb(self.theme.accent)));
+                painter.circle_stroke(c, 102.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
                 painter.circle_stroke(c, 52.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
 
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
@@ -11140,10 +11107,17 @@ impl Lapis {
                     let pos = c + egui::vec2(0.0, 122.0);
                     let w = txt.chars().count() as f32 * 7.0 + 20.0;
                     let r = egui::Rect::from_center_size(pos, egui::vec2(w, 20.0));
+                    let [gr, gg, gb] = self.theme.bg_elevated;
                     painter.rect_filled(
                         r,
                         egui::CornerRadius::same(8),
-                        rgb(self.theme.bg_elevated),
+                        egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
+                    );
+                    painter.rect_stroke(
+                        r,
+                        egui::CornerRadius::same(8),
+                        egui::Stroke::new(1.0, rgb(self.theme.border)),
+                        egui::StrokeKind::Inside,
                     );
                     painter.text(
                         pos,
@@ -12056,6 +12030,34 @@ impl Lapis {
                 ));
             }
         }
+    }
+
+    /// Glass look of the menus and popups opened from the main page.
+    fn menu_glass(&self) -> MenuGlass {
+        let f = self.modal_glass_frame(MENU_GLASS_ALPHA);
+        MenuGlass {
+            fill: f.fill,
+            stroke: f.stroke,
+            radius: f.corner_radius,
+            shadow: f.shadow,
+        }
+    }
+
+    /// Like `Ui::menu_button`, with the glass look. Inside another menu it stays a submenu,
+    /// which inherits the look of its parent.
+    fn glass_menu_button<'a, R>(
+        ui: &mut egui::Ui,
+        glass: MenuGlass,
+        atoms: impl egui::IntoAtoms<'a>,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::InnerResponse<Option<R>> {
+        if egui::containers::menu::is_in_menu(ui) {
+            return ui.menu_button(atoms, add_contents);
+        }
+        let (response, inner) = egui::containers::menu::MenuButton::new(atoms)
+            .config(egui::containers::menu::MenuConfig::new().style(glass.modifier()))
+            .ui(ui, add_contents);
+        egui::InnerResponse::new(inner.map(|i| i.inner), response)
     }
 
     fn modal_glass_frame(&self, alpha: u8) -> egui::Frame {
@@ -13586,7 +13588,8 @@ impl Lapis {
                             let mut spell_action: Option<SpellAction> = None;
 
                             if let Some((_, _, word)) = &ctx_word {
-                                output.response.context_menu(|ui| {
+                                let glass_style = self.menu_glass().modifier();
+                                egui::Popup::context_menu(&output.response).style(glass_style).show(|ui| {
                                     ui.set_min_width(170.0);
                                     ui.label(
                                         egui::RichText::new(format!("“{}”", word))
@@ -14738,7 +14741,7 @@ impl eframe::App for Lapis {
                         ZoomMode::Custom => format!("󰍉 {:.0}%", self.zoom_scale * 100.0),
                     };
  
-                    let zoom_menu = ui.menu_button(zoom_label, |ui| {
+                    let zoom_menu = Self::glass_menu_button(ui, self.menu_glass(), zoom_label, |ui| {
                     ui.set_min_width(140.0);
                     if ui.button("Zoom In [Ctrl++]").clicked() {
                         self.enter_custom_zoom();
@@ -14811,7 +14814,7 @@ impl eframe::App for Lapis {
                         self.topbar_split_button(ui, sq_btn, false);
                         self.topbar_dark_button(ui, sq_btn, false);
                     } else {
-                        let more = ui.menu_button("⋯", |ui| {
+                        let more = Self::glass_menu_button(ui, self.menu_glass(), "⋯", |ui| {
                             ui.set_min_width(200.0);
                             if stage >= 4 {
                                 // At minimum width, the File menu moves here.
@@ -14930,7 +14933,7 @@ impl eframe::App for Lapis {
                             bm_anchor = self.topbar_bookmark_button(ui, sq_btn, false);
                             self.topbar_newpage_button(ui, sq_btn, false);
                         } else {
-                            let more = ui.menu_button("⋯", |ui| {
+                            let more = Self::glass_menu_button(ui, self.menu_glass(), "⋯", |ui| {
                                 ui.set_min_width(200.0);
                                 self.topbar_search_button(ui, sq_btn, true);
                                 self.topbar_bookmark_button(ui, sq_btn, true);
@@ -15111,7 +15114,7 @@ impl eframe::App for Lapis {
                         .pivot(popup_pivot)
                         .order(egui::Order::Foreground)
                         .show(ui.ctx(), |ui| {
-                            egui::Frame::menu(ui.style())
+                            self.modal_glass_frame(MENU_GLASS_ALPHA)
                                 .inner_margin(egui::Margin::symmetric(6, 6))
                                 .show(ui, |ui| {
                                     let menu_width = 232.0;

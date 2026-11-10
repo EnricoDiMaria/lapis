@@ -11,7 +11,7 @@ use eframe::egui::{self, Color32};
 pub const MAX_HITS: usize = 500;
 
 /// Height of one result row.
-pub const ROW_H: f32 = 42.0;
+pub const ROW_H: f32 = 28.0;
 
 /// Marks a character that does not exist in the original text (e.g. the space inserted
 /// between two lines of a PDF page).
@@ -143,7 +143,7 @@ impl SearchPage {
                 let fe = self.norm_map[i + n - 1] + 1;
                 let (a, b) = (self.flat_src[fs], self.flat_src[fe - 1]);
                 if a != SYNTHETIC && b != SYNTHETIC {
-                    let (snippet, snip_match) = make_snippet(&self.flat, fs, fe, 28, 70);
+                    let (snippet, snip_match) = make_snippet(&self.flat, fs, fe, 10, 60);
                     out.push(PageMatch {
                         start: a,
                         end: b + 1,
@@ -252,7 +252,7 @@ fn char_range_to_bytes(s: &str, (a, b): (usize, usize)) -> (usize, usize) {
     (start, end.max(start))
 }
 
-/// One result row: source badge, page, and a snippet with the match highlighted.
+/// One compact result row: source icon (and timestamp), the match in its context and the page.
 pub fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool, c: &RowColors) -> egui::Response {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, ROW_H), egui::Sense::click());
@@ -264,44 +264,50 @@ pub fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool, c: &RowColors) -
     if selected {
         painter.rect_filled(
             r,
-            egui::CornerRadius::same(7),
+            egui::CornerRadius::same(6),
             Color32::from_rgba_unmultiplied(c.accent.r(), c.accent.g(), c.accent.b(), 48),
         );
         painter.rect_stroke(
             r,
-            egui::CornerRadius::same(7),
+            egui::CornerRadius::same(6),
             egui::Stroke::new(1.0, c.accent),
             egui::StrokeKind::Inside,
         );
     } else if resp.hovered() {
-        painter.rect_filled(r, egui::CornerRadius::same(7), c.hover);
+        painter.rect_filled(r, egui::CornerRadius::same(6), c.hover);
     }
 
-    let pad = 10.0;
+    let pad = 8.0;
+    let mid = r.center().y;
     let small = egui::FontId::proportional(11.0);
 
-    // Top line: badge on the left, page number on the right.
-    let badge = if hit.tag.is_empty() {
-        format!("{} {}", hit.source.icon(), hit.source.label())
-    } else {
-        format!("{} {} · {}", hit.source.icon(), hit.source.label(), hit.tag)
-    };
-    painter.text(
-        egui::pos2(r.left() + pad, r.top() + 5.0),
-        egui::Align2::LEFT_TOP,
-        badge,
-        small.clone(),
+    let icon = painter.text(
+        egui::pos2(r.left() + pad, mid),
+        egui::Align2::LEFT_CENTER,
+        hit.source.icon(),
+        egui::FontId::proportional(13.0),
         c.accent,
     );
-    painter.text(
-        egui::pos2(r.right() - pad, r.top() + 5.0),
-        egui::Align2::RIGHT_TOP,
+    let mut x = icon.right() + 6.0;
+    if !hit.tag.is_empty() {
+        let tag = painter.text(
+            egui::pos2(x, mid),
+            egui::Align2::LEFT_CENTER,
+            &hit.tag,
+            small.clone(),
+            c.weak,
+        );
+        x = tag.right() + 6.0;
+    }
+    let page = painter.text(
+        egui::pos2(r.right() - pad, mid),
+        egui::Align2::RIGHT_CENTER,
         format!("p. {}", hit.page),
         small,
         c.weak,
     );
 
-    // Bottom line: snippet with the match highlighted.
+    // The match in its context, truncated to the space left between icon and page number.
     let (b0, b1) = char_range_to_bytes(&hit.snippet, hit.snip_match);
     let font = egui::FontId::proportional(13.0);
     let plain = egui::TextFormat {
@@ -316,7 +322,7 @@ pub fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool, c: &RowColors) -
         ..Default::default()
     };
     let mut job = egui::text::LayoutJob::default();
-    job.wrap = egui::text::TextWrapping::truncate_at_width((r.width() - 2.0 * pad).max(10.0));
+    job.wrap = egui::text::TextWrapping::truncate_at_width((page.left() - 8.0 - x).max(20.0));
     if b0 > 0 {
         job.append(&hit.snippet[..b0], 0.0, plain.clone());
     }
@@ -327,8 +333,10 @@ pub fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool, c: &RowColors) -
         job.append(&hit.snippet[b1..], 0.0, plain);
     }
     let galley = painter.layout_job(job);
-    painter.galley(egui::pos2(r.left() + pad, r.top() + 21.0), galley, c.text);
-    resp
+    painter.galley(egui::pos2(x, mid - galley.size().y / 2.0), galley, c.text);
+
+    // Full text on hover, since the row is truncated.
+    resp.on_hover_text(format!("{} · {}", hit.source.label(), hit.snippet))
 }
 
 #[cfg(test)]

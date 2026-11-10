@@ -607,7 +607,6 @@ Each result shows what it is (Note, Slide, Audio with its timestamp, or Memo), i
 
 - **Enter** goes to the next result and **Shift + Enter** (or the **↑** / **↓** keys) to the previous one. The previous / next buttons do the same.
 - The selected result is highlighted where it lives: on the PDF page, or in the notes editor (selecting a note result switches the notes panel to Edit mode).
-- Cycling through results counts as one step in the navigation history. Use **Back** / **Forward** in the footer of the popup (or `Alt + Backspace`) to return to where you were.
 - Closing the popup with **Esc**, the close button or `Ctrl + F` resets the search.
 
 This is useful when you remember a concept or phrase but not where it appeared in the lecture.
