@@ -43,12 +43,12 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 - **Customizable Workspace**: Choose which features to enable, which buttons to display, and tailor the app to your liking. Select from 15+ unique themes, upload custom fonts, personalize keyboard shortcuts, and much more — all from advanced settings.
 - **Split View** — Display and annotate two PDF pages side by side.
 - **PDF Night Mode** — Toggle a dark viewing treatment for PDFs.
-- **Annotation tools always at hand**: Right-click anywhere on the PDF to open the radial menu.
+- **Annotation tools always at hand**: Right-click the PDF canvas to open the radial menu when no PDF text is selected; right-click selected PDF text to copy it.
 - **Full Drawing & Markup Kit** — Freehand drawing, highlighting, underlining, shapes, text boxes, eraser, occlusion tape, region snipping, and laser pointer.
-- **Ergonomic Drawing**: You can draw simply by holding down the Spacebar and moving the cursor, offering a much more ergonomic workflow on laptops without needing to click and drag on the touchpad (Note: ensure "Disable touchpad while typing" is turned off in your OS settings).
+- **Ergonomic Drawing** — Hold Spacebar and move the pointer to draw on the PDF or Sketch canvas without clicking. On laptops, you may need to turn off your OS’s “Disable touchpad while typing” setting.
 - **Custom Study Pages** — Insert ruled, dotted, grid, or blank pages into your document.
 - **Markdown & LaTeX Notes** — Edit and preview formatted notes, including mathematical expressions.
-- **Spellchecking & Dictionaries** — Offline spellchecking, suggestions, custom words, and additional dictionaries.
+- **Spellchecking & Dictionaries** — Offline multi-language Hunspell checking, ranked suggestions with language tags, custom words, and enable/disable controls for each dictionary.
 - **Lecture Audio Workspace** — Import or record lecture audio, inspect its waveform, trim recordings, and navigate through playback.
 - **Offline Speech Recognition** — Transcribe lectures and individual voice memos with Parakeet.
 - **Slide-Aware Transcripts** — Associate transcript segments with PDF pages and navigate between the recording and the corresponding slide.
@@ -176,7 +176,7 @@ sudo apt install build-essential cmake libclang-dev pkg-config libasound2-dev li
 Clone and compile:
 
 ```bash
-git clone https://github.com/<YOUR-USERNAME>/lapis.git
+git clone https://github.com/EnricoDiMaria/lapis.git
 cd lapis
 cargo build --release
 ```
@@ -197,7 +197,7 @@ Native builds must be made on Windows (the PDF backend is compiled with MSBuild)
 4. Enable long paths: `git config --system core.longpaths true`.
 
 ```powershell
-git clone https://github.com/<YOUR-USERNAME>/lapis.git
+git clone https://github.com/EnricoDiMaria/lapis.git
 cd lapis
 $env:CARGO_TARGET_DIR = "C:\t"      # short path: the PDF backend has a deep build tree
 cargo build --release
@@ -308,9 +308,9 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 
 - **Hybrid PDF & standard annotation storage:** While you work, periodic autosaves update a fast **local backup** without bloating the PDF file. When you explicitly save (`Ctrl + S`), switch documents, or close the app, Lapis commits a single **PDF Incremental Update** containing both standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText` with appearance streams for external viewers) and Lapis's own metadata stream (notes, sketches, flashcards, and custom properties).
 - **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open, without truncating external PDF revisions.
-- **Notes and annotations live inside the PDF**, in a small JSON block appended after the final `%%EOF`. Other PDF readers ignore it, so the file stays a valid PDF and your work travels with it.
-- A **local backup** of the same data is written first on every save (it survives a PDF that is locked or read-only).
-- Every document has a random **document ID** stored in that block. Local data (note backup, audio folder, original-PDF copy) is keyed by the ID rather than by the file path, so moving or renaming a PDF, or opening it on another computer, keeps everything connected. A copy of a file made on the same computer gets its own ID.
+- **Portable Lapis metadata is stored inside a PDF stream object**, delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END`, rather than appended after `%%EOF`. Standard PDF annotations are stored separately as native annotation objects. Both travel with the PDF.
+- **Autosaves update the local backup** without modifying the PDF. Explicit Save (`Ctrl + S`), document switches and exit commit document changes to the PDF; the local backup also protects against an interrupted or unavailable PDF write.
+- Every saved document has a random **document ID** stored in its metadata. Local data (note backup, audio folder, original-PDF copy) is keyed by the ID rather than by the file path, so moving or renaming a PDF, or opening it on another computer, keeps everything connected. A copy of a file made on the same computer gets its own ID.
 - Each save records a **revision**. When the PDF and the local backup disagree, the newest revision wins as a whole (so deletions propagate too) and the discarded version is kept as `notes/<id>.conflict-<timestamp>.bak` (the latest five).
 - Annotations are stored in coordinates normalised to the page (0–1), so they follow the page at any zoom and in the export.
 - Audio recordings, transcripts, voice memos, screenshots and dictionaries are stored only in the local data folder.
@@ -345,7 +345,7 @@ For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a f
 
 ## Additional spelling languages
 
-Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download the matching files into one folder, then choose either file in **Add dictionary**. See the [user guide](docs/USER_GUIDE.md) for a step to step explanation.
+Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download matching files and select both at once in **Add dictionary**, or add either file first and its missing partner later. Incomplete pairs are warned about and remain inactive. You can disable any installed language, including built-in English, without deleting it; the dictionary list shows both file paths. Suggestions are ranked across all enabled languages with source labels such as **IT** and **EN**. See the [user guide](docs/USER_GUIDE.md#9-spellchecking-and-dictionaries) for direct download links and instructions.
 
 ## Development
 
@@ -382,7 +382,7 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `PageDown` | Next page |
 | `Left / Right` | Previous / Next page when not typing |
 | `K / J` | Previous / Next page when not typing |
-| `Space` | Audio play / pause, when applicable |
+| `Space` | Draw without pressing the mouse button on PDF / Sketch with a drawing tool; otherwise audio play / pause when applicable |
 | `Ctrl + Plus` | Zoom in |
 | `Ctrl + Minus` | Zoom out |
 | `Ctrl + 0` | Reset zoom to 100% |

@@ -24,8 +24,6 @@ This guide explains how to use the main Lapis features, from opening a PDF to bu
 16. [Importing and Exporting Notes](#16-importing-and-exporting-notes)
 
 
-This section explains how to use the main Lapis features, from opening a PDF to building a complete study workflow.
-
 ## 1. Opening a document
 
 Start by opening a PDF through the **Open PDF** action or by dragging a PDF into the application.
@@ -94,7 +92,7 @@ Use the available navigation controls or keyboard shortcuts to move between page
 
 Combines the presentation view with the notes workspace.
 
-This mode is useful when presenting or reviewing a slide while keeping its associated notes available.
+This mode is useful when presenting or reviewing a slide while keeping its associated notes available. Its notes header uses compact, frameless controls consistent with the application topbar.
 
 ### Fullscreen — `F11`
 
@@ -183,9 +181,11 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-- Select a tool from the annotation toolbar (two versions available in advanced settings: orizontal sub-topbar and vertical). Closing either annotation bar returns to Cursor / Select by default; **Settings → Study & Canvas** can keep the selected tool active instead. 
-- The radial tools menu can also be used when enabled in Settings and can be opened with a right click anywhere on the PDF: you can select something from these menu using right-click (and the menu does not close) or left-click (to close the menu right after the selection).
-> You can draw simply by holding down the Spacebar and moving the cursor, offering a much more ergonomic workflow on laptops without needing to click and drag on the touchpad (Note: ensure "Disable touchpad while typing" is turned off in your OS settings).
+- Select tools from the annotation toolbar, available as a horizontal sub-topbar or a vertical bar. Closing either bar returns to Cursor / Select by default; change this in **Settings → Study & Canvas → Annotation toolbar** if you prefer to keep the active tool.
+- Right-click an unselected area of the PDF canvas to open the radial tools menu when enabled. Right-click a radial item to apply it **without closing the menu**, or left-click to apply it and close the menu. A small image-paste button appears beside the main radial menu only when a clipboard image is available.
+- Right-click selected PDF text to open a **Copy** context menu instead of the radial menu.
+
+> Hold Spacebar and move the pointer to draw without clicking on the PDF canvas. On laptops, you may need to disable your OS’s “Disable touchpad while typing” setting.
 
 ### Cursor
 
@@ -318,7 +318,7 @@ You can use Markdown syntax to structure your notes with:
 
 Switch to Preview to see the formatted result rather than the raw Markdown source.
 
-Use the Edit / Preview shortcut to switch between the two modes.
+Use the Edit / Preview shortcut to switch between the two modes. In **Edit**, right-click selected text for **Copy**, **Cut**, and **Paste**; without a selection, the menu offers **Paste**. In **Preview**, right-click selected text for **Copy**. Clipboard actions use the system clipboard.
 
 ### Sketch
 
@@ -422,7 +422,7 @@ The Dictionaries settings section lets you install full Hunspell dictionaries, i
 
 2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting both `.dic` and `.aff` files at once (multi-select). You can also select only one file now and add the missing partner later; Lapis warns about incomplete pairs and activates the language only after both files are present.
 
-3. Lapis copies both files into its local dictionary directory and shows the full path to each `.aff` and `.dic` file in the installed dictionaries list. Use **Enable spellchecking** beside any added dictionary, or the checkbox for **English (built-in)**, to enable or disable that language without deleting its files. A word is accepted if any enabled dictionary recognizes it; suggestions display their source language (for example **IT** or **EN**) on the right.
+3. Lapis copies both files into its local dictionary directory and shows the full path to each `.aff` and `.dic` file in the installed dictionaries list. Use the checkbox beside each dictionary, including **English (built-in)**, to enable or disable that language without deleting its files. A word is accepted if any enabled dictionary recognizes it; the five suggestions are ranked across all enabled languages rather than favoring English, with source labels (such as **IT** or **EN**) at the right. Single-letter edits are favored over inserted spaces or hyphens, although split suggestions remain available.
 
 
 A legacy `.txt` word list can still be loaded without affix rules. Dictionaries work offline after installation.
@@ -565,7 +565,7 @@ Open it using the **Flashcards** toolbar button or the corresponding Command Pal
   <img src="images/13-flashcards-trainer.png" alt="Flashcards active recall trainer" width="85%">
 </p>
 
-The trainer allows you to review cards, reveal answers, and track your study progress.
+The trainer allows you to review cards, reveal answers, and track your study progress. The Flashcards toolbar button can show a notification dot when the document contains flashcards; **Settings → Study & Canvas → Active Recall** lets you hide the dot without hiding the button.
 
 ### Creating flashcards from notes
 
@@ -653,13 +653,12 @@ Settings are divided into dedicated sections.
 
 ### Study & Canvas
 
-Contains study-related and annotation options, including:
+The controls are grouped to reduce long runs of checkboxes:
 
-- Study and tool preferences.
-- Occlusion Tape controls.
-- Flashcard button visibility.
-- Default page insertion style.
-- Related workspace behavior.
+- **Annotation toolbar:** show or hide the bar, choose horizontal or vertical placement, adjust tool behavior (including switching back to Cursor when closing the bar), and stroke thickness.
+- **Sidebars & Panels:** panel persistence and Notes, Sketch, and Audio options.
+- **Active Recall:** occlusion controls, Flashcards button visibility and its notification dot.
+- **Pages & Presentation:** page insertion style and Slideshow + Notes options.
 
 ### Theme & Fonts
 
