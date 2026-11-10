@@ -1277,6 +1277,47 @@ fn annotation_color(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> [u8;3] {
     c
 }
 
+/// FreeText font sizes are PDF text sizes (points). Edge and most editors put
+/// the current font in /DA as `/FontName <size> Tf`; some also write a CSS-like
+/// /DS style string. Do not infer font size from the annotation rectangle.
+fn free_text_font_size(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> f32 {
+    fn valid_size(size: f32) -> Option<f32> {
+        (size.is_finite() && size > 0.0).then_some(size.clamp(6.0, 96.0))
+    }
+
+    // Use the LAST valid Tf: a /DA string may set fonts more than once.
+    if let Some(lopdf::Object::String(da, _)) = dict.get(b"DA").ok()
+        .cloned().map(|object| resolve_obj(doc, object))
+    {
+        let tokens: Vec<&str> = std::str::from_utf8(&da)
+            .unwrap_or("").split_whitespace().collect();
+        for i in (2..tokens.len()).rev() {
+            if tokens[i] == "Tf" && tokens[i - 2].starts_with('/') {
+                if let Ok(size) = tokens[i - 1].parse::<f32>() {
+                    if let Some(size) = valid_size(size) { return size; }
+                }
+            }
+        }
+    }
+
+    // A few producers use the rich-text default style instead of /DA.
+    if let Some(lopdf::Object::String(ds, _)) = dict.get(b"DS").ok()
+        .cloned().map(|object| resolve_obj(doc, object))
+    {
+        let style = String::from_utf8_lossy(&ds);
+        for declaration in style.split(';') {
+            let Some((name, value)) = declaration.split_once(':') else { continue; };
+            if !name.trim().eq_ignore_ascii_case("font-size") { continue; }
+            let value = value.trim().to_ascii_lowercase();
+            let size = value.strip_suffix("pt").unwrap_or(&value).trim();
+            if let Ok(size) = size.parse::<f32>() {
+                if let Some(size) = valid_size(size) { return size; }
+            }
+        }
+    }
+    16.0 // Compatibility with older annotations that specify no font size.
+}
+
 fn annotation_rect(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> Option<[f32;4]> {
     let o = resolve_obj(doc, dict.get(b"Rect").ok()?.clone());
     let a = o.as_array().ok()?;
@@ -1461,7 +1502,7 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
                 }
                 b"FreeText" | b"Text" => {
                     if let Some(r)=annotation_rect(&doc,dict) {
-                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:18.0,bold:false,italic:false,stroke_width:2.5 });
+                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:free_text_font_size(&doc,dict),bold:false,italic:false,stroke_width:2.5 });
                     }
                 }
                 _ => {}
@@ -1484,6 +1525,22 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
             if is_lapis_exported && stored_sig.as_deref().is_some_and(|sig| {
                 imported.iter().all(|annotation| annotation_signature(annotation) == sig)
             }) {
+                // /LapisSig intentionally fingerprints geometry, color and text, not
+                // font size. If Edge changes only the size, the signature still
+                // matches: update the existing local box without resurrecting a
+                // locally deleted annotation.
+                if let (Some(sig), Some(external)) = (stored_sig.as_deref(), imported.first()) {
+                    if let Some(local) = target.get_mut(&page_num)
+                        .and_then(|items| items.iter_mut()
+                            .find(|item| annotation_signature(item) == sig))
+                    {
+                        if local.kind == AnnotationKind::TextBox
+                            && (local.font_size - external.font_size).abs() > 0.01
+                        {
+                            local.font_size = external.font_size;
+                        }
+                    }
+                }
                 continue;
             }
             if !imported.is_empty() {
@@ -3157,6 +3214,57 @@ mod tests {
 
     fn count_custom_sections(bytes: &[u8]) -> usize {
         bytes.windows(NOTES_START_TAG.len()).filter(|w| *w == NOTES_START_TAG).count()
+    }
+
+    #[test]
+    fn edge_freetext_uses_pdf_font_size_instead_of_lapis_default() {
+        use lopdf::{dictionary, Object};
+        let doc = lopdf::Document::with_version("1.7");
+        let da = dictionary! { "DA" => Object::string_literal(b"0 0 0 rg /Arial 11.5 Tf".to_vec()) };
+        assert!((free_text_font_size(&doc, &da) - 11.5).abs() < 0.001);
+        let multiple = dictionary! { "DA" => Object::string_literal(b"/Helv 9 Tf /Arial 23 Tf".to_vec()) };
+        assert_eq!(free_text_font_size(&doc, &multiple), 23.0);
+        let style = dictionary! { "DS" => Object::string_literal(b"font-family: Arial; font-size: 14pt; color: black".to_vec()) };
+        assert_eq!(free_text_font_size(&doc, &style), 14.0);
+        let missing = dictionary! {};
+        assert_eq!(free_text_font_size(&doc, &missing), 16.0);
+    }
+
+    #[test]
+    fn edge_freetext_import_and_font_size_only_external_edit_sync() {
+        use lopdf::{dictionary, Object};
+        let root = std::env::temp_dir().join(format!("lapis_edge_font_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("font.pdf");
+        valid_test_pdf(&path);
+        let mut doc = lopdf::Document::load(&path).unwrap();
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let sample = PageAnnotation {
+            kind: AnnotationKind::TextBox, color: [0, 0, 0],
+            points: vec![(0.1, 0.1), (0.4, 0.3)], text: "Edge text".to_owned(),
+            font_size: 16.0, bold: false, italic: false, stroke_width: 2.5,
+        };
+        let signature = annotation_signature(&sample);
+        let annotation_id = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "Rect" => vec![Object::Real(61.2), Object::Real(554.4), Object::Real(244.8), Object::Real(712.8)],
+            "Contents" => Object::string_literal(b"Edge text".to_vec()),
+            "DA" => Object::string_literal(b"/Helv 26 Tf 0 0 0 rg".to_vec()),
+            "LapisExported" => true,
+            "LapisSig" => Object::string_literal(signature.into_bytes()),
+            "LapisKind" => Object::string_literal(b"TextBox".to_vec()),
+        });
+        doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
+            .set("Annots", vec![Object::Reference(annotation_id)]);
+        doc.save(&path).unwrap();
+
+        // Edge retains the Lapis signature when changing only the text size.
+        // The previously saved local annotation must be updated in place.
+        let mut local = HashMap::from([(1, vec![sample])]);
+        import_external_annotations(&path, &mut local);
+        assert_eq!(local[&1].len(), 1);
+        assert_eq!(local[&1][0].font_size, 26.0);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
