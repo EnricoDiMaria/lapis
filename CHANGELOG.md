@@ -5,6 +5,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+* **Slideshow + Notes:** Redesigned the note header with compact, frameless topbar-style spacing and a smaller pin control.
+
 * **Annotation bar close behavior:** Closing the top or vertical annotation bar restores Cursor / Select by default; an Advanced checkbox lets users retain the active tool.
 
 

@@ -14259,62 +14259,37 @@ impl Lapis {
 
     fn render_slideshow_notes_contents(&mut self, ui: &mut egui::Ui, active_slide_note: String) {
         ui.take_available_width();
-        egui::Frame::NONE
-            .fill(rgb(self.theme.bg_elevated))
-            .stroke(egui::Stroke::new(1.0, rgb(self.theme.border)))
-            .corner_radius(egui::CornerRadius::same(
-                self.theme.corner_radius.saturating_add(2),
-            ))
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("SLIDE NOTES")
-                            .size(11.5)
-                            .strong()
-                            .color(rgb(self.theme.fg_muted)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
-                        let lock_button =
-                            egui::Button::new(egui::RichText::new(lock_icon).size(11.5))
-                                .selected(self.lock_note_page)
-                                .fill(if self.lock_note_page {
-                                    rgb(self.theme.bg_active)
-                                } else {
-                                    rgb(self.theme.bg_widget)
-                                })
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    if self.lock_note_page {
-                                        rgb(self.theme.accent)
-                                    } else {
-                                        rgb(self.theme.border)
-                                    },
-                                ))
-                                .corner_radius(egui::CornerRadius::same(
-                                    self.theme.corner_radius.saturating_sub(1),
-                                ));
-                        if ui
-                            .add_sized([28.0, 27.0], lock_button)
-                            .on_hover_text("Pin or unpin the current note while browsing slides")
-                            .clicked()
-                        {
-                            self.lock_note_page = !self.lock_note_page;
-                        }
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} / {}",
-                                self.current_page, self.total_pages
-                            ))
-                            .size(12.5)
-                            .strong()
-                            .color(rgb(self.theme.fg_primary)),
-                        );
-                    });
-                });
+        ui.add_space(6.0);
+        // A frameless header keeps the note pane aligned with the rest of the topbar.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(
+                egui::RichText::new("󰈙  Notes")
+                    .size(13.0)
+                    .strong()
+                    .color(rgb(self.theme.fg_primary)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
+                if ui
+                    .add_sized(
+                        [26.0, 26.0],
+                        egui::Button::new(egui::RichText::new(icon).size(13.0))
+                            .selected(self.lock_note_page)
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .on_hover_text("Pin or unpin the current note while browsing slides")
+                    .clicked()
+                {
+                    self.lock_note_page = !self.lock_note_page;
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} / {}", self.note_page, self.total_pages))
+                        .size(11.5)
+                        .color(rgb(self.theme.fg_muted)),
+                );
             });
+        });
         ui.add_space(8.0);
 
         // Case 1: pinned note.
