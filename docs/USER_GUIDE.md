@@ -337,6 +337,8 @@ mouse button, or scroll with the wheel / trackpad; the canvas also scrolls by it
 of the panel. A thin scroll bar at the edge shows where you are and whether there is more canvas. `Ctrl + wheel` or
 pinch zooms around the cursor.
 
+Hold **Spacebar** and move the pointer to draw in the Sketch canvas without clicking. Release Space to finish the stroke. This works with the pen, shape tools, and eraser; the hand and text tools keep their normal interaction.
+
 **Toolbar:**
 
 - **Tools:** hand (moves the canvas), pen, eraser, line, arrow, rectangle, circle and text. The eraser removes

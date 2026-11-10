@@ -973,10 +973,27 @@ fn handle_input(
 ) -> bool {
     let mut changed = false;
     let primary = PointerButton::Primary;
-    let press = ui
-        .input(|i| i.pointer.press_origin())
-        .or(resp.interact_pointer_pos());
     let pos = resp.interact_pointer_pos().or(resp.hover_pos());
+    // No mouse button is pressed during a Space gesture, so press_origin() is
+    // None. Start at the hovered pointer position instead of requiring a drag.
+    // Ignore Space only while editing a text box inside the sketch itself:
+    // the Markdown editor may retain keyboard focus after switching tabs.
+    let space_down = ui.input(|i| i.key_down(egui::Key::Space))
+        && st.edit.is_none()
+        && (resp.hovered() || st.active.is_some());
+    let space_start = space_down && st.active.is_none();
+    let space_stop = !space_down && st.active.is_some()
+        && !ui.input(|i| i.pointer.button_down(primary));
+    let press = if space_start {
+        pos
+    } else {
+        ui.input(|i| i.pointer.press_origin())
+            .or(resp.interact_pointer_pos())
+    };
+    let drawing = resp.dragged_by(primary) || (space_down && pos.is_some());
+    if space_start {
+        st.focus = true;
+    }
 
     if (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.button_down(primary)))
         || resp.clicked_by(primary)
@@ -986,7 +1003,7 @@ fn handle_input(
 
     // Drawing near the edge of the panel scrolls the canvas along, so a stroke can go on.
     if st.active.is_some()
-        && resp.dragged_by(primary)
+        && drawing
         && let Some(p) = pos
     {
         let view = ui.clip_rect();
@@ -1008,12 +1025,12 @@ fn handle_input(
     match st.tool {
         SketchTool::Hand => {} // handled with the middle button, see `canvas_area`
         SketchTool::Pen => {
-            if resp.drag_started_by(primary) {
+            if resp.drag_started_by(primary) || space_start {
                 if let Some(p) = press {
                     let pt = to_unit(origin, zoom, p);
                     st.active = Some(new_annotation(st, AnnotationKind::Freehand, vec![pt]));
                 }
-            } else if resp.dragged_by(primary)
+            } else if drawing
                 && let (Some(p), Some(active)) = (pos, st.active.as_mut())
             {
                 let pt = to_unit(origin, zoom, p);
@@ -1021,7 +1038,7 @@ fn handle_input(
                     active.points.push(pt);
                 }
             }
-            if resp.drag_stopped_by(primary) {
+            if resp.drag_stopped_by(primary) || space_stop {
                 if let Some(mut stroke) = st.active.take() {
                     stroke.points = smooth(&stroke.points, zoom);
                     changed |= commit_stroke(st, page, sketches, stroke);
@@ -1036,12 +1053,12 @@ fn handle_input(
         }
         SketchTool::Line | SketchTool::Arrow | SketchTool::Rect | SketchTool::Circle => {
             let kind = st.tool.shape_kind().unwrap_or(AnnotationKind::Line);
-            if resp.drag_started_by(primary) {
+            if resp.drag_started_by(primary) || space_start {
                 if let Some(p) = press {
                     let pt = to_unit(origin, zoom, p);
                     st.active = Some(new_annotation(st, kind, vec![pt, pt]));
                 }
-            } else if resp.dragged_by(primary)
+            } else if drawing
                 && let (Some(p), Some(active)) = (pos, st.active.as_mut())
             {
                 let pt = to_unit(origin, zoom, p);
@@ -1049,7 +1066,7 @@ fn handle_input(
                     *last = pt;
                 }
             }
-            if resp.drag_stopped_by(primary)
+            if (resp.drag_stopped_by(primary) || space_stop)
                 && let Some(shape) = st.active.take()
             {
                 let (a, b) = (shape.points[0], *shape.points.last().unwrap());
@@ -1061,7 +1078,7 @@ fn handle_input(
         }
         SketchTool::Eraser => {
             let erasing = resp.drag_started_by(primary)
-                || resp.dragged_by(primary)
+                || drawing
                 || resp.clicked_by(primary);
             if erasing && let Some(p) = pos {
                 let hit: Vec<usize> = sketches
@@ -1091,7 +1108,7 @@ fn handle_input(
                     changed = true;
                 }
             }
-            if !resp.dragged_by(primary) {
+            if !drawing {
                 st.erase_snapshot_taken = false;
             }
         }
