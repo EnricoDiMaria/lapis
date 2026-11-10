@@ -5198,8 +5198,15 @@ impl Lapis {
                                                 match self.settings_tab {
                                                     // ───────────── STUDY & CANVAS ─────────────
                                                     SettingsTab::StudyAndTools => {
-                                                        ui.label(egui::RichText::new("Annotation & Active Recall Tools").size(15.0).strong());
-                                                        ui.add_space(8.0);
+                                                        ui.label(egui::RichText::new("Study & Canvas").size(16.0).strong());
+                                                        ui.weak("Choose which tools appear, how panels behave, and how you study.");
+                                                        ui.add_space(10.0);
+
+                                                        ui.group(|ui| {
+                                                            ui.set_min_width(PANE_W - 54.0);
+                                                            ui.label(egui::RichText::new("Annotation toolbar").size(14.0).strong());
+                                                            ui.weak("Visibility and quick access");
+                                                            ui.add_space(5.0);
 
                                                         if ui
                                                             .checkbox(
@@ -5221,6 +5228,8 @@ impl Lapis {
                                                             settings_dirty = true;
                                                         }
 
+                                                        ui.add_space(8.0);
+                                                        ui.label(egui::RichText::new("When closing the toolbar").strong());
                                                         if ui.checkbox(
                                                             &mut self.app_state.settings.reset_tool_on_bar_close,
                                                             "Switch to Cursor when closing the annotation bar",
@@ -5229,7 +5238,7 @@ impl Lapis {
                                                         }
 
                                                         ui.add_space(10.0);
-                                                        ui.label(egui::RichText::new("Annotation Tools Layout").size(13.5).strong());
+                                                        ui.label(egui::RichText::new("Toolbar position").size(13.0).strong());
                                                         ui.add_space(4.0);
 
                                                         ui.horizontal(|ui| {
@@ -5258,14 +5267,17 @@ impl Lapis {
                                                             ui.add(egui::Slider::new(&mut self.stroke_width, 1.0..=18.0).suffix(" px"));
                                                         });
 
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
+                                                        });
+                                                        ui.add_space(10.0);
+                                                        ui.group(|ui| {
+                                                            ui.set_min_width(PANE_W - 54.0);
                                                         ui.label(
                                                             egui::RichText::new("Sidebars & Panels")
                                                                 .size(15.0)
                                                                 .strong(),
                                                         );
-                                                        ui.add_space(6.0);
+                                                        ui.weak("Remember which panels were open");
+                                                        ui.add_space(5.0);
                                                         if ui
                                                             .checkbox(
                                                                 &mut self.app_state.settings.restore_show_notes,
@@ -5284,6 +5296,8 @@ impl Lapis {
                                                         {
                                                             settings_dirty = true;
                                                         }
+                                                        ui.add_space(9.0);
+                                                        ui.label(egui::RichText::new("Notes workspace").size(13.0).strong());
                                                         if ui
                                                             .checkbox(
                                                                 &mut self.app_state.settings.bottom_notes,
@@ -5309,6 +5323,8 @@ impl Lapis {
                                                                 }
                                                             }
                                                         }
+                                                        ui.add_space(9.0);
+                                                        ui.label(egui::RichText::new("Audio workspace").size(13.0).strong());
                                                         if ui
                                                             .checkbox(
                                                                 &mut self.app_state.settings.audio_notes,
@@ -5329,14 +5345,16 @@ impl Lapis {
                                                         }
                                                         
 
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
+                                                        });
+                                                        ui.add_space(10.0);
+                                                        ui.group(|ui| {
+                                                            ui.set_min_width(PANE_W - 54.0);
                                                         ui.label(
-                                                            egui::RichText::new("Active Recall & Occlusion Tape")
+                                                            egui::RichText::new("Active Recall")
                                                                 .size(15.0)
                                                                 .strong(),
                                                         );
+                                                        ui.weak("Occlusion tape controls");
                                                         ui.add_space(6.0);
 
                                                         ui.horizontal_wrapped(|ui| {
@@ -5363,7 +5381,10 @@ impl Lapis {
                                                             }
                                                         });
 
-                                                        ui.add_space(8.0);
+                                                        ui.add_space(10.0);
+                                                        ui.separator();
+                                                        ui.add_space(7.0);
+                                                        ui.label(egui::RichText::new("Flashcards").size(13.0).strong());
                                                         if ui
                                                             .checkbox(
                                                                 &mut self.app_state.settings.flash_button,
@@ -5390,12 +5411,12 @@ impl Lapis {
                                                         });
 
 
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
+                                                        });
+                                                        ui.add_space(10.0);
+                                                        ui.group(|ui| {
+                                                            ui.set_min_width(PANE_W - 54.0);
                                                         ui.label(
-                                                            egui::RichText::new("New Pages, Slideshow & Notes")
+                                                            egui::RichText::new("Pages & Presentation")
                                                                 .size(15.0)
                                                                 .strong(),
                                                         );
@@ -5416,6 +5437,9 @@ impl Lapis {
                                                         });
                                                         ui.add_space(8.0);
 
+                                                        ui.separator();
+                                                        ui.add_space(7.0);
+                                                        ui.label(egui::RichText::new("Slideshow + Notes").size(13.0).strong());
                                                         ui.weak(
                                                             "Choose how Slideshow + Notes handles slides without annotations.",
                                                         );
@@ -5455,6 +5479,8 @@ impl Lapis {
                                                             }
                                                         }
 
+
+                                                        });
 
                                                     }
 

@@ -4,6 +4,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* **Study & Canvas settings:** Organized annotation, panel, audio, recall, and presentation controls into clearly labeled groups without removing options.
+
 
 * **Slideshow + Notes:** Redesigned the note header with compact, frameless topbar-style spacing and a smaller pin control.
 
