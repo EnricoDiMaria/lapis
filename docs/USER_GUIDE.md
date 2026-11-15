@@ -662,9 +662,23 @@ The controls are grouped to reduce long runs of checkboxes:
 
 ### Theme & Fonts
 
-Customize the application's visual appearance and typography.
+Select one source at the top: **Presets**, **Catppuccin**, or **Custom**. These are alternatives; switching replaces the active palette, and only the selected source’s controls are shown.
 
-Use these settings to adapt the workspace to your preferences.
+Under **Presets**, choose a built-in palette from the **Dark** or **Light** group. Each entry shows its own accent and background colors. Under **Catppuccin**, choose **Latte**, **Frappe**, **Macchiato**, or **Mocha**, then one of its 14 accents. The accent colors match [the official Catppuccin palette](https://catppuccin.com/palette/).
+
+Open **Customize palette** to edit backgrounds, widget states, text, accents, borders, status colors, and corner radius. Editing switches the source to **Custom**. Changes apply immediately and the active theme is restored on restart. Color pickers open above settings; press `Esc` once to close a picker and again to close settings.
+
+To keep a palette while trying other themes:
+
+1. Enter a name in **Custom theme name** and click **Save custom theme**.
+2. Select **Custom** and recall it from **Saved custom themes…** whenever you want.
+3. To replace that named palette with your current colors, use the same name and click **Update saved theme**.
+
+**Import…** loads a theme JSON file; save it under a name to keep it in the custom-theme menu. **Export…** writes the current theme to a portable JSON file. **Reset default** restores Suite Dark without removing saved custom themes.
+
+Named palettes are stored in `custom_themes.json` alongside the active `theme.json` in the Lapis configuration folder. Selected controls use the full accent with contrasting palette tones throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars. Catppuccin surfaces retain their official colors; hover and pressed widget text adapts for readability. Custom colors remain editable, so choose text and background colors that work well together.
+
+PDF dark mode, notes font size, and custom font controls remain below the theme section.
 
 ### Keybindings
 

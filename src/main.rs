@@ -20,6 +20,7 @@ mod export;
 mod notes;
 mod sketch;
 mod theme;
+mod theme_picker;
 use theme::{SuiteTheme, rgb};
 mod state;
 use crate::state::*;
@@ -2420,12 +2421,15 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  Annotation tools", "")
-                } else {
-                    " ".to_string()
-                })
-                .selected(self.show_tools_rail)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  Annotation tools", "")
+                    } else {
+                        " ".to_string()
+                    },
+                    self.show_tools_rail,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
             .on_hover_text("Toggle Annotation Tools Bar")
@@ -2541,12 +2545,15 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  Split view", "󰯌")
-                } else {
-                    "󰯌".to_string()
-                })
-                .selected(self.split_view_enabled)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  Split view", "󰯌")
+                    } else {
+                        "󰯌".to_string()
+                    },
+                    self.split_view_enabled,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
             .on_hover_text("Toggle PDF Split-View (view & annotate two pages side-by-side)")
@@ -2572,12 +2579,15 @@ impl Lapis {
         let dark_icon = if self.pdf_dark_mode { "󰖔" } else { "󰖙" };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  PDF night mode", dark_icon)
-                } else {
-                    dark_icon.to_string()
-                })
-                .selected(self.pdf_dark_mode)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  PDF night mode", dark_icon)
+                    } else {
+                        dark_icon.to_string()
+                    },
+                    self.pdf_dark_mode,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
             .on_hover_text("Toggle PDF Dark / Night Mode")
@@ -2604,12 +2614,15 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{} Search in notes", "")
-                } else {
-                    " ".to_string()
-                })
-                .selected(self.show_search)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{} Search in notes", "")
+                    } else {
+                        " ".to_string()
+                    },
+                    self.show_search,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
             .on_hover_text(format!(
@@ -2642,12 +2655,15 @@ impl Lapis {
         // Flashcards of the page on screen: the live text of the editor when it is that page's note.
         let has_flashcards = self.document_has_flashcards();
         let resp = ui.add(
-            egui::Button::new(if labeled {
-                format!("{}  Flashcards", "󰘸")
-            } else {
-                "󰘸 ".to_string()
-            })
-            .selected(self.show_flashcards_modal)
+            crate::theme::selected_button(
+                if labeled {
+                    format!("{}  Flashcards", "󰘸")
+                } else {
+                    "󰘸 ".to_string()
+                },
+                self.show_flashcards_modal,
+                ui.visuals(),
+            )
             .min_size(btn_size),
         );
         if has_flashcards && self.app_state.settings.flash_notification_dot {
@@ -2727,7 +2743,11 @@ impl Lapis {
                 } else {
                     format!("    {label}")
                 };
-                let row = ui.selectable_label(selected, egui::RichText::new(row_label).strong());
+                let row = ui.add(crate::theme::selected_button(
+                    egui::RichText::new(row_label).strong(),
+                    selected,
+                    ui.visuals(),
+                ).frame_when_inactive(selected));
                 let row = row.on_hover_text(description);
                 if row.clicked() {
                     chosen_style = Some(style);
@@ -2771,19 +2791,22 @@ impl Lapis {
 
         let bm_resp = ui
             .add(
-                egui::Button::new(
+                crate::theme::selected_button(
                     egui::RichText::new(if labeled {
                         format!("{}  Bookmark", bm_icon)
                     } else {
                         bm_icon.to_string()
                     })
-                    .color(if is_bookmarked {
+                    .color(if bm_open {
+                        self.theme.on_accent()
+                    } else if is_bookmarked {
                         rgb(self.theme.warning)
                     } else {
                         rgb(self.theme.fg_primary)
                     }),
+                    bm_open,
+                    ui.visuals(),
                 )
-                .selected(bm_open)
                 .min_size(btn_size),
             )
             .on_hover_text("Add / Edit Bookmark for this page");
@@ -4070,8 +4093,7 @@ impl Lapis {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new("B").strong())
-                                                .selected(bold),
+                                            crate::theme::selected_button(egui::RichText::new("B").strong(), bold, ui.visuals()),
                                         )
                                         .on_hover_text("Bold")
                                         .clicked()
@@ -4080,8 +4102,7 @@ impl Lapis {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new("I").italics())
-                                                .selected(italic),
+                                            crate::theme::selected_button(egui::RichText::new("I").italics(), italic, ui.visuals()),
                                         )
                                         .on_hover_text("Italic")
                                         .clicked()
@@ -4119,7 +4140,7 @@ impl Lapis {
                                         _ => "󰝣 Bg",
                                     };
                                     if ui
-                                        .add(egui::Button::new(bg_label).selected(bg_mode != 0))
+                                        .add(crate::theme::selected_button(bg_label, bg_mode != 0, ui.visuals()))
                                         .on_hover_text("Background: Off → Dark → Light")
                                         .clicked()
                                     {
@@ -5078,39 +5099,17 @@ impl Lapis {
             return;
         }
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape) && self.rebinding_action.is_none()) {
-            self.show_settings = false;
-            return;
-        }
-
         const MODAL_W: f32 = 690.0;
         const MODAL_H: f32 = 460.0;
         const SIDEBAR_W: f32 = 175.0;
         const PANE_W: f32 = 475.0;
         const BODY_H: f32 = 395.0;
 
-        let full_rect = ui.ctx().content_rect();
-        egui::Area::new(ui.make_persistent_id("settings_backdrop"))
-            .fixed_pos(full_rect.min)
-            .order(egui::Order::Foreground)
+        let rebinding_at_start = self.rebinding_action.is_some();
+        let response = egui::Modal::new(ui.make_persistent_id("settings_modal_window"))
+            .frame(self.modal_glass_frame(242))
+            .backdrop_color(egui::Color32::from_black_alpha(115))
             .show(ui.ctx(), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(full_rect.size(), egui::Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::ZERO,
-                    egui::Color32::from_black_alpha(115),
-                );
-                if resp.clicked() && self.rebinding_action.is_none() {
-                    self.show_settings = false;
-                }
-            });
-
-        egui::Area::new(ui.make_persistent_id("settings_modal_window"))
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .order(egui::Order::Tooltip)
-            .constrain(true)
-            .show(ui.ctx(), |ui| {
-                self.modal_glass_frame(242).show(ui, |ui| {
                     // Dimensione davvero fissa: min == max
                     ui.set_min_size(egui::vec2(MODAL_W, MODAL_H));
                     ui.set_max_size(egui::vec2(MODAL_W, MODAL_H));
@@ -5161,10 +5160,11 @@ impl Lapis {
 
                                         for (tab, label) in tabs {
                                             let selected = self.settings_tab == tab;
-                                            let btn = egui::Button::new(
+                                            let btn = crate::theme::selected_button(
                                                 egui::RichText::new(label).size(13.0),
+                                                selected,
+                                                ui.visuals(),
                                             )
-                                            .selected(selected)
                                             .min_size(egui::vec2(SIDEBAR_W - 16.0, 32.0));
 
                                             if ui.add(btn).clicked() {
@@ -5250,8 +5250,7 @@ impl Lapis {
                                                             ];
 
                                                             for (mode, label) in options {
-                                                                let btn = egui::Button::new(label)
-                                                                    .selected(current == mode)
+                                                                let btn = crate::theme::selected_button(label, current == mode, ui.visuals())
                                                                     .min_size(egui::vec2(150.0, 28.0));
 
                                                                 if ui.add(btn).clicked() && current != mode {
@@ -5486,180 +5485,16 @@ impl Lapis {
 
                                                     // ───────────── THEME & FONTS ─────────────
                                                     SettingsTab::AppearanceAndTheme => {
-                                                        ui.label(
-                                                            egui::RichText::new("Theme Presets, Colors & Typography")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(8.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰋺  Import Theme...").clicked() {
-                                                                self.import_theme_dialog(ui.ctx());
-                                                            }
-                                                            if ui.button("󰈇  Export Theme...").clicked() {
-                                                                self.export_theme_dialog(ui.ctx());
-                                                            }
-                                                            if ui.button("󰑐  Reset Default").clicked() {
-                                                                self.theme = SuiteTheme::default();
-                                                                self.theme.apply(ui.ctx());
-                                                                let _ = self.theme.save();
-                                                            }
-                                                        });
-
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-
-                                                        ui.label(
-                                                            egui::RichText::new("Theme Presets")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.weak(
-                                                            "Each preset updates the entire interface palette, including backgrounds, text, borders and widget states.",
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        // ───────────── DARK THEMES · 12 ─────────────
-                                                        ui.label(
-                                                            egui::RichText::new("  Dark Themes")
-                                                                .strong()
-                                                                .size(13.5),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for preset in SuiteTheme::dark_presets() {
-                                                                let selected = self.theme.name == preset.name;
-
-                                                                let button = egui::Button::new(
-                                                                    egui::RichText::new(format!("{}  {}", preset.symbol(), preset.name))
-                                                                        .color(rgb(preset.accent))
-                                                                        .strong(),
-                                                                )
-                                                                .fill(rgb(preset.bg_widget))
-                                                                .stroke(egui::Stroke::new(
-                                                                    1.0,
-                                                                    if selected {
-                                                                        rgb(preset.accent)
-                                                                    } else {
-                                                                        rgb(preset.border)
-                                                                    },
-                                                                ))
-                                                                .corner_radius(egui::CornerRadius::same(8))
-                                                                .min_size(egui::vec2(142.0, 36.0));
-
-                                                                if ui.add(button).clicked() && !selected {
-                                                                    self.theme = preset;
-                                                                    self.theme.apply(ui.ctx());
-                                                                    let _ = self
-                                                                        .theme
-                                                                        .save_to_file(&SuiteTheme::default_config_path());
-                                                                }
-                                                            }
-                                                        });
-
-                                                        ui.add_space(10.0);
-
-                                                        // ───────────── LIGHT THEMES · 6 ─────────────
-                                                        ui.label(
-                                                            egui::RichText::new("  Light Themes")
-                                                                .strong()
-                                                                .size(13.5),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for preset in SuiteTheme::light_presets() {
-                                                                let selected = self.theme.name == preset.name;
-
-                                                                let button = egui::Button::new(
-                                                                    egui::RichText::new(format!("{}  {}", preset.symbol(), preset.name))
-                                                                        .color(rgb(preset.accent))
-                                                                        .strong(),
-                                                                )
-                                                                .fill(rgb(preset.bg_widget))
-                                                                .stroke(egui::Stroke::new(
-                                                                    1.0,
-                                                                    if selected {
-                                                                        rgb(preset.accent)
-                                                                    } else {
-                                                                        rgb(preset.border)
-                                                                    },
-                                                                ))
-                                                                .corner_radius(egui::CornerRadius::same(8))
-                                                                .min_size(egui::vec2(142.0, 36.0));
-
-                                                                if ui.add(button).clicked() && !selected {
-                                                                    self.theme = preset;
-                                                                    self.theme.apply(ui.ctx());
-                                                                    let _ = self
-                                                                        .theme
-                                                                        .save_to_file(&SuiteTheme::default_config_path());
-                                                                }
-                                                            }
-                                                        });
-
-                                                        ui.add_space(16.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-
-                                                        // --- Color picker dettagliati & corner radius ---
-                                                        ui.label(
-                                                            egui::RichText::new("Advanced Manual Palette Tweaks")
-                                                                .size(13.5)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        let mut theme_changed = false;
-                                                        egui::Grid::new("theme_colors_grid_manual")
-                                                            .num_columns(4)
-                                                            .spacing([18.0, 8.0])
-                                                            .show(ui, |ui| {
-                                                                ui.label("Canvas BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_canvas).changed();
-                                                                ui.label("Panel BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_panel).changed();
-                                                                ui.end_row();
-
-                                                                ui.label("Elevated BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_elevated).changed();
-                                                                ui.label("Widget BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_widget).changed();
-                                                                ui.end_row();
-
-                                                                ui.label("Accent Color:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.accent).changed();
-                                                                ui.label("Border Color:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.border).changed();
-                                                                ui.end_row();
-                                                            });
-
-                                                        ui.add_space(8.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("UI Corner Radius:");
-                                                            if ui
-                                                                .add(
-                                                                    egui::Slider::new(&mut self.theme.corner_radius, 0..=14)
-                                                                        .suffix(" px"),
-                                                                )
-                                                                .changed()
-                                                            {
-                                                                theme_changed = true;
-                                                            }
-                                                        });
-
-                                                        if theme_changed {
-                                                            self.theme.apply(ui.ctx());
-                                                            let _ = self.theme.save();
+                                                        let id = ui.make_persistent_id("theme_picker_state");
+                                                        let mut picker = ui.data_mut(|d| d.get_temp::<theme_picker::ThemePicker>(id))
+                                                            .unwrap_or_else(theme_picker::ThemePicker::load);
+                                                        let action = picker.show(ui, &mut self.theme);
+                                                        ui.data_mut(|d| d.insert_temp(id, picker));
+                                                        match action {
+                                                            Some(theme_picker::ThemeAction::Import) => self.import_theme_dialog(ui.ctx()),
+                                                            Some(theme_picker::ThemeAction::Export) => self.export_theme_dialog(ui.ctx()),
+                                                            None => {}
                                                         }
-
                                                         ui.add_space(12.0);
                                                         ui.separator();
                                                         ui.add_space(8.0);
@@ -5804,8 +5639,11 @@ impl Lapis {
                                                                     } else {
                                                                         binding.format_label()
                                                                     };
-                                                                    let btn = egui::Button::new(egui::RichText::new(text).monospace())
-                                                                        .selected(is_rebinding)
+                                                                    let btn = crate::theme::selected_button(
+                                                                        egui::RichText::new(text).monospace(),
+                                                                        is_rebinding,
+                                                                        ui.visuals(),
+                                                                    )
                                                                         .min_size(egui::vec2(170.0, 24.0));
                                                     
                                                                     if ui.add(btn).clicked() {
@@ -5925,8 +5763,7 @@ impl Lapis {
                                                                         let current = cfg.content;
 
                                                                         for content in crate::state::ExportContent::ALL {
-                                                                            let btn = egui::Button::new(content.label())
-                                                                                .selected(current == content);
+                                                                            let btn = crate::theme::selected_button(content.label(), current == content, ui.visuals());
 
                                                                             if ui
                                                                                 .add_sized([220.0, 28.0], btn)
@@ -6693,8 +6530,10 @@ impl Lapis {
                                 });
                         });
                     }); // End modal vertical layout.
-                });
             });
+        if !rebinding_at_start && self.rebinding_action.is_none() && response.should_close() {
+            self.show_settings = false;
+        }
     }
 
     fn open_search(&mut self) {
@@ -7345,10 +7184,7 @@ impl Lapis {
                                     for (idx, (id, label, cat)) in filtered.iter().enumerate() {
                                         let is_sel = idx == self.command_palette_selected;
                                         let row_resp = ui.horizontal(|ui| {
-                                            let btn = egui::Button::new(
-                                                egui::RichText::new(label).size(13.0),
-                                            )
-                                            .selected(is_sel)
+                                            let btn = crate::theme::selected_button(egui::RichText::new(label).size(13.0), is_sel, ui.visuals())
                                             .min_size(egui::vec2(ui.available_width() - 85.0, 28.0));
 
                                             let b_resp = ui.add(btn);
@@ -7746,7 +7582,7 @@ impl Lapis {
                         let play_button = egui::Button::new(
                             egui::RichText::new(icon)
                                 .size(11.0)
-                                .color(egui::Color32::WHITE),
+                                .color(self.theme.on_accent()),
                         )
                         .fill(accent)
                         .stroke(egui::Stroke::NONE)
@@ -8392,7 +8228,7 @@ impl Lapis {
                         let play_btn = egui::Button::new(
                             egui::RichText::new(play_icon)
                                 .size(16.0)
-                                .color(egui::Color32::WHITE),
+                                .color(self.theme.on_accent()),
                         )
                         .fill(rgb(self.theme.accent))
                         .stroke(egui::Stroke::NONE)
@@ -8649,8 +8485,7 @@ impl Lapis {
                         if ui
                             .add_enabled(
                                 !busy,
-                                egui::Button::new("󰆐")
-                                    .selected(trim_open)
+                                crate::theme::selected_button("󰆐", trim_open, ui.visuals())
                                     .corner_radius(egui::CornerRadius::same(6)),
                             )
                             .on_hover_text("Trim lesson start/end")
@@ -10789,8 +10624,11 @@ impl Lapis {
                          -> bool {
                             let clicked = ui
                                 .add(
-                                    egui::Button::new(egui::RichText::new(icon).size(14.5))
-                                        .selected(self.annotation_tool == tool)
+                                    crate::theme::selected_button(
+                                        egui::RichText::new(icon).size(14.5),
+                                        self.annotation_tool == tool,
+                                        ui.visuals(),
+                                    )
                                         .min_size(btn_sz),
                                 )
                                 .on_hover_text(tip)
@@ -10890,8 +10728,11 @@ impl Lapis {
                             ] {
                                 if ui
                                     .add(
-                                        egui::Button::new(egui::RichText::new(lbl).size(12.0))
-                                            .selected(self.shape_kind == sk)
+                                        crate::theme::selected_button(
+                                            egui::RichText::new(lbl).size(12.0),
+                                            self.shape_kind == sk,
+                                            ui.visuals(),
+                                        )
                                             .min_size(egui::vec2(52.0, 24.0)),
                                     )
                                     .clicked()
@@ -11160,7 +11001,7 @@ impl Lapis {
                         egui::Stroke::new(
                             if is_active || is_hov { 1.8 } else { 1.0 },
                             if is_active {
-                                egui::Color32::WHITE
+                                self.theme.on_accent()
                             } else {
                                 rgb(self.theme.border)
                             },
@@ -11172,7 +11013,7 @@ impl Lapis {
                         icon,
                         egui::FontId::proportional(15.0),
                         if is_active {
-                            egui::Color32::from_rgb(18, 20, 26)
+                            self.theme.on_accent()
                         } else {
                             rgb(self.theme.fg_primary)
                         },
@@ -11307,8 +11148,11 @@ impl Lapis {
                          -> egui::Response {
                             let resp = ui
                                 .add(
-                                    egui::Button::new(egui::RichText::new(icon).size(15.5))
-                                        .selected(self.annotation_tool == tool)
+                                    crate::theme::selected_button(
+                                        egui::RichText::new(icon).size(15.5),
+                                        self.annotation_tool == tool,
+                                        ui.visuals(),
+                                    )
                                         .min_size(btn_sz),
                                 )
                                 .on_hover_text(tip);
@@ -11508,8 +11352,11 @@ impl Lapis {
                                 ] {
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new(icon).size(15.0))
-                                                .selected(self.shape_kind == sk)
+                                            crate::theme::selected_button(
+                                                egui::RichText::new(icon).size(15.0),
+                                                self.shape_kind == sk,
+                                                ui.visuals(),
+                                            )
                                                 .min_size(egui::vec2(30.0, 28.0)),
                                         )
                                         .on_hover_text(lbl)
@@ -13174,8 +13021,11 @@ impl Lapis {
                 if ui
                     .add_sized(
                         [18.0, 23.0],
-                        egui::Button::new(egui::RichText::new(lock_icon).size(11.0))
-                            .selected(self.lock_note_page)
+                        crate::theme::selected_button(
+                            egui::RichText::new(lock_icon).size(11.0),
+                            self.lock_note_page,
+                            ui.visuals(),
+                        )
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13258,8 +13108,11 @@ impl Lapis {
                     && ui
                         .add_sized(
                             [sketch_width, 22.0],
-                            egui::Button::new(egui::RichText::new(" ").size(11.0).strong())
-                                .selected(self.note_mode == NoteMode::Sketch)
+                            crate::theme::selected_button(
+                                egui::RichText::new(" ").size(11.0).strong(),
+                                self.note_mode == NoteMode::Sketch,
+                                ui.visuals(),
+                            )
                                 .corner_radius(button_radius),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13272,12 +13125,13 @@ impl Lapis {
                 if ui
                     .add_sized(
                         [primary_width, 22.0],
-                        egui::Button::new(
+                        crate::theme::selected_button(
                             egui::RichText::new(edit_label)
                                 .size(mode_font_size)
                                 .strong(),
+                            self.note_mode == NoteMode::Edit,
+                            ui.visuals(),
                         )
-                        .selected(self.note_mode == NoteMode::Edit)
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13291,12 +13145,13 @@ impl Lapis {
                 if ui
                     .add_sized(
                         [primary_width, 22.0],
-                        egui::Button::new(
+                        crate::theme::selected_button(
                             egui::RichText::new(preview_label)
                                 .size(mode_font_size)
                                 .strong(),
+                            self.note_mode == NoteMode::Preview,
+                            ui.visuals(),
                         )
-                        .selected(self.note_mode == NoteMode::Preview)
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -14300,8 +14155,11 @@ impl Lapis {
                 if ui
                     .add_sized(
                         [26.0, 26.0],
-                        egui::Button::new(egui::RichText::new(icon).size(13.0))
-                            .selected(self.lock_note_page)
+                        crate::theme::selected_button(
+                            egui::RichText::new(icon).size(13.0),
+                            self.lock_note_page,
+                            ui.visuals(),
+                        )
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
                     .on_hover_text("Pin or unpin the current note while browsing slides")
@@ -14660,7 +14518,7 @@ impl eframe::App for Lapis {
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
 
-        if self.rebinding_action.is_none() {
+        if !self.show_settings && self.rebinding_action.is_none() {
             ui.input_mut(|i| {
                 // 1. Trackpad pinch or Ctrl + wheel zoom
                 let z_delta = i.zoom_delta();
@@ -15022,8 +14880,7 @@ impl eframe::App for Lapis {
  
                     // Outline toggle
                     let toc_arrow = if self.show_toc { "" } else { "" };
-                    let toc_btn = egui::Button::new(format!(" {}", toc_arrow))
-                        .selected(self.show_toc)
+                    let toc_btn = crate::theme::selected_button(format!(" {}", toc_arrow), self.show_toc, ui.visuals())
                         .min_size(egui::vec2(44.0, BAR_H));
                     if ui
                         .add(toc_btn)
@@ -15166,8 +15023,7 @@ impl eframe::App for Lapis {
                         let page_has_note = self.notes.get(&self.current_page).map(|s| !s.trim().is_empty()).unwrap_or(false) || !self.current_note.trim().is_empty();
  
                         let notes_arrow = if self.show_notes { "" } else { "" };
-                        let notes_btn = egui::Button::new(format!("{} 󰠮 ", notes_arrow))
-                            .selected(self.show_notes)
+                        let notes_btn = crate::theme::selected_button(format!("{} 󰠮 ", notes_arrow), self.show_notes, ui.visuals())
                             .min_size(egui::vec2(44.0, BAR_H));
  
                         let resp = ui.add(notes_btn);
@@ -15390,8 +15246,11 @@ impl eframe::App for Lapis {
                         let btn_resp = ui
                             .add_sized(
                                 total_size,
-                                egui::Button::new(egui::RichText::new(menu_label).font(font_id))
-                                    .selected(is_open)
+                                crate::theme::selected_button(
+                                    egui::RichText::new(menu_label).font(font_id),
+                                    is_open,
+                                    ui.visuals(),
+                                )
                                     .corner_radius(egui::CornerRadius::same(
                                         self.theme.corner_radius,
                                     )),
@@ -15606,8 +15465,11 @@ impl eframe::App for Lapis {
                         if cols[0]
                             .add_sized(
                                 [cols[0].available_width(), 26.0],
-                                egui::Button::new(" 󰕰 ")
-                                    .selected(self.sidebar_tab == SidebarTab::Thumbnails),
+                                crate::theme::selected_button(
+                                    " 󰕰 ",
+                                    self.sidebar_tab == SidebarTab::Thumbnails,
+                                    cols[0].visuals(),
+                                ),
                             )
                             .on_hover_text("Thumbnails")
                             .clicked()
@@ -15617,8 +15479,11 @@ impl eframe::App for Lapis {
                         if cols[1]
                             .add_sized(
                                 [cols[1].available_width(), 26.0],
-                                egui::Button::new("  ")
-                                    .selected(self.sidebar_tab == SidebarTab::Outline),
+                                crate::theme::selected_button(
+                                    "  ",
+                                    self.sidebar_tab == SidebarTab::Outline,
+                                    cols[1].visuals(),
+                                ),
                             )
                             .on_hover_text("Outline and Bookmarks")
                             .clicked()

@@ -340,8 +340,7 @@ fn icon_button(
     enabled: bool,
     tip: &str,
 ) -> egui::Response {
-    let button = egui::Button::new(egui::RichText::new(icon).size(13.0))
-        .selected(selected)
+    let button = crate::theme::selected_button(egui::RichText::new(icon).size(13.0), selected, ui.visuals())
         .min_size(vec2(24.0, 22.0));
     ui.add_enabled(enabled, button).on_hover_text(tip)
 }

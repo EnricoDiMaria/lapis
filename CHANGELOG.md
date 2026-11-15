@@ -3,6 +3,22 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Catppuccin:** Choose Latte, Frappe, Macchiato, or Mocha, then select one of the 14 accent colors.
+- **Saved custom themes:** Save a named palette, recall it from the custom-theme menu, or explicitly update an existing name. JSON import/export remains available.
+- **Exclusive theme sources:** Select Presets, Catppuccin, or Custom; only the active source’s controls are shown. Preset entries retain their original accent colors and background previews. Palette editing switches to Custom.
+
+### Changed
+
+- **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
+
+### Fixed
+
+- **Settings color picker:** Color popups now appear above Advanced Settings and accept input. Escape dismisses an open popup before closing settings, and document shortcuts remain inactive while settings are open.
+
 ## [1.4.0] - 2026/11/10
 
 ### Added
