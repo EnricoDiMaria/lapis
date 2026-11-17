@@ -262,6 +262,11 @@ The Laser tool provides a temporary visual pointer for presentations.
 
 Use it to draw attention to a particular area of the current slide without creating a permanent annotation.
 
+### Textbox controls
+
+Select a textbox to show its compact glass toolbar. Use **Edit** / **Done** at the right edge to start or finish typing, drag the grip to move the box, and drag its corner handle to resize it. Click **Aa** for bold, italic, underline, strikethrough, and list controls in a glass popup. Click the color circle to open the same swatch palette as the vertical annotation toolbar. Both popups use the toolbar’s glass style. Choosing a swatch applies the color and closes the palette. Font-size and formatting controls can receive focus while editing. Press `Esc` to close an open color palette, finish editing, or deselect the box.
+The copy icon between Delete and Edit/Done copies the whole textbox, including its inline formatting markers but excluding its internal background marker.
+
 ---
 
 ## 7. Custom Study Pages

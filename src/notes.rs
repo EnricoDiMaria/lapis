@@ -1580,6 +1580,86 @@ struct PdfAnnotationObject {
     appearance: Option<lopdf::Stream>,
 }
 
+fn wrap_annotation_text(
+    text: &str,
+    width: f32,
+    font_size: f32,
+    font_name: &str,
+) -> String {
+    let font = match mupdf::Font::new(font_name) {
+        Ok(font) => Some(font),
+        Err(err) => {
+            eprintln!("Textbox font metrics unavailable: {err}");
+            None
+        }
+    };
+
+    let available = (width - 6.0).max(1.0);
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ");
+    let mut lines = Vec::new();
+
+    for paragraph in normalized.split('\n') {
+        let chars: Vec<char> = paragraph.chars().collect();
+        if chars.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let widths: Vec<f32> = chars
+            .iter()
+            .map(|&ch| {
+                font.as_ref()
+                    .and_then(|font| {
+                        font.encode_character(ch as i32)
+                            .and_then(|glyph| font.advance_glyph(glyph))
+                            .ok()
+                    })
+                    .filter(|advance| advance.is_finite() && *advance >= 0.0)
+                    // Keep text visible if font measurement fails.
+                    .unwrap_or(1.2)
+                    * font_size
+            })
+            .collect();
+
+        let mut start = 0;
+
+        while start < chars.len() {
+            let mut end = start;
+            let mut used = 0.0;
+            let mut word_break = None;
+
+            while end < chars.len() {
+                if used + widths[end] > available && end > start {
+                    break;
+                }
+
+                used += widths[end];
+                end += 1;
+
+                if chars[end - 1] == ' ' {
+                    word_break = Some(end);
+                }
+            }
+
+            if end < chars.len() {
+                if let Some(boundary) = word_break {
+                    if chars[start..boundary].iter().any(|&ch| ch != ' ') {
+                        end = boundary;
+                    }
+                }
+            }
+
+            lines.push(chars[start..end].iter().collect::<String>());
+            start = end;
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i32) -> Vec<PdfAnnotationObject> {
     use lopdf::{Object, dictionary};
     let sig = annotation_signature(ann);
@@ -1604,8 +1684,10 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
             }), appearance: None }];
         }
         AnnotationKind::TextBox => {
-            let Some(r)=pdf_rect_for_points(&ann.points,page_rect,rotation) else { return Vec::new(); };
-            let font_name = match (ann.bold, ann.italic) {
+                let Some(mut r) = pdf_rect_for_points(&ann.points, page_rect, rotation) else {
+                    return Vec::new();
+                };            
+                let font_name = match (ann.bold, ann.italic) {
                 (true, true) => "Helvetica-BoldOblique",
                 (true, false) => "Helvetica-Bold",
                 (false, true) => "Helvetica-Oblique",
@@ -1615,12 +1697,37 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
                 ann.color[0] as f32 / 255.0, ann.color[1] as f32 / 255.0, ann.color[2] as f32 / 255.0);
             let font = dictionary! { "Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>font_name, "Encoding"=>"WinAnsiEncoding" };
             let dr = dictionary! { "Font"=>dictionary! { "Helv"=>font } };
+
+            let font_size = ann.font_size.clamp(6.0, 96.0);
+            let leading = font_size * 1.2;
             let width = (r[2] - r[0]).max(1.0);
-            let height = (r[3] - r[1]).max(1.0);
-            let appearance = annotation_appearance_stream(&ann.text, width, height, ann);
+            // Background markers are internal to Lapis.
+            let text = ann.text.trim_start_matches(['\u{200B}', '\u{200C}']);
+
+            let wrapped = wrap_annotation_text(
+                text,
+                width,
+                font_size,
+                font_name,
+            );
+
+            let line_count = wrapped.split('\n').count();
+            let required_height =
+                6.0 + font_size * 1.3 + leading * line_count.saturating_sub(1) as f32;
+            let height = (r[3] - r[1]).max(required_height);
+
+            // Preserve the top edge and leave room for every line.
+            r[1] = r[3] - height;
+
+            let appearance = annotation_appearance_stream(
+                &wrapped,
+                width,
+                height,
+                ann,
+            );
             return vec![PdfAnnotationObject { object: Object::Dictionary(dictionary!{
                 "Type"=>"Annot", "Subtype"=>"FreeText", "Rect"=>vec![r[0].into(),r[1].into(),r[2].into(),r[3].into()],
-                "Contents"=>pdf_text_object(&ann.text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
+                "Contents"=>pdf_text_object(text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
                 "C"=>rgb, "F"=>4, "Q"=>0, "BS"=>dictionary!{"W"=>0}, "LapisExported"=>true,
                 "LapisSig"=>Object::string_literal(sig.into_bytes()), "LapisKind"=>Object::string_literal(kind_name.as_bytes().to_vec()),
             }), appearance: Some(appearance) }];

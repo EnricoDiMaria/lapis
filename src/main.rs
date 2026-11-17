@@ -3533,7 +3533,6 @@ impl Lapis {
             AnnotationTool::Cursor | AnnotationTool::TextBox
         );
         let accent = rgb(self.theme.accent);
-        let bg_elev = rgb(self.theme.bg_elevated);
         let fg = rgb(self.theme.fg_primary);
 
         let pw = page_rect.width().max(1.0);
@@ -3736,9 +3735,7 @@ impl Lapis {
             );
             let galley = ui.fonts_mut(|f| f.layout_job(job));
 
-            let box_h = (br.y - tl.y)
-                .max(galley.size().y + 2.0 * pad)
-                .max(ph * MIN_H);
+            let box_h = galley.size().y + 2.0 * pad;
             let rect = egui::Rect::from_min_size(tl, egui::vec2(box_w, box_h));
 
             let hit_w = (galley.size().x + 2.0 * pad).min(box_w).max(16.0);
@@ -3798,7 +3795,7 @@ impl Lapis {
             let idx = g.idx;
             let selected = sel_idx == Some(idx);
             let editing = selected && editing_here;
-            let rect = g.rect;
+            let mut rect = g.rect;
 
             let mut move_delta = egui::Vec2::ZERO;
             let mut resize_to: Option<egui::Pos2> = None;
@@ -3869,15 +3866,6 @@ impl Lapis {
                     move_delta += resp.drag_delta();
                 }
             } else {
-                // Selected block.
-                sel_rect = Some(rect);
-
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::CornerRadius::same(3),
-                    egui::Stroke::new(1.5, accent),
-                    egui::StrokeKind::Outside,
-                );
 
                 if !editing {
                     let mv = ui.interact(
@@ -3941,9 +3929,6 @@ impl Lapis {
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
 
-                        // FIX SFASAMENTO: TextEdit somma internamente `visuals.widgets.*.bg_stroke.width`
-                        // Preserve the margin when the frame is disabled.
-                        // Reset child UI spacing to keep editing positions stable.
                         {
                             let v = &mut child.style_mut().visuals.widgets;
                             v.inactive.bg_stroke.width = 0.0;
@@ -3956,15 +3941,20 @@ impl Lapis {
 
                         let te = egui::TextEdit::multiline(&mut ann.text)
                             .id(te_id)
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::same(g.pad_i8))
-                            .desired_width(g.box_w - 2.0 * g.pad)
+                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(g.pad_i8)))
+                            .desired_width(g.box_w)
                             .desired_rows(1)
                             .lock_focus(true)
                             .layouter(&mut layouter)
                             .hint_text("Type here...");
+
                         let out = te.show(&mut child);
-                        if need_init_cursor || !out.response.has_focus() {
+                        // Use the editor's current wrapped layout.
+                        let min_height = (to_screen(g.p1).y - rect.min.y).max(ph * MIN_H);
+                        let text_height = out.galley.size().y + 2.0 * g.pad;
+                        rect.max.y = rect.min.y + min_height.max(text_height);
+
+                        if need_init_cursor {
                             out.response.request_focus();
                             if need_init_cursor
                                 && let Some(mut st) =
@@ -3976,9 +3966,6 @@ impl Lapis {
                                 st.store(ui.ctx(), te_id);
                             }
                             ui.ctx().request_repaint();
-                        }
-                        if out.response.changed() {
-                            dirty = true;
                         }
                         if out.response.changed() {
                             dirty = true;
@@ -3996,6 +3983,15 @@ impl Lapis {
                         }
                     }
                 }
+                
+                sel_rect = Some(rect);
+
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(3),
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
 
                 // ----- Maniglia di ridimensionamento -----
                 let handle_rect =
@@ -4020,7 +4016,7 @@ impl Lapis {
                     accent,
                 );
 
-                // Block settings toolbar without a shadow.
+                // Compact glass controls for the selected textbox.
                 let mut t_toggle_bg = false;
                 let bg_mode = g.bg_mode;
                 let mut t_size: Option<f32> = None;
@@ -4054,11 +4050,11 @@ impl Lapis {
                     .constrain(true)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::window(ui.style())
-                            .shadow(egui::Shadow::NONE) // <-- Ombra rimossa!
-                            .fill(bg_elev)
+                            .shadow(egui::Shadow::NONE)
+                            .fill(self.modal_glass_frame(MENU_GLASS_ALPHA).fill)
                             .stroke(egui::Stroke::new(1.2, accent))
                             .corner_radius(egui::CornerRadius::same(8))
-                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .inner_margin(egui::Margin::symmetric(6, 4))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let grip = ui
@@ -4091,6 +4087,16 @@ impl Lapis {
                                     {
                                         t_size = Some(s);
                                     }
+                                    let format_response = ui.small_button("Aa")
+                                        .on_hover_text("Text formatting")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    egui::Popup::menu(&format_response)
+                                        .id(ui.make_persistent_id(("tb_format_palette", page, idx)))
+                                        .frame(self.modal_glass_frame(MENU_GLASS_ALPHA)
+                                            .inner_margin(egui::Margin::symmetric(6, 4)))
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                        .show(|ui| {
+                                            ui.horizontal(|ui| {
                                     if ui
                                         .add(
                                             crate::theme::selected_button(egui::RichText::new("B").strong(), bold, ui.visuals()),
@@ -4134,6 +4140,8 @@ impl Lapis {
                                     {
                                         t_toggle_list = true;
                                     }
+                                            });
+                                        });
                                     let bg_label = match bg_mode {
                                         1 => "󰝤 Bg: Dark",
                                         2 => "󰝤 Bg: Light",
@@ -4149,23 +4157,40 @@ impl Lapis {
 
                                     ui.separator();
 
-                                    for (pc, name) in ANNOTATION_PALETTE {
-                                        let (sw, resp) = ui.allocate_exact_size(
-                                            egui::vec2(18.0, 18.0),
-                                            egui::Sense::click(),
-                                        );
-                                        ui.painter().circle_filled(sw.center(), 6.5, rgb(pc));
-                                        if pc == color || resp.hovered() {
-                                            ui.painter().circle_stroke(
-                                                sw.center(),
-                                                8.5,
-                                                egui::Stroke::new(1.6, fg),
-                                            );
-                                        }
-                                        if resp.on_hover_text(name).clicked() {
-                                            t_color = Some(pc);
-                                        }
-                                    }
+                                    let (color_rect, color_response) = ui.allocate_exact_size(
+                                        egui::vec2(24.0, 22.0), egui::Sense::click(),
+                                    );
+                                    ui.painter().circle_filled(color_rect.center(), 8.5, rgb(color));
+                                    ui.painter().circle_stroke(
+                                        color_rect.center(), 9.5,
+                                        egui::Stroke::new(if color_response.hovered() { 2.0 } else { 1.2 }, fg),
+                                    );
+                                    let color_response = color_response
+                                        .on_hover_text("Text color")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    egui::Popup::menu(&color_response)
+                                        .id(ui.make_persistent_id(("tb_color_palette", page, idx)))
+                                        .frame(self.modal_glass_frame(MENU_GLASS_ALPHA)
+                                            .inner_margin(egui::Margin::symmetric(6, 4)))
+                                        .show(|ui| {
+                                            ui.horizontal(|ui| {
+                                                for (pc, name) in ANNOTATION_PALETTE {
+                                                    let (sw, response) = ui.allocate_exact_size(
+                                                        egui::vec2(22.0, 22.0), egui::Sense::click(),
+                                                    );
+                                                    ui.painter().circle_filled(sw.center(), 8.5, rgb(pc));
+                                                    if pc == color || response.hovered() {
+                                                        ui.painter().circle_stroke(sw.center(), 10.0,
+                                                            egui::Stroke::new(1.8, fg));
+                                                    }
+                                                    if response.on_hover_text(name)
+                                                        .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                                        t_color = Some(pc);
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        });
 
                                     ui.separator();
                                     if ui
@@ -4174,6 +4199,19 @@ impl Lapis {
                                         .clicked()
                                     {
                                         t_delete = true;
+                                    }
+                                    if ui.small_button("󰆏 ")
+                                        .on_hover_text("Copy whole textbox")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        if let Some(ann) = self.annotations.get(&page).and_then(|v| v.get(idx)) {
+                                            self.clipboard.set_text(ann.text.trim_start_matches(['\u{200B}', '\u{200C}']));
+                                        }
+                                    }
+                                    if ui.add_sized(
+                                        [48.0, 22.0],
+                                        egui::Button::new(if editing { "Done" } else { "Edit" }),
+                                    ).on_hover_text("Edit text or finish editing (Esc)").clicked() {
+                                        sel = Some((page, idx, !editing));
                                     }
                                 });
                             });
@@ -4301,7 +4339,7 @@ impl Lapis {
         }
 
         // 4. Escape, Delete, and outside clicks.
-        if !just_created_this_frame
+        if !egui::Popup::is_any_open(ui.ctx()) && !just_created_this_frame
             && let Some((sp, si, ed)) = sel
             && sp == page
         {

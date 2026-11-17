@@ -13,11 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Textbox controls:** Compact translucent toolbar with glass formatting and color popups, a fixed-width Edit/Done action at the right edge, reliable formatting-control focus, and consistent text positioning while editing and viewing. An icon toolbar action copies the whole textbox.
+
 - **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
 
 ### Fixed
 
 - **Settings color picker:** Color popups now appear above Advanced Settings and accept input. Escape dismisses an open popup before closing settings, and document shortcuts remain inactive while settings are open.
+- **Textbox export:** Automatically wrapped text is included in the saved PDF appearance, with enough height to display every line. Internal background markers no longer appear as visible characters in external PDF viewers.
+- **Textbox outline:** The editing outline and resize handle follow wrapped text immediately while typing or deleting.
+- **Textbox layout:** Editing and Done mode use consistent word wrapping. Textboxes automatically fit their text height, growing and shrinking without unused vertical space.
 
 ## [1.4.0] - 2026/11/10
 
