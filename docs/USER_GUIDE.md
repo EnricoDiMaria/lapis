@@ -71,7 +71,7 @@ Displays pages in a vertical sequence.
 This is useful for reading longer documents without manually changing pages.
 
 Press `C` (when not typing) to toggle between Continuous Scroll and Single Page. The key can be changed in
-**Settings → Keybindings**.
+**Settings → Keybindings**. Switching keeps your scroll position within the page.
 
 ### Two-Page Book View — `Alt + 3`
 

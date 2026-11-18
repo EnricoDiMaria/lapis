@@ -1231,6 +1231,9 @@ const ANNOTATION_PALETTE: [([u8; 3], &str); 8] = [
     ([192, 132, 252], "Lavender"),
 ];
 
+/// Vertical gap between pages in Continuous mode.
+const CONTINUOUS_GAP: f32 = 14.0;
+
 #[derive(Debug, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum ViewMode {
     SinglePage,
@@ -1294,6 +1297,9 @@ struct Lapis {
     panel_seen: [Option<f32>; 3],
     panel_sizes_dirty: bool,
     continuous_scroll_to_page: Option<u32>,
+    /// Scroll offset to keep when switching between Single and Continuous:
+    /// x, and y relative to the top of the current page.
+    mode_switch_offset: Option<egui::Vec2>,
     continuous_scroll_delta: f32,
     render_tx: Sender<RenderRequest>,
     thumb_tx: Sender<RenderRequest>,
@@ -1508,6 +1514,7 @@ impl Lapis {
             panel_seen: [None; 3],
             panel_sizes_dirty: false,
             continuous_scroll_to_page: None,
+            mode_switch_offset: None,
             continuous_scroll_delta: 0.0,
             render_tx: req_tx,
             thumb_tx,
@@ -1728,6 +1735,28 @@ impl Lapis {
             panel_sizes: self.panel_sizes,
         });
     }
+    /// Switches view mode. Single <-> Continuous keeps the vertical reading position.
+    fn set_view_mode(&mut self, mode: ViewMode) {
+        let off = self.pdf_scroll_offset;
+        self.mode_switch_offset = None;
+        match (self.view_mode, mode) {
+            (ViewMode::SinglePage, ViewMode::Continuous) => {
+                self.continuous_scroll_to_page = Some(self.current_page);
+                self.mode_switch_offset = Some(egui::vec2(off.x, off.y.max(0.0)));
+            }
+            (ViewMode::Continuous, ViewMode::SinglePage) => {
+                let row = (1..self.current_page)
+                    .filter(|p| !self.hidden_pages.contains(p))
+                    .count() as f32;
+                let pitch = self.last_layout.1 + CONTINUOUS_GAP;
+                self.mode_switch_offset = Some(egui::vec2(off.x, (off.y - row * pitch).max(0.0)));
+            }
+            (_, ViewMode::Continuous) => self.continuous_scroll_to_page = Some(self.current_page),
+            _ => {}
+        }
+        self.view_mode = mode;
+    }
+
     fn enter_custom_zoom(&mut self) {
         if self.zoom_mode != ZoomMode::Custom {
             self.zoom_scale = self.last_effective_zoom.clamp(0.3, 3.0);
@@ -2519,7 +2548,7 @@ impl Lapis {
                 )
                 .clicked()
             {
-                self.view_mode = ViewMode::SinglePage;
+                self.set_view_mode(ViewMode::SinglePage);
                 ui.close();
             }
             if ui
@@ -2529,8 +2558,7 @@ impl Lapis {
                 )
                 .clicked()
             {
-                self.view_mode = ViewMode::Continuous;
-                self.continuous_scroll_to_page = Some(self.current_page);
+                self.set_view_mode(ViewMode::Continuous);
                 ui.close();
             }
 
@@ -7343,18 +7371,17 @@ impl Lapis {
                     self.split_secondary_page = self.current_page;
                 }
             }
-            "mode_continuous" => self.view_mode = ViewMode::Continuous,
+            "mode_continuous" => self.set_view_mode(ViewMode::Continuous),
             "mode_book" => self.view_mode = ViewMode::TwoPage,
-            "mode_single" => self.view_mode = ViewMode::SinglePage,
+            "mode_single" => self.set_view_mode(ViewMode::SinglePage),
             "mode_toggle_cont_single" => {
                 if self.view_mode == ViewMode::Continuous {
-                    self.view_mode = ViewMode::SinglePage;
+                    self.set_view_mode(ViewMode::SinglePage);
                 } else if !matches!(
                     self.view_mode,
                     ViewMode::Slideshow | ViewMode::SlideshowWithNotes
                 ) {
-                    self.view_mode = ViewMode::Continuous;
-                    self.continuous_scroll_to_page = Some(self.current_page);
+                    self.set_view_mode(ViewMode::Continuous);
                 }
             }
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
@@ -14625,6 +14652,7 @@ impl eframe::App for Lapis {
         let mut act_save = false;
         let mut act_toggle_notes = false;
         let mut act_toggle_mode = false;
+        let mut act_view_mode: Option<ViewMode> = None;
         let mut act_toggle_sketch = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
@@ -14752,11 +14780,10 @@ impl eframe::App for Lapis {
                 }
                 // 6. View Mode Shortcuts: Alt+1 (Single), Alt+2 (Continuous), Alt+3 (TwoPage), Alt+4 (Slideshow), Alt+4 (Slideshow+Notes), Esc (Exit Slideshow)
                 if sc.view_single.consume(i) {
-                    self.view_mode = ViewMode::SinglePage;
+                    act_view_mode = Some(ViewMode::SinglePage);
                 }
                 if sc.view_continuous.consume(i) {
-                    self.view_mode = ViewMode::Continuous;
-                    self.continuous_scroll_to_page = Some(self.current_page);
+                    act_view_mode = Some(ViewMode::Continuous);
                 }
                 if sc.view_twopage.consume(i) {
                     self.view_mode = ViewMode::TwoPage;
@@ -14794,12 +14821,11 @@ impl eframe::App for Lapis {
                     let b = &self.app_state.shortcuts.toggle_continuous_single;
                     let chord_free = b.ctrl || !i.modifiers.command;
                     if chord_free && b.consume(i) {
-                        if self.view_mode == ViewMode::Continuous {
-                            self.view_mode = ViewMode::SinglePage;
+                        act_view_mode = Some(if self.view_mode == ViewMode::Continuous {
+                            ViewMode::SinglePage
                         } else {
-                            self.view_mode = ViewMode::Continuous;
-                            self.continuous_scroll_to_page = Some(self.current_page);
-                        }
+                            ViewMode::Continuous
+                        });
                     }
                 }
                 // 7. Continuous Viewmode arrows shortcuts
@@ -14865,6 +14891,9 @@ impl eframe::App for Lapis {
                     }
                 }
             });
+        }
+        if let Some(mode) = act_view_mode {
+            self.set_view_mode(mode);
         }
         if copy_triggered && let Some(text) = self.selection_text() {
             self.clipboard.set_text(&text);
@@ -17488,7 +17517,7 @@ impl eframe::App for Lapis {
         });
     }
     ui.spacing_mut().item_spacing.y = 0.0;
-    let gap = 14.0;
+    let gap = CONTINUOUS_GAP;
     let row_h = display_h + gap;
     let visible_doc_pages: Vec<u32> = (1..=self.total_pages)
         .filter(|p| !self.hidden_pages.contains(p))
@@ -17528,6 +17557,7 @@ impl eframe::App for Lapis {
     
 
     let just_jumped = self.continuous_scroll_to_page.is_some();
+    let switch_offset = self.mode_switch_offset.take();
 
     if let Some(target_p) = self.continuous_scroll_to_page.take() {
         let row_idx = visible_doc_pages
@@ -17535,8 +17565,13 @@ impl eframe::App for Lapis {
             .position(|&p| p >= target_p)
             .unwrap_or(0);
 
-        let offset_y = ((row_idx as f32) * row_pitch).clamp(0.0, max_scroll_y);
+        // From Single mode, keep the position inside the page.
+        let in_page_y = switch_offset.map_or(0.0, |o| o.y);
+        let offset_y = ((row_idx as f32) * row_pitch + in_page_y).clamp(0.0, max_scroll_y);
         scroll_area = scroll_area.vertical_scroll_offset(offset_y);
+        if let Some(o) = switch_offset {
+            scroll_area = scroll_area.horizontal_scroll_offset(o.x);
+        }
 
         self.jump_lock_y = Some(offset_y);
         self.jump_lock_frame = ui.ctx().cumulative_frame_nr();
@@ -17979,6 +18014,11 @@ impl eframe::App for Lapis {
                         );
 
                         canvas_scroll = canvas_scroll.scroll_offset(egui::vec2(x, y));
+                    }
+
+                    // Coming from Continuous mode: keep the position inside the page.
+                    if let Some(o) = self.mode_switch_offset.take() {
+                        canvas_scroll = canvas_scroll.scroll_offset(o);
                     }
 
                     let out = canvas_scroll.show_viewport(ui, |ui, viewport| {
