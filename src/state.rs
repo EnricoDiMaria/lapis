@@ -484,6 +484,41 @@ pub struct BookmarkItem {
     pub page: u32,
 }
 
+/// Notes panels whose size is remembered per document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelSlot {
+    Right,
+    Bottom,
+    Slideshow,
+}
+
+/// Saved panel sizes in points. `None` keeps the default size.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelSizes {
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub slideshow: Option<f32>,
+}
+
+impl PanelSizes {
+    pub fn get(&self, slot: PanelSlot) -> Option<f32> {
+        match slot {
+            PanelSlot::Right => self.right,
+            PanelSlot::Bottom => self.bottom,
+            PanelSlot::Slideshow => self.slideshow,
+        }
+    }
+
+    pub fn set(&mut self, slot: PanelSlot, size: f32) {
+        match slot {
+            PanelSlot::Right => self.right = Some(size),
+            PanelSlot::Bottom => self.bottom = Some(size),
+            PanelSlot::Slideshow => self.slideshow = Some(size),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentFileEntry {
     pub path: PathBuf,
@@ -500,6 +535,8 @@ pub struct RecentFileEntry {
     pub hidden_pages: HashSet<u32>,
     #[serde(default)]
     pub pdf_dark_mode: bool,
+    #[serde(default)]
+    pub panel_sizes: PanelSizes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

@@ -44,6 +44,10 @@ Lapis stores document data locally and associates it with the PDF. A local backu
 
 When moving a PDF to another computer, remember to consider its associated Lapis data as well.
 
+### Per-document layout
+
+Lapis remembers, for each document, the page, zoom, view mode, and the size of the notes panel (side, bottom, or Slideshow + Notes). Reopening a file restores them. Slideshow modes are not restored; the document reopens in the mode you started the slideshow from.
+
 ---
 
 ## 2. PDF Viewing Modes

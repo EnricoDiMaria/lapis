@@ -1284,6 +1284,15 @@ struct Lapis {
     zoom_mode: ZoomMode,
     view_mode: ViewMode,
     prev_view_mode: ViewMode,
+    /// View mode last written to `state.json`; a difference triggers a save.
+    saved_view_mode: ViewMode,
+    /// Notes-panel sizes of the open document.
+    panel_sizes: PanelSizes,
+    /// Panels that take the saved size the next time they are shown.
+    panel_apply: [bool; 3],
+    /// Last size seen per panel, to detect resizes by the user.
+    panel_seen: [Option<f32>; 3],
+    panel_sizes_dirty: bool,
     continuous_scroll_to_page: Option<u32>,
     continuous_scroll_delta: f32,
     render_tx: Sender<RenderRequest>,
@@ -1493,6 +1502,11 @@ impl Lapis {
             zoom_mode: FitWidth,
             view_mode: ViewMode::SinglePage,
             prev_view_mode: ViewMode::SinglePage,
+            saved_view_mode: ViewMode::SinglePage,
+            panel_sizes: PanelSizes::default(),
+            panel_apply: [true; 3],
+            panel_seen: [None; 3],
+            panel_sizes_dirty: false,
             continuous_scroll_to_page: None,
             continuous_scroll_delta: 0.0,
             render_tx: req_tx,
@@ -1655,10 +1669,49 @@ impl Lapis {
         !self.pdf_path.as_os_str().is_empty()
     }
 
+    /// Mode to remember: slideshows are transient, so they store the mode they came from.
+    fn reading_view_mode(&self) -> ViewMode {
+        match self.view_mode {
+            ViewMode::Slideshow | ViewMode::SlideshowWithNotes => self.prev_view_mode,
+            mode => mode,
+        }
+    }
+
+    /// Makes `panel` take the document's saved size the first time it is shown.
+    fn restore_panel_size(
+        &mut self,
+        panel: egui::Panel,
+        slot: PanelSlot,
+        default: f32,
+        range: (f32, f32),
+    ) -> egui::Panel {
+        let idx = slot as usize;
+        if !self.panel_apply[idx] {
+            return panel;
+        }
+        self.panel_apply[idx] = false;
+        self.panel_seen[idx] = None;
+        let size = self.panel_sizes.get(slot).unwrap_or(default);
+        panel.exact_size(size.clamp(range.0, range.1))
+    }
+
+    /// Stores a size changed by dragging the panel's resize handle.
+    fn track_panel_size(&mut self, ui: &egui::Ui, slot: PanelSlot, size: f32) {
+        let idx = slot as usize;
+        let pointer_active = ui.input(|inp| inp.pointer.any_down() || inp.pointer.any_released());
+        if pointer_active && self.panel_seen[idx].is_some_and(|seen| (seen - size).abs() > 0.5) {
+            self.panel_sizes.set(slot, size);
+            self.panel_sizes_dirty = true;
+        }
+        self.panel_seen[idx] = Some(size);
+    }
+
     fn save_session_state(&mut self) {
         if !self.has_pdf() {
             return;
         }
+        let view_mode = self.reading_view_mode();
+        self.saved_view_mode = view_mode;
         self.app_state.upsert_recent(RecentFileEntry {
             path: self.pdf_path.clone(),
             name: self.pdf_name.clone(),
@@ -1670,8 +1723,9 @@ impl Lapis {
             show_toc: self.show_toc,
             bookmarks: self.user_bookmarks.clone(),
             hidden_pages: self.hidden_pages.clone(),
-            view_mode: self.view_mode,
+            view_mode,
             pdf_dark_mode: self.pdf_dark_mode,
+            panel_sizes: self.panel_sizes,
         });
     }
     fn enter_custom_zoom(&mut self) {
@@ -3034,11 +3088,21 @@ impl Lapis {
             self.user_bookmarks = entry.bookmarks;
             self.pdf_dark_mode = entry.pdf_dark_mode;
             self.hidden_pages = entry.hidden_pages;
-            self.view_mode = entry.view_mode;
+            self.view_mode = match entry.view_mode {
+                ViewMode::Slideshow | ViewMode::SlideshowWithNotes => ViewMode::SinglePage,
+                mode => mode,
+            };
+            self.prev_view_mode = self.view_mode;
+            self.panel_sizes = entry.panel_sizes;
         } else {
             self.user_bookmarks.clear();
             self.hidden_pages.clear();
+            self.panel_sizes = PanelSizes::default();
         }
+        // Panels pick up this document's sizes when they are next shown.
+        self.panel_apply = [true; 3];
+        self.panel_seen = [None; 3];
+        self.panel_sizes_dirty = false;
 
         if self.pdf_path != path {
             self.audio_engine.stop_and_release();
@@ -14353,6 +14417,16 @@ impl eframe::App for Lapis {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let win_rect = ui.ctx().content_rect();
+
+        // Persist view mode and panel sizes once the pointer is released.
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        if self.has_pdf()
+            && !pointer_down
+            && (self.panel_sizes_dirty || self.reading_view_mode() != self.saved_view_mode)
+        {
+            self.panel_sizes_dirty = false;
+            self.save_session_state();
+        }
         let use_bottom_notes =
             self.app_state.settings.bottom_notes && win_rect.height() > win_rect.width();
         if let Some((kind, result)) = self.dialogs.poll() {
@@ -16255,12 +16329,16 @@ impl eframe::App for Lapis {
                             });
                     }
 
-                    egui::Panel::right("slideshow_notes_panel")
+                    let panel = egui::Panel::right("slideshow_notes_panel")
                         .resizable(true)
-                        .default_size(320.0)
-                        .show(ui, |ui| {
-                            self.render_slideshow_notes_contents(ui, active_slide_note);
-                        });
+                        .default_size(320.0);
+                    let max_w = (win_rect.width() * 0.8).max(150.0);
+                    let panel =
+                        self.restore_panel_size(panel, PanelSlot::Slideshow, 320.0, (150.0, max_w));
+                    let resp = panel.show(ui, |ui| {
+                        self.render_slideshow_notes_contents(ui, active_slide_note);
+                    });
+                    self.track_panel_size(ui, PanelSlot::Slideshow, resp.response.rect.width());
                 }
             } else if self.show_notes && !in_slideshow {
                 if use_bottom_notes {
@@ -16276,9 +16354,17 @@ impl eframe::App for Lapis {
                             egui::Frame::side_top_panel(ui.style())
                                 .inner_margin(egui::Margin::symmetric(6, 0)),
                         );
-                    notes_panel.show(ui, |ui| {
+                    let default_h = (win_rect.height() * 0.36).clamp(180.0, 420.0);
+                    let notes_panel = self.restore_panel_size(
+                        notes_panel,
+                        PanelSlot::Bottom,
+                        default_h,
+                        (120.0, max_panel_h),
+                    );
+                    let resp = notes_panel.show(ui, |ui| {
                         self.render_notes_panel_contents(ui, text_edit_id, true);
                     });
+                    self.track_panel_size(ui, PanelSlot::Bottom, resp.response.rect.height());
                 } else {
                     let notes_panel = egui::Panel::right("notes_panel")
                         .resizable(true)
@@ -16290,9 +16376,16 @@ impl eframe::App for Lapis {
                             egui::Frame::side_top_panel(ui.style())
                                 .inner_margin(egui::Margin::symmetric(6, 0)),
                         );
-                    notes_panel.show(ui, |ui| {
+                    let notes_panel = self.restore_panel_size(
+                        notes_panel,
+                        PanelSlot::Right,
+                        350.0,
+                        (250.0, 520.0),
+                    );
+                    let resp = notes_panel.show(ui, |ui| {
                         self.render_notes_panel_contents(ui, text_edit_id, false);
                     });
+                    self.track_panel_size(ui, PanelSlot::Right, resp.response.rect.width());
                 }
             }
         }
