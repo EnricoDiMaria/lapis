@@ -17282,6 +17282,11 @@ impl eframe::App for Lapis {
 
                     return;
                 }
+                // egui fades the canvas edges when the page overflows (zoomed); keep it subtle.
+                ui.spacing_mut().scroll.fade = egui::style::ScrollFadeStyle {
+                    strength: 0.12,
+                    size: 10.0,
+                };
                 let visible_w = ui.available_width();
                 let visible_h = ui.available_height();
 

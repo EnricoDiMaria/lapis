@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Zoomed page edges:** The shadow-like fade along the canvas borders is much weaker and narrower when the page is zoomed beyond the window.
 - **Settings color picker:** Color popups now appear above Advanced Settings and accept input. Escape dismisses an open popup before closing settings, and document shortcuts remain inactive while settings are open.
 - **Textbox export:** Automatically wrapped text is included in the saved PDF appearance, with enough height to display every line. Internal background markers no longer appear as visible characters in external PDF viewers.
 - **Textbox outline:** The editing outline and resize handle follow wrapped text immediately while typing or deleting.
