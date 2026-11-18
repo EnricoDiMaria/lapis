@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
+- **Notes Preview scroll arrow:** The "more below" arrow now disappears at the bottom of the Preview, as in Edit, including when the floating audio buttons are enabled.
 - **Zoomed page edges:** The shadow-like fade along the canvas borders is much weaker and narrower when the page is zoomed beyond the window.
 - **Settings color picker:** Color popups now appear above Advanced Settings and accept input. Escape dismisses an open popup before closing settings, and document shortcuts remain inactive while settings are open.
 - **Textbox export:** Automatically wrapped text is included in the saved PDF appearance, with enough height to display every line. Internal background markers no longer appear as visible characters in external PDF viewers.

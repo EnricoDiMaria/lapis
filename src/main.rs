@@ -7543,6 +7543,8 @@ impl Lapis {
     }
 
     const AUDIO_BTN_SIZE: f32 = 22.0;
+    /// Empty space under the rendered Markdown in the notes Preview.
+    const PREVIEW_BOTTOM_PAD: f32 = 28.0;
 
     fn render_audio_dock_in_rect(&mut self, ui: &mut egui::Ui, show_ticker: bool) {
         let media_dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
@@ -14019,7 +14021,7 @@ impl Lapis {
                                         .max_image_width(Some(preview_width.ceil() as usize))
                                         .show(ui, &mut self.commonmark_cache, &rendered_md);
 
-                                    ui.add_space(28.0);
+                                    ui.add_space(Self::PREVIEW_BOTTOM_PAD);
                                 });
                                 // CommonMark uses selectable labels; egui owns their selection.
                                 // The menu's Copy command delegates to egui's native text-selection action.
@@ -14082,7 +14084,12 @@ impl Lapis {
                     let view_h = viewport_rect.height();
                     let offset_y = scroll_out.state.clamped_offset().y;
 
-                    let extra_pad = if is_edit { edit_bottom_pad } else { 0.0 };
+                    // Trailing empty space, so the arrow also clears with the audio-button allowance.
+                    let extra_pad = if is_edit {
+                        edit_bottom_pad
+                    } else {
+                        Self::PREVIEW_BOTTOM_PAD
+                    };
                     let extra_pad_audio = if self.app_state.settings.audio_dock
                         || self.app_state.settings.audio_dock
                     {
