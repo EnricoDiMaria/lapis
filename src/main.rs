@@ -1336,6 +1336,8 @@ struct Lapis {
     user_bookmarks: Vec<state::BookmarkItem>,
     bookmark_input: String,
     last_synced_sidebar_page: u32,
+    /// Sidebar tab that was last scrolled to the current page.
+    last_synced_sidebar_tab: SidebarTab,
     thumb_cache: HashMap<u32, (egui::TextureHandle, (u32, u32))>,
     annotation_tool: AnnotationTool,
     annotation_color: [u8; 3],
@@ -1548,6 +1550,7 @@ impl Lapis {
             user_bookmarks: Vec::new(),
             bookmark_input: String::new(),
             last_synced_sidebar_page: 1,
+            last_synced_sidebar_tab: SidebarTab::Thumbnails,
             thumb_cache: HashMap::new(),
             annotation_tool: AnnotationTool::Cursor,
             annotation_color: ANNOTATION_PALETTE[0].0,
@@ -15596,10 +15599,13 @@ impl eframe::App for Lapis {
 
         // Left Panel (Dual-Mode Sidebar: Thumbnails Grid & Outline/Bookmarks)
         if self.show_toc && self.has_pdf() && !in_slideshow {
-            let scroll_sidebar_to_current = self.last_synced_sidebar_page != self.current_page;
+            // Also re-sync when the tab changes: the hidden tab did not scroll while the page moved.
+            let scroll_sidebar_to_current = self.last_synced_sidebar_page != self.current_page
+                || self.last_synced_sidebar_tab != self.sidebar_tab;
 
             if scroll_sidebar_to_current {
                 self.last_synced_sidebar_page = self.current_page;
+                self.last_synced_sidebar_tab = self.sidebar_tab;
             }
             egui::Panel::left("toc_panel")
                 .resizable(true)
@@ -15621,6 +15627,7 @@ impl eframe::App for Lapis {
                             .clicked()
                         {
                             self.sidebar_tab = SidebarTab::Thumbnails;
+                            cols[0].ctx().request_repaint(); // apply the sync next frame
                         }
                         if cols[1]
                             .add_sized(
@@ -15635,6 +15642,7 @@ impl eframe::App for Lapis {
                             .clicked()
                         {
                             self.sidebar_tab = SidebarTab::Outline;
+                            cols[1].ctx().request_repaint(); // apply the sync next frame
                         }
                     });
                     ui.separator();

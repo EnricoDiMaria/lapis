@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sidebar tab sync:** Switching between Thumbnails and Outline/Bookmarks now scrolls the new tab to the current page, even if the page changed while the other tab was open.
 - **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
 - **Notes Preview scroll arrow:** The "more below" arrow now disappears at the bottom of the Preview, as in Edit, including when the floating audio buttons are enabled.
 - **Zoomed page edges:** The shadow-like fade along the canvas borders is much weaker and narrower when the page is zoomed beyond the window.
