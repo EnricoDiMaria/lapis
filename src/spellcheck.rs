@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,8 @@ pub struct SpellChecker {
     pub loaded_languages: Vec<String>,
     dictionaries: Vec<spellbook::Dictionary>,
     dictionary_codes: Vec<String>,
+    /// Letters each dictionary uses; the single-edit search only tries these.
+    dictionary_alphabets: Vec<BTreeSet<char>>,
 }
 
 impl SpellChecker {
@@ -63,6 +66,7 @@ impl SpellChecker {
             loaded_languages: Vec::new(),
             dictionaries: Vec::new(),
             dictionary_codes: Vec::new(),
+            dictionary_alphabets: Vec::new(),
         };
 
         if english_enabled {
@@ -98,6 +102,8 @@ impl SpellChecker {
             Ok(d) => {
                 self.dictionaries.push(d);
                 self.dictionary_codes.push("EN".to_string());
+                self.dictionary_alphabets
+                    .push(alphabet_from(aff, dic, &read_user_words()));
                 self.loaded_languages.push("English (built-in)".to_string());
             }
             Err(e) => {
@@ -140,6 +146,8 @@ impl SpellChecker {
         }
         self.dictionaries.push(dictionary);
         self.dictionary_codes.push(language_code(&name));
+        self.dictionary_alphabets
+            .push(alphabet_from(&aff, &dic, &read_user_words()));
         self.loaded_languages.push(name.clone());
         Ok(name)
     }
@@ -160,6 +168,9 @@ impl SpellChecker {
         }
         for dict in &mut self.dictionaries {
             let _ = dict.add(&clean);
+        }
+        for alphabet in &mut self.dictionary_alphabets {
+            add_letters(alphabet, &clean);
         }
         if let Ok(mut f) = fs::OpenOptions::new()
             .create(true)
@@ -196,8 +207,12 @@ impl SpellChecker {
             return Vec::new();
         }
         let mut candidates = Vec::new();
-        let edits = single_edits(misspelled);
-        for (dict, code) in self.dictionaries.iter().zip(&self.dictionary_codes) {
+        for ((dict, code), alphabet) in self
+            .dictionaries
+            .iter()
+            .zip(&self.dictionary_codes)
+            .zip(&self.dictionary_alphabets)
+        {
             let mut local = Vec::new();
             dict.suggest(misspelled, &mut local);
             let hunspell_count = local.len();
@@ -210,7 +225,7 @@ impl SpellChecker {
             );
             // Hunspell can miss close words (`goin` -> `going`): add every valid single edit.
             candidates.extend(
-                valid_edits(dict, &edits)
+                valid_edits(dict, &single_edits(misspelled, alphabet))
                     .into_iter()
                     .enumerate()
                     .map(|(i, word)| (word, code.clone(), hunspell_count + i)),
@@ -320,18 +335,53 @@ fn spelling_distance(a: &str, b: &str) -> usize {
     distances[a.len()][b.len()]
 }
 
-/// Letters tried when generating single-edit candidates: ASCII plus common accented letters.
-const EDIT_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz'-àáâäåæçèéêëìíîïñòóôöøùúûüßœ";
+/// Adds the letters of `text` (lowercased, plus `'` and `-`) to `alphabet`.
+fn add_letters(alphabet: &mut BTreeSet<char>, text: &str) {
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            alphabet.extend(c.to_lowercase());
+        } else if c == '\'' || c == '-' {
+            alphabet.insert(c);
+        }
+    }
+}
 
-/// Words one deletion, transposition, replacement or insertion away from `word`.
-fn single_edits(word: &str) -> Vec<String> {
+/// Letters a Hunspell dictionary uses: word stems (`.dic`), affix strings and `TRY` (`.aff`),
+/// and the user's custom words.
+fn alphabet_from(aff: &str, dic: &str, user_words: &[String]) -> BTreeSet<char> {
+    let mut alphabet = BTreeSet::new();
+    // First `.dic` line is the entry count; flags and morphology follow `/` and spaces.
+    for line in dic.lines().skip(1) {
+        let stem = line.split(['/', ' ', '\t']).next().unwrap_or("");
+        add_letters(&mut alphabet, stem);
+    }
+    for line in aff.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            ["TRY", chars] => add_letters(&mut alphabet, chars),
+            // `SFX flag strip add[/flags] condition ...` (the header has only 4 fields).
+            ["SFX" | "PFX", _, strip, add, _, ..] => {
+                add_letters(&mut alphabet, strip);
+                add_letters(&mut alphabet, add.split('/').next().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    for word in user_words {
+        add_letters(&mut alphabet, word);
+    }
+    alphabet
+}
+
+/// Words one deletion, transposition, replacement or insertion away from `word`, trying only
+/// the letters of `alphabet`.
+fn single_edits(word: &str, alphabet: &BTreeSet<char>) -> Vec<String> {
     let chars: Vec<char> = word.chars().collect();
     let n = chars.len();
     // Long tokens are rarely typos of one letter and would make the search slow.
     if n == 0 || n > 24 {
         return Vec::new();
     }
-    let alphabet: Vec<char> = EDIT_ALPHABET.chars().collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     let mut push = |c: Vec<char>| {
@@ -351,14 +401,14 @@ fn single_edits(word: &str) -> Vec<String> {
         push(c);
     }
     for i in 0..n {
-        for &a in &alphabet {
+        for &a in alphabet {
             let mut c = chars.clone();
             c[i] = a;
             push(c);
         }
     }
     for i in 0..=n {
-        for &a in &alphabet {
+        for &a in alphabet {
             let mut c = chars.clone();
             c.insert(i, a);
             push(c);
@@ -477,8 +527,10 @@ fn rank_suggestions(
 #[cfg(test)]
 mod suggestion_ranking_tests {
     use super::{
-        fold_accents, rank_suggestions, single_edits, spelling_distance, valid_edits,
+        alphabet_from, fold_accents, rank_suggestions, single_edits, spelling_distance,
+        valid_edits,
     };
+    use std::collections::BTreeSet;
 
     /// Builds candidates, using the list position as Hunspell's rank.
     fn cands(items: &[(&str, &str)]) -> Vec<(String, String, usize)> {
@@ -559,15 +611,42 @@ mod suggestion_ranking_tests {
         assert_eq!(ranked[0].0, "ciao");
     }
 
+    fn letters(chars: &str) -> BTreeSet<char> {
+        chars.chars().collect()
+    }
+
     #[test]
     fn single_edits_cover_all_edit_kinds() {
-        let edits = single_edits("goin");
+        let edits = single_edits("goin", &letters("abcdefghijklmnopqrstuvwxyz-"));
         for expected in ["going", "gon", "gion", "gain", "go-in"] {
             assert!(edits.iter().any(|e| e == expected), "missing {expected}");
         }
         assert!(!edits.iter().any(|e| e == "goin"));
-        assert!(single_edits("").is_empty());
-        assert!(single_edits(&"a".repeat(30)).is_empty());
+        assert!(single_edits("", &letters("abc")).is_empty());
+        assert!(single_edits(&"a".repeat(30), &letters("abc")).is_empty());
+    }
+
+    #[test]
+    fn single_edits_only_try_the_given_letters() {
+        let edits = single_edits("ab", &letters("xy"));
+        // Deletions and the transposition always apply; replacements/insertions use only x, y.
+        assert!(edits.iter().all(|e| e.chars().all(|c| "abxy".contains(c))));
+        assert!(edits.contains(&"xb".to_string()) && edits.contains(&"abx".to_string()));
+        assert!(!edits.iter().any(|e| e.contains('z')));
+        // Fewer letters means far fewer candidates than the 55-letter alphabet.
+        assert!(edits.len() < 20);
+    }
+
+    #[test]
+    fn alphabet_comes_from_dic_aff_and_user_words() {
+        let dic = "3\nwörd/AB po:noun\ncafé\ndon't\n";
+        let aff = "SET UTF-8\nTRY ñ\nSFX A Y 1\nSFX A 0 ïng/X .\n";
+        let a = alphabet_from(aff, dic, &["Zed-x".to_string()]);
+        for c in ['w', 'ö', 'r', 'd', 'c', 'a', 'f', 'é', 'o', 'n', 't', '\'', 'ñ', 'ï', 'g', 'z', 'e', 'x', '-'] {
+            assert!(a.contains(&c), "missing {c}");
+        }
+        // Flags (`AB`), morphology (`noun` after the space) and the entry count are ignored.
+        assert!(!a.contains(&'b') && !a.contains(&'u') && !a.contains(&'3'));
     }
 
     #[test]
@@ -575,7 +654,9 @@ mod suggestion_ranking_tests {
         let aff = std::str::from_utf8(super::BUNDLED_AFF).unwrap();
         let dic = std::str::from_utf8(super::BUNDLED_DIC).unwrap();
         let dict = spellbook::Dictionary::new(aff, dic).unwrap();
-        let valid = valid_edits(&dict, &single_edits("goin"));
+        let alphabet = alphabet_from(aff, dic, &[]);
+        assert!(alphabet.contains(&'g') && alphabet.contains(&'\''));
+        let valid = valid_edits(&dict, &single_edits("goin", &alphabet));
         assert!(valid.iter().any(|w| w == "going"));
     }
 
