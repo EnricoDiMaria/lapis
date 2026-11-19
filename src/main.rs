@@ -11611,25 +11611,9 @@ impl Lapis {
 
     /// Returns true if any slide in the document has at least one flashcard.
     fn document_has_flashcards(&self) -> bool {
-        // Replace `self.slide_notes.values()` with your map field (or `.iter()` if it's a Vec)
-        self.notes.values().any(|text| {
-            let mut has_q = false;
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if let Some((l, r)) = trimmed.split_once("::")
-                    && !l.trim().is_empty()
-                    && !r.trim().is_empty()
-                {
-                    return true;
-                }
-                if trimmed.starts_with("Q:") && trimmed.len() > 2 {
-                    has_q = true;
-                } else if has_q && trimmed.starts_with("A:") && trimmed.len() > 2 {
-                    return true;
-                }
-            }
-            false
-        })
+        self.notes
+            .values()
+            .any(|text| notes::page_has_flashcards(text))
     }
 
     fn render_flashcards_modal(&mut self, ui: &mut egui::Ui) {
@@ -13556,6 +13540,8 @@ impl Lapis {
                             let mut layouter =
                                 |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
                                     let s = text.as_str();
+                                    // Code and LaTeX are never spell-checked.
+                                    let skip = notes::code_and_math_ranges(s);
                                     let mut job = egui::text::LayoutJob::default();
                                     job.wrap.max_width = wrap_width.max(1.0);
                                     // Match Preview's proportional body font so ordinary
@@ -13584,7 +13570,8 @@ impl Lapis {
                                         if !ch.is_alphabetic() && ch != '\'' {
                                             if idx > last_end {
                                                 let word = &s[last_end..idx];
-                                                let ok = checker_ref.check_word(word);
+                                                let ok = notes::in_ranges(&skip, last_end)
+                                                    || checker_ref.check_word(word);
                                                 append_highlighted(
                                                     &mut job,
                                                     s,
@@ -13623,7 +13610,8 @@ impl Lapis {
                                     }
                                     if last_end < s.len() {
                                         let word = &s[last_end..];
-                                        let ok = checker_ref.check_word(word);
+                                        let ok = notes::in_ranges(&skip, last_end)
+                                            || checker_ref.check_word(word);
                                         append_highlighted(
                                             &mut job,
                                             s,
@@ -13753,6 +13741,7 @@ impl Lapis {
                             }
 
                             if output.response.secondary_clicked() {
+                                let skip = notes::code_and_math_ranges(&self.current_note);
                                 let picked: Option<(usize, usize, String)> = ui
                                     .input(|i| i.pointer.interact_pos())
                                     .and_then(|p| {
@@ -13760,7 +13749,16 @@ impl Lapis {
                                         let idx = output.galley.cursor_from_pos(rel).index;
                                         word_at_char_index(&self.current_note, idx.into())
                                     })
-                                    .filter(|(_, _, w)| !self.spellchecker.check_word(w));
+                                    .filter(|(start, _, w)| {
+                                        // Char index -> byte offset, to look the word up in `skip`.
+                                        let byte = self
+                                            .current_note
+                                            .char_indices()
+                                            .nth(*start)
+                                            .map_or(self.current_note.len(), |(b, _)| b);
+                                        !notes::in_ranges(&skip, byte)
+                                            && !self.spellchecker.check_word(w)
+                                    });
 
                                 ui.data_mut(|d| match &picked {
                                     Some(v) => {

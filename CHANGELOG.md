@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
 
+- **Code and math in notes:** Spellchecking no longer underlines words inside code (fenced blocks and inline code) or LaTeX (`$…$`, `$$…$$`), and flashcards are no longer extracted from them (for example `std::vector` is not a `::` card). Code blocks inside a flashcard answer are kept intact.
 - **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, including accents) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
 
 ### Fixed

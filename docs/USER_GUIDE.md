@@ -398,7 +398,7 @@ This allows you to combine explanatory text with selected visual content from th
 
 Lapis includes offline spellchecking in the notes editor.
 
-When spellchecking is enabled, words that are not recognized by the active dictionaries are underlined.
+When spellchecking is enabled, words that are not recognized by the active dictionaries are underlined. Code (fenced blocks and `inline code`) and LaTeX (`$…$`, `$$…$$`) are never checked.
 
 ### Correcting a word
 
@@ -593,7 +593,7 @@ Q: What is the function of mitochondria?
 A: ATP production through cellular respiration.
 ```
 
-Write these patterns in the notes associated with your document, then open the Flashcards trainer.
+Write these patterns in the notes associated with your document, then open the Flashcards trainer. Text inside code and LaTeX is ignored, so `std::vector` or `$a::b$` never creates a card; a code block inside an answer is kept as part of that answer.
 
 ### Reviewing cards
 

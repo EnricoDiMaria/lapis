@@ -2795,16 +2795,153 @@ fn strip_title_emphasis(title: &str) -> &str {
     t
 }
 
+/// Byte ranges of `text` that hold code (fenced blocks, inline code) or LaTeX (`$$…$$`, `$…$`).
+/// Sorted and disjoint. Inline math follows the rules of [`preprocess_markdown_math`]; an
+/// unclosed fence runs to the end, as in Markdown, while unclosed math is plain text.
+pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    fn line_end(text: &str, pos: usize) -> usize {
+        text[pos..].find('\n').map_or(text.len(), |p| pos + p + 1)
+    }
+    /// End of the fenced block opening at the line starting at `start`, if there is one.
+    fn fence_end(text: &str, start: usize) -> Option<usize> {
+        let first_end = line_end(text, start);
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|m| text[start..first_end].trim_start().starts_with(m))?;
+        let mut pos = first_end;
+        while pos < text.len() {
+            let end = line_end(text, pos);
+            if text[pos..end].trim_start().starts_with(marker) {
+                return Some(end);
+            }
+            pos = end;
+        }
+        Some(text.len())
+    }
+    /// End of the first run of exactly `run` backticks in `from..limit`.
+    fn closing_backticks(bytes: &[u8], from: usize, limit: usize, run: usize) -> Option<usize> {
+        let mut j = from;
+        while j < limit {
+            if bytes[j] == b'`' {
+                let mut k = j;
+                while k < limit && bytes[k] == b'`' {
+                    k += 1;
+                }
+                if k - j == run {
+                    return Some(k);
+                }
+                j = k;
+            } else {
+                j += 1;
+            }
+        }
+        None
+    }
+
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    let mut at_line_start = true;
+    while i < bytes.len() {
+        if at_line_start {
+            at_line_start = false;
+            if let Some(end) = fence_end(text, i) {
+                ranges.push(i..end);
+                i = end;
+                at_line_start = true;
+                continue;
+            }
+        }
+        match bytes[i] {
+            b'\n' => {
+                at_line_start = true;
+                i += 1;
+            }
+            b'`' => {
+                let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+                match closing_backticks(bytes, i + run, line_end(text, i), run) {
+                    Some(end) => {
+                        ranges.push(i..end);
+                        i = end;
+                    }
+                    None => i += run,
+                }
+            }
+            b'$' if text[i..].starts_with("$$") => match text[i + 2..].find("$$") {
+                Some(p) => {
+                    let end = i + 2 + p + 2;
+                    ranges.push(i..end);
+                    i = end;
+                }
+                None => i += 2,
+            },
+            b'$' => {
+                let after = i + 1;
+                let closing = text[after..line_end(text, i)].find('$').map(|p| after + p);
+                match closing {
+                    Some(close)
+                        if close > after
+                            && !text[after..close].starts_with(' ')
+                            && !text[after..close].ends_with(' ') =>
+                    {
+                        ranges.push(i..close + 1);
+                        i = close + 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    ranges
+}
+
+/// Whether byte offset `byte` lies inside one of the sorted, disjoint `ranges`.
+pub fn in_ranges(ranges: &[std::ops::Range<usize>], byte: usize) -> bool {
+    let idx = ranges.partition_point(|r| r.end <= byte);
+    ranges.get(idx).is_some_and(|r| r.start <= byte)
+}
+
+/// Offset in `hay` of the first `needle` outside code and math. `base` is `hay`'s offset in the note.
+fn find_outside(
+    hay: &str,
+    base: usize,
+    needle: &str,
+    skip: &[std::ops::Range<usize>],
+) -> Option<usize> {
+    hay.match_indices(needle)
+        .map(|(i, _)| i)
+        .find(|&i| !in_ranges(skip, base + i))
+}
+
+/// Whether a note contains at least one flashcard (cheap pre-check; runs every frame).
+pub fn page_has_flashcards(content: &str) -> bool {
+    (content.contains("::") || content.contains("Q:") || content.contains("D:"))
+        && !extract_flashcards_from_page(0, content).is_empty()
+}
+
 fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
     let mut cards = Vec::new();
-    let mut lines = content.lines().peekable();
-    while let Some(raw_line) = lines.next() {
+    // Code and math never produce cards; offsets let us tell where a marker sits.
+    let skip = code_and_math_ranges(content);
+    let mut offset = 0;
+    let mut lines = content
+        .split_inclusive('\n')
+        .map(|l| {
+            let start = offset;
+            offset += l.len();
+            (start, l)
+        })
+        .peekable();
+    while let Some((line_off, raw_line)) = lines.next() {
         let trimmed = strip_list_marker(raw_line);
+        // `trimmed` is a subslice of `raw_line`.
+        let base = line_off + (trimmed.as_ptr() as usize - raw_line.as_ptr() as usize);
 
         // 1. Check inline `Front :: Back` syntax
-        if let Some((left, right)) = trimmed.split_once("::") {
-            let f = strip_title_emphasis(left);
-            let b = right.trim();
+        if let Some(p) = find_outside(trimmed, base, "::", &skip) {
+            let f = strip_title_emphasis(&trimmed[..p]);
+            let b = trimmed[p + 2..].trim();
             if !f.is_empty() && !b.is_empty() {
                 cards.push(Flashcard {
                     page,
@@ -2816,33 +2953,41 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
         }
 
         // 2. Check `Q: ...` / `A: ...` block syntax
-        if let Some(q_start) = trimmed
-            .strip_prefix("Q:")
-            .or_else(|| trimmed.strip_prefix("**Q:**"))
-            .or_else(|| trimmed.strip_prefix("D:"))
+        if !in_ranges(&skip, base)
+            && let Some(q_start) = trimmed
+                .strip_prefix("Q:")
+                .or_else(|| trimmed.strip_prefix("**Q:**"))
+                .or_else(|| trimmed.strip_prefix("D:"))
         {
             let mut question = q_start.trim().to_string();
             let mut answer = String::new();
             let mut in_answer = false;
 
-            while let Some(&next_raw) = lines.peek() {
+            while let Some(&(next_off, next_raw)) = lines.peek() {
                 let next_trim = next_raw.trim();
-                if next_trim.is_empty() && in_answer {
+                let lead = next_raw.len() - next_raw.trim_start().len();
+                // Markers inside a code block or math are content, not syntax.
+                let is_syntax = !in_ranges(&skip, next_off + lead);
+                if next_trim.is_empty() && in_answer && !in_ranges(&skip, next_off) {
                     break;
                 }
-                if next_trim.starts_with("Q:")
-                    || next_trim.starts_with("**Q:**")
-                    || next_trim.contains("::")
+                if (is_syntax
+                    && (next_trim.starts_with("Q:") || next_trim.starts_with("**Q:**")))
+                    || find_outside(next_raw, next_off, "::", &skip).is_some()
                 {
                     break;
                 }
 
-                let consumed = lines.next().unwrap().trim();
-                if let Some(a_start) = consumed
-                    .strip_prefix("A:")
-                    .or_else(|| consumed.strip_prefix("**A:**"))
-                    .or_else(|| consumed.strip_prefix("R:"))
-                {
+                let consumed = lines.next().unwrap().1.trim();
+                let a_start = if is_syntax {
+                    consumed
+                        .strip_prefix("A:")
+                        .or_else(|| consumed.strip_prefix("**A:**"))
+                        .or_else(|| consumed.strip_prefix("R:"))
+                } else {
+                    None
+                };
+                if let Some(a_start) = a_start {
                     in_answer = true;
                     answer.push_str(a_start.trim());
                 } else if in_answer {
@@ -3562,6 +3707,62 @@ mod tests {
             (c[0].front.as_str(), c[0].back.as_str()),
             ("What is *p?", "a pointer")
         );
+    }
+
+    fn skipped(text: &str) -> Vec<&str> {
+        code_and_math_ranges(text)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect()
+    }
+
+    #[test]
+    fn code_and_math_ranges_cover_code_and_latex_only() {
+        assert_eq!(
+            skipped("a `x y` b $m n$ c\n```\ncode\n```\nd $$\nz\n$$ e"),
+            ["`x y`", "$m n$", "```\ncode\n```\n", "$$\nz\n$$"]
+        );
+        // Currency and unmatched markers are ordinary text.
+        assert!(skipped("costs $5 and $6 total, `open and $$ open").is_empty());
+        assert_eq!(skipped("``a ` b`` and `c"), ["``a ` b``"]);
+        assert_eq!(skipped("```\nunclosed"), ["```\nunclosed"]);
+        assert_eq!(skipped("é `ü` $α$ ok"), ["`ü`", "$α$"]);
+        let r = code_and_math_ranges("a `b` c");
+        assert!(in_ranges(&r, 2) && in_ranges(&r, 4) && !in_ranges(&r, 1) && !in_ranges(&r, 5));
+    }
+
+    #[test]
+    fn flashcards_ignore_code_and_math() {
+        assert!(card_fronts("```cpp\nstd::cout :: x\n```").is_empty());
+        assert!(card_fronts("~~~\na :: b\n~~~").is_empty());
+        assert!(card_fronts("Use `std::vector` for arrays").is_empty());
+        assert!(card_fronts("Inline $a :: b$ math").is_empty());
+        assert!(card_fronts("$$\nx :: y\n$$").is_empty());
+        assert!(card_fronts("```\nQ: not a card\nA: still not\n```").is_empty());
+        // A real marker next to code still works.
+        assert_eq!(
+            card_fronts("`std::vector` :: dynamic array"),
+            ["`std::vector`"]
+        );
+        assert_eq!(card_fronts("Vector :: uses `a::b` inside"), ["Vector"]);
+    }
+
+    #[test]
+    fn flashcard_answers_may_contain_code() {
+        let mut m = HashMap::new();
+        m.insert(
+            1u32,
+            "Q: Print?\nA: Use:\n```cpp\nstd::cout << 1;\n\nQ: x\n```\ndone".to_string(),
+        );
+        let c = extract_flashcards_from_notes(&m);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].front, "Print?");
+        assert_eq!(
+            c[0].back,
+            "Use:\n```cpp\nstd::cout << 1;\n\nQ: x\n```\ndone"
+        );
+        assert!(page_has_flashcards("Q: a\nA: b"));
+        assert!(!page_has_flashcards("```\na :: b\n```"));
     }
 
     #[test]
