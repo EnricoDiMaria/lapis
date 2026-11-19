@@ -13228,22 +13228,47 @@ impl Lapis {
                 let preview_label = if show_labels { "󰈈  Preview" } else { "󰈈" };
                 let mode_font_size = if show_labels { 10.0 } else { 11.0 };
 
-                if sk_on
-                    && ui
-                        .add_sized(
-                            [sketch_width, 22.0],
-                            crate::theme::selected_button(
-                                egui::RichText::new(" ").size(11.0).strong(),
-                                self.note_mode == NoteMode::Sketch,
-                                ui.visuals(),
-                            )
-                                .corner_radius(button_radius),
+                if sk_on {
+                    let resp = ui.add_sized(
+                        [sketch_width, 22.0],
+                        crate::theme::selected_button(
+                            egui::RichText::new(" ").size(11.0).strong(),
+                            self.note_mode == NoteMode::Sketch,
+                            ui.visuals(),
                         )
+                        .corner_radius(button_radius),
+                    );
+                    let has_sketch = self
+                        .sketches
+                        .get(&self.note_page)
+                        .is_some_and(|s| !s.strokes.is_empty());
+                    if has_sketch {
+                        // Corner dot like Notes and Flashcards, slightly smaller for the narrow
+                        // tab. The clip is widened so the panel edge cannot crop it.
+                        let dot_center =
+                            egui::pos2(resp.rect.right_top().x - 3.0, resp.rect.right_top().y + 3.5);
+                        let painter = ui
+                            .painter()
+                            .with_clip_rect(ui.painter().clip_rect().expand(6.0));
+                        painter.circle(
+                            dot_center,
+                            2.5,
+                            theme::rgb(self.theme.accent),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
+                        );
+                    }
+                    let hover = if has_sketch {
+                        "Sketch: a separate scratchpad for this page (Alt+S)\n(This page contains a sketch)"
+                    } else {
+                        "Sketch: a separate scratchpad for this page (Alt+S)"
+                    };
+                    if resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Sketch: a separate scratchpad for this page (Alt+S)")
+                        .on_hover_text(hover)
                         .clicked()
-                {
-                    self.note_mode = NoteMode::Sketch;
+                    {
+                        self.note_mode = NoteMode::Sketch;
+                    }
                 }
 
                 if ui

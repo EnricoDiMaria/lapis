@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Catppuccin:** Choose Latte, Frappe, Macchiato, or Mocha, then select one of the 14 accent colors.
 - **Saved custom themes:** Save a named palette, recall it from the custom-theme menu, or explicitly update an existing name. JSON import/export remains available.
 - **Per-file view memory:** Each document remembers its view mode and the size of its notes panel (side, bottom, and Slideshow + Notes). The view mode is saved as soon as it changes; slideshows reopen in the mode they were started from.
+- **Sketch indicator:** The Sketch tab of the notes panel shows the same dot as Notes and Flashcards when the page has a sketch.
 - **Exclusive theme sources:** Select Presets, Catppuccin, or Custom; only the active source’s controls are shown. Preset entries retain their original accent colors and background previews. Palette editing switches to Custom.
 
 ### Changed
