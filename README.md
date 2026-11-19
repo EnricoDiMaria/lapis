@@ -346,7 +346,7 @@ For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a f
 
 ## Additional spelling languages
 
-Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download matching files and select both at once in **Add dictionary**, or add either file first and its missing partner later. Incomplete pairs are warned about and remain inactive. You can disable any installed language, including built-in English, without deleting it; the dictionary list shows both file paths. Suggestions are ranked across all enabled languages with source labels such as **IT** and **EN**. See the [user guide](docs/USER_GUIDE.md#9-spellchecking-and-dictionaries) for direct download links and instructions.
+Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download matching files and select both at once in **Add dictionary**, or add either file first and its missing partner later. Incomplete pairs are warned about and remain inactive. You can disable any installed language, including built-in English, without deleting it; the dictionary list shows both file paths. Suggestions are ranked across all enabled languages (accent fixes first, then closest letter edits) with source labels such as **IT** and **EN**. See the [user guide](docs/USER_GUIDE.md#9-spellchecking-and-dictionaries) for direct download links and instructions.
 
 ## Development
 

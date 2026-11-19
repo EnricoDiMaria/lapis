@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
 
+- **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, including accents) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
+
 ### Fixed
 
 - **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
