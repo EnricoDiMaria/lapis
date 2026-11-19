@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Eraser cursor:** The circle now scales with the page zoom and sits halfway between the old fixed size and the real erase radius, instead of being much smaller than the area it erases.
 - **Sidebar tab sync:** Switching between Thumbnails and Outline/Bookmarks now scrolls the new tab to the current page, even if the page changed while the other tab was open.
 - **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
 - **Notes Preview scroll arrow:** The "more below" arrow now disappears at the bottom of the Preview, as in Edit, including when the floating audio buttons are enabled.

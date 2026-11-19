@@ -1231,6 +1231,9 @@ const ANNOTATION_PALETTE: [([u8; 3], &str); 8] = [
     ([192, 132, 252], "Lavender"),
 ];
 
+/// Freehand strokes within this distance of the eraser are removed (fraction of the page).
+const ERASER_REACH: f32 = 0.025;
+
 /// Vertical gap between pages in Continuous mode.
 const CONTINUOUS_GAP: f32 = 14.0;
 
@@ -4858,10 +4861,13 @@ impl Lapis {
             }
             AnnotationTool::Eraser => {
                 if let Some(pos) = pointer_pos {
+                    // Halfway between the old fixed 7 px and the real reach, so the circle
+                    // follows the page zoom and still stays small enough to aim with.
+                    let reach_px = ERASER_REACH * (slide_rect.width() + slide_rect.height()) * 0.5;
                     ui.painter().circle_stroke(
-                    pointer_pos.unwrap(),
-                    7.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+                        pos,
+                        (7.0 + reach_px) * 0.5,
+                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
                     );
                     if img_resp.clicked() || img_resp.dragged() || hold_key_down {
                     let (nx, ny) = to_norm(pos);
@@ -4903,7 +4909,7 @@ impl Lapis {
                             notes::AnnotationKind::Freehand => !ann
                                 .points
                                 .iter()
-                                .any(|&(px, py)| (px - nx).hypot(py - ny) < 0.025),
+                                .any(|&(px, py)| (px - nx).hypot(py - ny) < ERASER_REACH),
                             notes::AnnotationKind::TextBox => {
                                 if let Some(&(bx, by)) = ann.points.first() {
                                     let (ex, ey) = ann
