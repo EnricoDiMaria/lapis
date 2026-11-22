@@ -1234,6 +1234,15 @@ const ANNOTATION_PALETTE: [([u8; 3], &str); 8] = [
 /// Freehand strokes within this distance of the eraser are removed (fraction of the page).
 const ERASER_REACH: f32 = 0.025;
 
+/// Where the topbar is drawn this frame.
+enum TopbarSlot {
+    /// In the layout, pushing the page down.
+    Docked,
+    /// Auto-hide: floating over the page while revealed.
+    Overlay,
+    Hidden,
+}
+
 /// Vertical gap between pages in Continuous mode.
 const CONTINUOUS_GAP: f32 = 14.0;
 
@@ -1292,6 +1301,12 @@ struct Lapis {
     prev_view_mode: ViewMode,
     /// View mode last written to `state.json`; a difference triggers a save.
     saved_view_mode: ViewMode,
+    /// Auto-hide: the shortcut keeps the topbar docked and visible.
+    topbar_pinned: bool,
+    /// Auto-hide: time until which a revealed topbar stays (hover grace period).
+    topbar_hold_until: f64,
+    /// Height of the revealed overlay topbar; 0 while hidden or docked.
+    topbar_overlay_h: f32,
     /// Notes-panel sizes of the open document.
     panel_sizes: PanelSizes,
     /// Panels that take the saved size the next time they are shown.
@@ -1515,6 +1530,9 @@ impl Lapis {
             view_mode: ViewMode::SinglePage,
             prev_view_mode: ViewMode::SinglePage,
             saved_view_mode: ViewMode::SinglePage,
+            topbar_pinned: false,
+            topbar_hold_until: 0.0,
+            topbar_overlay_h: 0.0,
             panel_sizes: PanelSizes::default(),
             panel_apply: [true; 3],
             panel_seen: [None; 3],
@@ -1742,6 +1760,52 @@ impl Lapis {
             panel_sizes: self.panel_sizes,
         });
     }
+    /// Decides where the topbar goes. With auto-hide on it floats over the page (never pushing
+    /// it down) while the pointer is at the top edge, or over the bar, a menu of the bar is
+    /// open or one of its fields is edited; it hides 0.4 s later. A pinned bar stays docked.
+    fn topbar_slot(&mut self, ui: &egui::Ui) -> TopbarSlot {
+        if !self.app_state.settings.topbar_auto_hide || self.topbar_pinned {
+            return TopbarSlot::Docked;
+        }
+        let ctx = ui.ctx();
+        let screen = ctx.content_rect();
+        let now = ctx.input(|i| i.time);
+        let (pointer, button_down) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_down()));
+        let was_shown = self.topbar_overlay_h > 0.0;
+        let near_top = |reach: f32| pointer.is_some_and(|p| p.y <= screen.top() + reach);
+        // A press elsewhere (drawing, dragging) must not pop the bar open.
+        let at_edge = near_top(5.0) && !button_down;
+        let over_bar = was_shown && near_top(self.topbar_overlay_h + 4.0);
+        let menu_open = was_shown && ctx.any_popup_open();
+        let editing = was_shown
+            && ctx
+                .memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|r| r.rect.bottom() <= screen.top() + self.topbar_overlay_h + 2.0);
+        if at_edge || over_bar || menu_open || editing {
+            self.topbar_hold_until = now + 0.4;
+        }
+        if now >= self.topbar_hold_until {
+            return TopbarSlot::Hidden;
+        }
+        // Wake up again to hide the bar once the grace period ends.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        TopbarSlot::Overlay
+    }
+
+    /// Shortcut: the first press hides a docked topbar (turning auto-hide on); later presses
+    /// pin it open (docked) or release it back to hover-to-reveal.
+    fn toggle_topbar(&mut self) {
+        if !self.app_state.settings.topbar_auto_hide {
+            self.app_state.settings.topbar_auto_hide = true;
+            self.topbar_pinned = false;
+            self.app_state.save();
+        } else {
+            self.topbar_pinned = !self.topbar_pinned;
+        }
+        self.topbar_hold_until = 0.0;
+    }
+
     /// Scales a fixed panel size (button height, margin) by the interface density.
     fn sz(&self, base: f32) -> f32 {
         (base * self.app_state.settings.ui_density.scale()).round()
@@ -5667,6 +5731,17 @@ impl Lapis {
                                                                 }
                                                             }
                                                         });
+                                                        ui.add_space(6.0);
+                                                        if ui
+                                                            .checkbox(
+                                                                &mut self.app_state.settings.topbar_auto_hide,
+                                                                "Auto-hide topbar (hover the top edge or press Alt+T)",
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            self.topbar_pinned = false;
+                                                            settings_dirty = true;
+                                                        }
                                                         ui.add_space(8.0);
                                                         ui.separator();
                                                         ui.add_space(8.0);
@@ -7221,6 +7296,7 @@ impl Lapis {
                 "󰠱  Toggle Sketch (page scratchpad) [Alt+S]",
                 "View",
             ),
+            ("toggle_topbar", "󰁝  Show / Hide Topbar [Alt+T]", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
                 "insert_blank",
@@ -7428,6 +7504,7 @@ impl Lapis {
             }
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
             "toggle_sketch" => self.toggle_sketch_tab(),
+            "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
             "toggle_fullscreen" => {
                 if !matches!(
                     self.view_mode,
@@ -14748,6 +14825,7 @@ impl eframe::App for Lapis {
         let mut act_toggle_mode = false;
         let mut act_view_mode: Option<ViewMode> = None;
         let mut act_toggle_sketch = false;
+        let mut act_toggle_topbar = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
@@ -14818,6 +14896,9 @@ impl eframe::App for Lapis {
                 }
                 if sc.toggle_sketch.consume(i) {
                     act_toggle_sketch = true;
+                }
+                if sc.toggle_topbar.consume(i) {
+                    act_toggle_topbar = true;
                 }
                 if sc.toggle_outline.consume(i) {
                     act_toggle_toc = true;
@@ -15016,6 +15097,9 @@ impl eframe::App for Lapis {
         if act_toggle_sketch {
             self.toggle_sketch_tab();
         }
+        if act_toggle_topbar && self.has_pdf() {
+            self.toggle_topbar();
+        }
         if act_toggle_mode && self.show_notes {
             self.note_mode = match self.note_mode {
                 NoteMode::Edit => NoteMode::Preview,
@@ -15081,6 +15165,9 @@ impl eframe::App for Lapis {
         }
 
         if !in_slideshow && self.has_pdf() {
+            let topbar_slot = self.topbar_slot(ui);
+            // The topbar itself, drawn into whichever ui the slot provides.
+            let mut draw_topbar = |ui: &mut egui::Ui| {
             // Density sets the row height, margins and button padding.
             let density = self.app_state.settings.ui_density;
             let bar = density.bar();
@@ -15666,6 +15753,30 @@ impl eframe::App for Lapis {
                 ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(menu_id) = is_open);
 
             });
+            };
+
+            // Docked, revealed as an overlay (auto-hide), or hidden.
+            let mut overlay_h = 0.0;
+            match topbar_slot {
+                TopbarSlot::Docked => draw_topbar(ui),
+                TopbarSlot::Overlay => {
+                    let ctx = ui.ctx().clone();
+                    let screen = ctx.content_rect();
+                    let area = egui::Area::new(egui::Id::new("topbar_overlay"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(screen.min)
+                        .constrain(false)
+                        .default_size(egui::vec2(screen.width(), 60.0))
+                        .show(&ctx, |area_ui| {
+                            area_ui.set_width(screen.width());
+                            area_ui.set_max_height(screen.height());
+                            draw_topbar(area_ui);
+                        });
+                    overlay_h = area.response.rect.height();
+                }
+                TopbarSlot::Hidden => {}
+            }
+            self.topbar_overlay_h = overlay_h;
         }
 
         if self.has_pdf() && self.view_mode != ViewMode::Slideshow {

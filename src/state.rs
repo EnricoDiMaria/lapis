@@ -316,7 +316,7 @@ impl ShortcutBinding {
     }
 }
 
-pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 17] {
+pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 18] {
     [
         ("Save notes", &mut cfg.save_notes),
         ("Toggle notes panel", &mut cfg.toggle_notes),
@@ -338,6 +338,7 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
             &mut cfg.toggle_continuous_single,
         ),
         ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
+        ("Show / hide topbar", &mut cfg.toggle_topbar),
     ]
 }
 
@@ -452,6 +453,7 @@ pub struct ShortcutsConfig {
     pub toggle_fullscreen: ShortcutBinding,
     pub toggle_continuous_single: ShortcutBinding,
     pub toggle_sketch: ShortcutBinding,
+    pub toggle_topbar: ShortcutBinding,
 }
 
 impl Default for ShortcutsConfig {
@@ -474,6 +476,7 @@ impl Default for ShortcutsConfig {
             toggle_fullscreen: ShortcutBinding::new(false, false, false, "F11"),
             toggle_continuous_single: ShortcutBinding::new(false, false, false, "C"),
             toggle_sketch: ShortcutBinding::new(false, true, false, "S"),
+            toggle_topbar: ShortcutBinding::new(false, true, false, "T"),
         }
     }
 }
@@ -731,6 +734,8 @@ pub struct AppSettings {
     /// Density of the whole interface (`compact_topbar` was the former boolean key).
     #[serde(alias = "compact_topbar")]
     pub ui_density: UiDensity,
+    /// Hide the topbar; reveal it by hovering the top edge or with the shortcut.
+    pub topbar_auto_hide: bool,
 }
 
 impl Default for AppSettings {
@@ -757,6 +762,7 @@ impl Default for AppSettings {
             default_page_style: crate::notes::BlankPageStyle::Ruled,
             sketch_enabled: true,
             ui_density: UiDensity::Standard,
+            topbar_auto_hide: false,
         }
     }
 }

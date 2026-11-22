@@ -104,6 +104,14 @@ Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11`
 **Toggle Fullscreen** in the Command Palette) to enter or leave fullscreen. The shortcut can be changed in
 **Settings → Keybindings**.
 
+### Auto-hide topbar — `Alt+T`
+
+The topbar can hide itself to give the page the full window height. Turn it on with **Settings → Theme & Fonts → Interface density → Auto-hide topbar**, or press `Alt+T` (also available as **Show / Hide Topbar** in the Command Palette; the shortcut can be changed in **Settings → Keybindings**).
+
+- **Reveal with the mouse:** move the pointer to the top edge of the window. The topbar slides over the page without moving it, and stays while the pointer is over it, one of its menus is open, or you are typing in its page box. It hides again shortly after you move away. Pressing a mouse button elsewhere (drawing, dragging) never reveals it.
+- **Reveal with the shortcut:** the first `Alt+T` hides a normal topbar and turns auto-hide on. Pressing it again pins the topbar open (docked, so the page is pushed down as usual); pressing it once more returns to hover-to-reveal. The pinned state lasts for the session.
+- Turn auto-hide off in the settings to bring back the always-visible topbar. The annotation toolbar is not affected.
+
 Fullscreen also works in tiling compositors such as Hyprland. If you leave fullscreen with a compositor
 keybinding, Lapis follows that change instead of forcing fullscreen back. In the slideshow modes `F11` has no
 effect: press `Esc` to exit them.
