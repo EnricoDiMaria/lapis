@@ -459,6 +459,95 @@ fn storage_delete_leftovers(en: &StorageEntry) -> std::io::Result<()> {
 
 // End of Storage Section
 
+// ───────── Advanced Settings layout helpers ─────────
+// Every settings page is built from the same pieces: a page header, titled cards (sections)
+// that group related options, small sub-headings inside a card, and options that carry a short
+// explanation underneath.
+
+/// Page title with a one-line description.
+fn settings_page_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(egui::RichText::new(title).size(18.0).strong());
+    ui.weak(description);
+    ui.add_space(10.0);
+}
+
+/// A titled card that groups related options.
+fn settings_section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let out = ui
+        .group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).size(14.0).strong());
+            if !description.is_empty() {
+                ui.weak(description);
+            }
+            ui.add_space(6.0);
+            add_contents(ui)
+        })
+        .inner;
+    ui.add_space(10.0);
+    out
+}
+
+/// Small heading for a group of options inside a card.
+fn settings_subheading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(text).size(12.5).strong());
+    ui.add_space(2.0);
+}
+
+/// Explanation under a checkbox or radio button, aligned with its label.
+fn settings_hint(ui: &mut egui::Ui, text: &str) {
+    let indent = ui.spacing().icon_width + ui.spacing().icon_spacing;
+    egui::Frame::NONE
+        .inner_margin(egui::Margin {
+            left: indent as i8,
+            right: 0,
+            top: 0,
+            bottom: 3,
+        })
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(11.5).weak());
+        });
+}
+
+/// Checkbox with an explanation underneath.
+fn settings_toggle(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    label: &str,
+    hint: &str,
+) -> egui::Response {
+    let response = ui.checkbox(value, label);
+    settings_hint(ui, hint);
+    response
+}
+
+/// Row of mutually exclusive choices drawn as buttons. Returns true when the choice changed.
+fn settings_choice<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    options: &[(T, &str)],
+    min_width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for &(value, label) in options {
+            let button = crate::theme::selected_button(label, *current == value, ui.visuals())
+                .min_size(egui::vec2(min_width, 28.0));
+            if ui.add(button).clicked() && *current != value {
+                *current = value;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 /// Button with inline confirmation: first click -> "Sure? Yes / No". Returns true upon confirmation.
 fn danger_button(
     ui: &mut egui::Ui,
@@ -1258,6 +1347,7 @@ enum ViewMode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
     StudyAndTools,
+    Workspace,
     AppearanceAndTheme,
     Shortcuts,
     SystemAndData,
@@ -5364,10 +5454,11 @@ impl Lapis {
                                     // Frame::show inherits the parent layout.
                                     ui.vertical(|ui| {
                                         let tabs = [
-                                            (SettingsTab::StudyAndTools, "󰏫  Study & Canvas"),
-                                            (SettingsTab::AppearanceAndTheme, "󰔎  Theme & Fonts"),
+                                            (SettingsTab::AppearanceAndTheme, "󰔎  Appearance"),
+                                            (SettingsTab::StudyAndTools, "󰏫  Tools & Study"),
+                                            (SettingsTab::Workspace, "󰕮  Workspace"),
                                             (SettingsTab::Shortcuts, "󰌌  Keybindings"),
-                                            (SettingsTab::SystemAndData, "󰒓  System & Export"),
+                                            (SettingsTab::SystemAndData, "󰚥  Export & PDF"),
                                             (SettingsTab::Storage, "󰋊  Storage & Data"),
                                             (SettingsTab::Dictionaries, "󰗊  Dictionaries"),
                                         ];
@@ -5410,430 +5501,384 @@ impl Lapis {
                                                 let mut settings_dirty = false;
 
                                                 match self.settings_tab {
-                                                    // ───────────── STUDY & CANVAS ─────────────
+                                                    // ───────────── TOOLS & STUDY ─────────────
                                                     SettingsTab::StudyAndTools => {
-                                                        ui.label(egui::RichText::new("Study & Canvas").size(16.0).strong());
-                                                        ui.weak("Choose which tools appear, how panels behave, and how you study.");
-                                                        ui.add_space(10.0);
+                                                        settings_page_header(ui, "Tools & Study", "Annotation tools, active recall and flashcards.");
 
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                            ui.label(egui::RichText::new("Annotation toolbar").size(14.0).strong());
-                                                            ui.weak("Visibility and quick access");
-                                                            ui.add_space(5.0);
-
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.radial_menu_enabled,
-                                                                "Enable Quick Radial Tools Menu on canvas",
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-
-                                                        if ui
-                                                            .checkbox(
+                                                        settings_section(ui, "Annotation toolbar", "Which tools are shown and how you reach them.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.tools_button,
                                                                 "Show Annotation Tools button",
+                                                                "Adds the annotation tools button to the topbar.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-
-                                                        ui.add_space(8.0);
-                                                        ui.label(egui::RichText::new("When closing the toolbar").strong());
-                                                        if ui.checkbox(
-                                                            &mut self.app_state.settings.reset_tool_on_bar_close,
-                                                            "Switch to Cursor when closing the annotation bar",
-                                                        ).changed() {
-                                                            settings_dirty = true;
-                                                        }
-
-                                                        ui.add_space(10.0);
-                                                        ui.label(egui::RichText::new("Toolbar position").size(13.0).strong());
-                                                        ui.add_space(4.0);
-
-                                                        ui.horizontal(|ui| {
-                                                            let current = self.app_state.settings.tools_layout;
-
-                                                            let options = [
-                                                                (state::ToolsLayoutMode::SubTopbar, "󰕮  Sub-Topbar"),
-                                                                (state::ToolsLayoutMode::VerticalRail, "󰍜  Vertical Rail"),
-                                                            ];
-
-                                                            for (mode, label) in options {
-                                                                let btn = crate::theme::selected_button(label, current == mode, ui.visuals())
-                                                                    .min_size(egui::vec2(150.0, 28.0));
-
-                                                                if ui.add(btn).clicked() && current != mode {
-                                                                    self.app_state.settings.tools_layout = mode;
-                                                                    settings_dirty = true;
-                                                                }
+                                                            {
+                                                                settings_dirty = true;
                                                             }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.radial_menu_enabled,
+                                                                "Enable Quick Radial Tools Menu on canvas",
+                                                                "Right-click the page, or use its shortcut, to open a circular menu of tools.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.reset_tool_on_bar_close,
+                                                                "Switch to Cursor when closing the annotation bar",
+                                                                "Closing the toolbar returns to the Cursor / Select tool instead of keeping the active tool.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+
+                                                            settings_subheading(ui, "Toolbar position");
+                                                            let mut layout = self.app_state.settings.tools_layout;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut layout,
+                                                                &[
+                                                                    (state::ToolsLayoutMode::SubTopbar, "󰕮  Sub-Topbar"),
+                                                                    (state::ToolsLayoutMode::VerticalRail, "󰍜  Vertical Rail"),
+                                                                ],
+                                                                150.0,
+                                                            ) {
+                                                                self.app_state.settings.tools_layout = layout;
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.weak("Sub-Topbar: a horizontal bar under the topbar. Vertical Rail: a bar on the right edge.");
+
+                                                            settings_subheading(ui, "Drawing");
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Stroke Thickness:");
+                                                                ui.add(egui::Slider::new(&mut self.stroke_width, 1.0..=18.0).suffix(" px"));
+                                                            });
                                                         });
 
-                                                        ui.add_space(10.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Stroke Thickness:");
-                                                            ui.add(egui::Slider::new(&mut self.stroke_width, 1.0..=18.0).suffix(" px"));
-                                                        });
+                                                        settings_section(ui, "Active recall", "Study by hiding and revealing your own material.", |ui| {
+                                                            settings_subheading(ui, "Occlusion tape");
+                                                            ui.weak("Hide parts of a page with tape, then reveal them to test yourself.");
+                                                            ui.add_space(4.0);
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui
+                                                                    .button("󰝤  Cover All Tapes (Quiz Mode)")
+                                                                    .on_hover_text("Hide all revealed occlusion tapes across the PDF")
+                                                                    .clicked()
+                                                                {
+                                                                    self.revealed_tapes.clear();
+                                                                }
 
+                                                                if ui
+                                                                    .button("󰈈  Reveal All Tapes")
+                                                                    .on_hover_text("Temporarily uncover all occlusion tapes in the document")
+                                                                    .clicked()
+                                                                {
+                                                                    for (&p, list) in &self.annotations {
+                                                                        for (idx, ann) in list.iter().enumerate() {
+                                                                            if matches!(ann.kind, notes::AnnotationKind::Tape) {
+                                                                                self.revealed_tapes.insert((p, idx));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+
+                                                            settings_subheading(ui, "Flashcards");
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.flash_button,
+                                                                "Show Flashcards button",
+                                                                "Adds the Flashcards button to the topbar.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.flash_notification_dot,
+                                                                "Show flashcard notification dot when document has cards",
+                                                                "Marks the Flashcards button when your notes contain flashcards.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰘸 Open Flashcards Modal").clicked() {
+                                                                    self.toggle_flashcards_modal();
+                                                                }
+
+                                                                if ui.button("󰈇 Export Anki Deck (.tsv)").clicked() {
+                                                                    self.export_anki_dialog(ui.ctx());
+                                                                }
+                                                            });
                                                         });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Sidebars & Panels")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.weak("Remember which panels were open");
-                                                        ui.add_space(5.0);
-                                                        if ui
-                                                            .checkbox(
+                                                    }
+
+                                                    // ───────────── WORKSPACE ─────────────
+                                                    SettingsTab::Workspace => {
+                                                        settings_page_header(ui, "Workspace", "Panels, audio, and how pages and slideshows behave.");
+
+                                                        settings_section(ui, "Panels", "What Lapis restores when you reopen a document.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.restore_show_notes,
                                                                 "Remember Notes panel state on reopen",
+                                                                "Reopen a document with the Notes panel open or closed, as you left it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.restore_show_toc,
                                                                 "Remember Outline panel state on reopen",
+                                                                "Reopen a document with the Outline panel open or closed, as you left it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        ui.add_space(9.0);
-                                                        ui.label(egui::RichText::new("Notes workspace").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                        });
+
+                                                        settings_section(ui, "Notes panel", "Where your notes live and what they offer.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.bottom_notes,
                                                                 "Allow Notes panel to fit under the page when window is in portrait",
+                                                                "In a tall window the panel can sit under the page instead of beside it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.sketch_enabled,
                                                                 "Enable Sketch (per-page scratchpad tab in the Notes panel)",
-                                                            )
-                                                            .on_hover_text("Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.")
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                            if !self.app_state.settings.sketch_enabled {
-                                                                self.finish_sketch_edit();
-                                                                if self.note_mode == NoteMode::Sketch {
-                                                                    self.note_mode = NoteMode::Edit;
-                                                                }
-                                                            }
-                                                        }
-                                                        ui.add_space(9.0);
-                                                        ui.label(egui::RichText::new("Audio workspace").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.audio_notes,
-                                                                "Enable Audio notes",
+                                                                "Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.audio_dock,
-                                                                "Enable Audio Lessons registation and Audio dock",
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        
-
-                                                        });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Active Recall")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.weak("Occlusion tape controls");
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui
-                                                                .button("󰝤  Cover All Tapes (Quiz Mode)")
-                                                                .on_hover_text("Hide all revealed occlusion tapes across the PDF")
-                                                                .clicked()
                                                             {
-                                                                self.revealed_tapes.clear();
-                                                            }
-
-                                                            if ui
-                                                                .button("󰈈  Reveal All Tapes")
-                                                                .on_hover_text("Temporarily uncover all occlusion tapes in the document")
-                                                                .clicked()
-                                                            {
-                                                                for (&p, list) in &self.annotations {
-                                                                    for (idx, ann) in list.iter().enumerate() {
-                                                                        if matches!(ann.kind, notes::AnnotationKind::Tape) {
-                                                                            self.revealed_tapes.insert((p, idx));
-                                                                        }
+                                                                settings_dirty = true;
+                                                                if !self.app_state.settings.sketch_enabled {
+                                                                    self.finish_sketch_edit();
+                                                                    if self.note_mode == NoteMode::Sketch {
+                                                                        self.note_mode = NoteMode::Edit;
                                                                     }
                                                                 }
                                                             }
                                                         });
 
-                                                        ui.add_space(10.0);
-                                                        ui.separator();
-                                                        ui.add_space(7.0);
-                                                        ui.label(egui::RichText::new("Flashcards").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.flash_button,
-                                                                "Show Flashcards button",
+                                                        settings_section(ui, "Audio", "Voice memos and lesson recordings.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.audio_notes,
+                                                                "Enable Audio notes",
+                                                                "Voice memos attached to pages.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui.checkbox(
-                                                            &mut self.app_state.settings.flash_notification_dot,
-                                                            "Show flashcard notification dot when document has cards",
-                                                        ).changed() {
-                                                            settings_dirty = true;
-                                                        }
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰘸 Open Flashcards Modal").clicked() {
-                                                                self.toggle_flashcards_modal();
-                                                            }
-
-                                                            if ui.button("󰈇 Export Anki Deck (.tsv)").clicked() {
-                                                                self.export_anki_dialog(ui.ctx());
-                                                            }
-                                                        });
-
-
-                                                        });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Pages & Presentation")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.label(egui::RichText::new("Default new page style").strong());
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for (style, label) in [
-                                                                (notes::BlankPageStyle::Ruled, "Ruled"),
-                                                                (notes::BlankPageStyle::Dotted, "Dotted"),
-                                                                (notes::BlankPageStyle::Grid, "Grid"),
-                                                                (notes::BlankPageStyle::Blank, "Blank"),
-                                                            ] {
-                                                                if ui.selectable_value(&mut self.app_state.settings.default_page_style, style, label).changed() {
-                                                                    settings_dirty = true;
-                                                                }
-                                                            }
-                                                        });
-                                                        ui.add_space(8.0);
-
-                                                        ui.separator();
-                                                        ui.add_space(7.0);
-                                                        ui.label(egui::RichText::new("Slideshow + Notes").size(13.0).strong());
-                                                        ui.weak(
-                                                            "Choose how Slideshow + Notes handles slides without annotations.",
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        for (mode, label) in [
-                                                            (
-                                                                SlideshowEmptyMode::AutoHold,
-                                                                "Auto-Hold Previous Note",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::ContextDashboard,
-                                                                "Study Context Dashboard",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::SkipEmpty,
-                                                                "Skip Unannotated Slides",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::ExpandFull,
-                                                                "Auto-Expand Fullscreen",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::StaticEmpty,
-                                                                "Show Empty-Slide Placeholder",
-                                                            ),
-                                                        ] {
-                                                            if ui
-                                                                .radio_value(
-                                                                    &mut self.app_state.settings.slideshow_empty_mode,
-                                                                    mode,
-                                                                    label,
-                                                                )
-                                                                .changed()
                                                             {
                                                                 settings_dirty = true;
                                                             }
-                                                        }
-
-
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.audio_dock,
+                                                                "Enable Audio Lessons recording and Audio dock",
+                                                                "Record or load a lesson and follow it with its transcript in the audio dock.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
                                                         });
 
+                                                        settings_section(ui, "Pages & presentation", "", |ui| {
+                                                            settings_subheading(ui, "Default new page style");
+                                                            ui.weak("Style of the blank pages you insert into a document.");
+                                                            ui.add_space(4.0);
+                                                            let mut page_style = self.app_state.settings.default_page_style;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut page_style,
+                                                                &[
+                                                                    (notes::BlankPageStyle::Ruled, "Ruled"),
+                                                                    (notes::BlankPageStyle::Dotted, "Dotted"),
+                                                                    (notes::BlankPageStyle::Grid, "Grid"),
+                                                                    (notes::BlankPageStyle::Blank, "Blank"),
+                                                                ],
+                                                                80.0,
+                                                            ) {
+                                                                self.app_state.settings.default_page_style = page_style;
+                                                                settings_dirty = true;
+                                                            }
+
+                                                            settings_subheading(ui, "Slideshow + Notes");
+                                                            ui.weak("What the Notes panel does on slides without annotations.");
+                                                            ui.add_space(4.0);
+                                                            for (mode, label, hint) in [
+                                                                (
+                                                                    SlideshowEmptyMode::AutoHold,
+                                                                    "Auto-Hold Previous Note",
+                                                                    "Keeps the previous annotated slide's note visible.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::ContextDashboard,
+                                                                    "Study Context Dashboard",
+                                                                    "Shows the audio transcript and a preview of the next note.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::SkipEmpty,
+                                                                    "Skip Unannotated Slides",
+                                                                    "Arrow navigation jumps over slides without annotations.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::ExpandFull,
+                                                                    "Auto-Expand Fullscreen",
+                                                                    "Hides the Notes panel on empty slides so the slide fills the screen.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::StaticEmpty,
+                                                                    "Show Empty-Slide Placeholder",
+                                                                    "Keeps the panel in place and shows \"No notes for this slide.\"",
+                                                                ),
+                                                            ] {
+                                                                if ui
+                                                                    .radio_value(
+                                                                        &mut self.app_state.settings.slideshow_empty_mode,
+                                                                        mode,
+                                                                        label,
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                                settings_hint(ui, hint);
+                                                            }
+                                                        });
                                                     }
 
-                                                    // ───────────── THEME & FONTS ─────────────
+                                                    // ───────────── APPEARANCE ─────────────
                                                     SettingsTab::AppearanceAndTheme => {
-                                                        let id = ui.make_persistent_id("theme_picker_state");
-                                                        let mut picker = ui.data_mut(|d| d.get_temp::<theme_picker::ThemePicker>(id))
-                                                            .unwrap_or_else(theme_picker::ThemePicker::load);
-                                                        let action = picker.show(ui, &mut self.theme);
-                                                        ui.data_mut(|d| d.insert_temp(id, picker));
-                                                        match action {
-                                                            Some(theme_picker::ThemeAction::Import) => self.import_theme_dialog(ui.ctx()),
-                                                            Some(theme_picker::ThemeAction::Export) => self.export_theme_dialog(ui.ctx()),
-                                                            None => {}
-                                                        }
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
+                                                        settings_page_header(ui, "Appearance", "Theme, interface size, and text.");
 
-                                                        ui.label(egui::RichText::new("Interface density").size(14.0).strong());
-                                                        ui.weak("Spacing, text and bar sizes across the whole app");
-                                                        ui.add_space(6.0);
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            let current = self.app_state.settings.ui_density;
-                                                            for (mode, label) in [
-                                                                (state::UiDensity::Standard, "Standard"),
-                                                                (state::UiDensity::Compact, "Compact"),
-                                                                (state::UiDensity::Ultra, "Ultra-compact"),
-                                                            ] {
-                                                                let btn = crate::theme::selected_button(label, current == mode, ui.visuals())
-                                                                    .min_size(egui::vec2(110.0, 28.0));
-                                                                if ui.add(btn).clicked() && current != mode {
-                                                                    self.app_state.settings.ui_density = mode;
-                                                                    settings_dirty = true;
-                                                                }
+                                                        settings_section(ui, "Theme", "Choose one theme source. Switching replaces the active palette.", |ui| {
+                                                            let id = ui.make_persistent_id("theme_picker_state");
+                                                            let mut picker = ui.data_mut(|d| d.get_temp::<theme_picker::ThemePicker>(id))
+                                                                .unwrap_or_else(theme_picker::ThemePicker::load);
+                                                            let action = picker.show(ui, &mut self.theme);
+                                                            ui.data_mut(|d| d.insert_temp(id, picker));
+                                                            match action {
+                                                                Some(theme_picker::ThemeAction::Import) => self.import_theme_dialog(ui.ctx()),
+                                                                Some(theme_picker::ThemeAction::Export) => self.export_theme_dialog(ui.ctx()),
+                                                                None => {}
                                                             }
                                                         });
-                                                        ui.add_space(6.0);
-                                                        if ui
-                                                            .checkbox(
+
+                                                        settings_section(ui, "Interface density", "Spacing, text and bar sizes across the whole app.", |ui| {
+                                                            let mut density = self.app_state.settings.ui_density;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut density,
+                                                                &[
+                                                                    (state::UiDensity::Standard, "Standard"),
+                                                                    (state::UiDensity::Compact, "Compact"),
+                                                                    (state::UiDensity::Ultra, "Ultra-compact"),
+                                                                ],
+                                                                110.0,
+                                                            ) {
+                                                                self.app_state.settings.ui_density = density;
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.add_space(6.0);
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.topbar_auto_hide,
-                                                                "Auto-hide topbar (hover the top edge or press Alt+T)",
+                                                                "Auto-hide topbar",
+                                                                "Hover the top edge of the window or press Alt+T to show it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            self.topbar_pinned = false;
-                                                            settings_dirty = true;
-                                                        }
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-                                                        // --- PDF dark mode & tipografia ---
-                                                        ui.label(
-                                                            egui::RichText::new("PDF Rendering & Notes Font")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.pdf_dark_mode,
-                                                                "PDF Dark Mode (invert slide background to deep slate)",
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            self.page_cache.clear();
-                                                            self.thumb_cache.clear();
-                                                            ui.ctx().request_repaint();
-                                                        }
-
-                                                        ui.add_space(6.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Notes Font Size:");
-                                                            if ui
-                                                                .add(
-                                                                    egui::Slider::new(
-                                                                        &mut self.app_state.settings.note_font_size,
-                                                                        11.0..=24.0,
-                                                                    )
-                                                                    .suffix(" pt"),
-                                                                )
-                                                                .changed()
                                                             {
+                                                                self.topbar_pinned = false;
                                                                 settings_dirty = true;
                                                             }
                                                         });
 
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
+                                                        settings_section(ui, "PDF & notes text", "How pages are drawn and the font used for notes.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.pdf_dark_mode,
+                                                                "PDF Dark Mode",
+                                                                "Inverts the slide background to a deep slate for reading at night.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                self.page_cache.clear();
+                                                                self.thumb_cache.clear();
+                                                                ui.ctx().request_repaint();
+                                                            }
 
-                                                        ui.label(
-                                                            egui::RichText::new("Custom Notes Font")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
+                                                            settings_subheading(ui, "Notes font size");
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Size:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.note_font_size,
+                                                                            11.0..=24.0,
+                                                                        )
+                                                                        .suffix(" pt"),
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
 
-                                                        let font_label = self
-                                                            .app_state
-                                                            .settings
-                                                            .custom_font_path
-                                                            .as_ref()
-                                                            .and_then(|p| p.file_name())
-                                                            .and_then(|s| s.to_str())
-                                                            .unwrap_or("Default font");
-
-                                                        ui.weak(format!("Active font: {}", font_label));
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰛖  Load Font (.ttf/.otf)...").clicked()
-                                                                && let Some(path) = rfd::FileDialog::new()
-                                                                    .add_filter("Font Files", &["ttf", "otf"])
-                                                                    .pick_file()
+                                                            settings_subheading(ui, "Custom notes font");
+                                                            let font_label = self
+                                                                .app_state
+                                                                .settings
+                                                                .custom_font_path
+                                                                .as_ref()
+                                                                .and_then(|p| p.file_name())
+                                                                .and_then(|s| s.to_str())
+                                                                .unwrap_or("Default font");
+                                                            ui.weak(format!("Active font: {}", font_label));
+                                                            ui.add_space(4.0);
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰛖  Load Font (.ttf/.otf)...").clicked()
+                                                                    && let Some(path) = rfd::FileDialog::new()
+                                                                        .add_filter("Font Files", &["ttf", "otf"])
+                                                                        .pick_file()
                                                                 {
                                                                     self.app_state.settings.custom_font_path = Some(path);
                                                                     self.apply_custom_font(ui.ctx());
                                                                     settings_dirty = true;
                                                                 }
 
-                                                            if self.app_state.settings.custom_font_path.is_some()
-                                                                && ui.button("Reset Font").clicked()
-                                                            {
-                                                                self.app_state.settings.custom_font_path = None;
-                                                                self.apply_custom_font(ui.ctx());
-                                                                settings_dirty = true;
-                                                            }
+                                                                if self.app_state.settings.custom_font_path.is_some()
+                                                                    && ui.button("Reset Font").clicked()
+                                                                {
+                                                                    self.app_state.settings.custom_font_path = None;
+                                                                    self.apply_custom_font(ui.ctx());
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
                                                         });
-
                                                     }
+
                                                     // ───────────── KEYBINDINGS ─────────────
                                                     
                                                     SettingsTab::Shortcuts => {
-                                                        ui.label(egui::RichText::new("Keyboard Shortcuts").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Click a shortcut, then press the new combination. Hold a key and press another for multi-key combos (e.g. G + H). Esc cancels.");
-                                                        ui.add_space(8.0);
+                                                        settings_page_header(ui, "Keybindings", "Click a shortcut, then press the new combination. Hold a key and press another for multi-key combos (e.g. G + H). Esc cancels.");
                                                     
                                                         // Defaults and snapshots for reset and conflict detection.
                                                         let mut defaults_cfg = ShortcutsConfig::default();
@@ -5848,6 +5893,7 @@ impl Lapis {
                                                             .map(|(l, b)| (l, b.clone()))
                                                             .collect();
                                                     
+                                                        settings_section(ui, "Customizable shortcuts", "Reset one with its arrow button, or all of them below.", |ui| {
                                                         for (label, binding) in shortcut_entries(cfg) {
                                                             if self.rebinding_action.as_deref() == Some(label)
                                                                 && let Some(cap) = capture_shortcut(ui) {
@@ -5913,6 +5959,7 @@ impl Lapis {
                                                             }
                                                             ui.separator();
                                                         }
+                                                        });
                                                     
                                                         ui.add_space(8.0);
                                                         if ui.button("󰑐  Reset All Shortcuts to Default").clicked() {
@@ -5922,8 +5969,7 @@ impl Lapis {
                                                         }
                                                     
                                                         ui.add_space(12.0);
-                                                        ui.label(egui::RichText::new("Fixed shortcuts").size(13.5).strong());
-                                                        ui.add_space(4.0);
+                                                        settings_section(ui, "Fixed shortcuts", "Built in; these cannot be changed.", |ui| {
                                                         for (name, keys) in [
                                                             ("Command Palette", "Ctrl + P / Ctrl + K"),
                                                             ("Global Search", "Ctrl + F"),
@@ -5936,52 +5982,37 @@ impl Lapis {
                                                                 });
                                                             });
                                                         }
+                                                        });
                                                     }
 
 
-                                                    // ───────────── SYSTEM & EXPORT ─────────────
+                                                    // ───────────── EXPORT & PDF ─────────────
                                                     SettingsTab::SystemAndData => {
-                                                                                                                ui.label(egui::RichText::new("System Integration & Document Management").size(15.0).strong());
-                                                        ui.add_space(8.0);
-                                                        ui.label(egui::RichText::new("Current PDF Actions").size(15.0).strong());
-                                                        ui.add_space(6.0);
+                                                        settings_page_header(ui, "Export & PDF", "Save the current document and control how exported PDFs look.");
 
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰇚  Download Original PDF").clicked() {
-                                                                self.prompt_download_original_pdf(ui.ctx());
-                                                            }
-                                                            let export_label = if self.is_exporting {
-                                                                "󱑚  Exporting...".to_string()
-                                                            } else {
-                                                                format!(
-                                                                    "󰚥  Export PDF ({})",
-                                                                    self.app_state.export_settings.content.short_label()
-                                                                )
-                                                            };
-                                                            if ui.button(export_label).clicked()
-                                                                && !self.is_exporting {
+                                                        settings_section(ui, "Current document", "Save the open PDF.", |ui| {
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰇚  Download Original PDF").clicked() {
+                                                                    self.prompt_download_original_pdf(ui.ctx());
+                                                                }
+                                                                let export_label = if self.is_exporting {
+                                                                    "󱑚  Exporting...".to_string()
+                                                                } else {
+                                                                    format!(
+                                                                        "󰚥  Export PDF ({})",
+                                                                        self.app_state.export_settings.content.short_label()
+                                                                    )
+                                                                };
+                                                                if ui.button(export_label).clicked() && !self.is_exporting {
                                                                     self.start_export(ui.ctx());
                                                                 }
+                                                            });
+                                                            ui.add_space(4.0);
+                                                            ui.weak("Download Original PDF saves the file as it was before Lapis. Export PDF builds a new PDF with the options below.");
                                                         });
 
-                                                    ui.add_space(12.0);
-                                                    ui.separator();
-                                                    ui.add_space(8.0);
-                                                        ui.label(
-                                                            egui::RichText::new("PDF Export")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.weak(
-                                                            "Customize note typography and slide proportions in exported PDFs.",
-                                                        );
-                                                        ui.add_space(8.0);
-
                                                         let mut export_changed = false;
-
-                                                        {
+                                                        settings_section(ui, "PDF export options", "Customize note typography and slide proportions in exported PDFs.", |ui| {
                                                             let cfg = &mut self.app_state.export_settings;
 
                                                             egui::Grid::new("export_settings_grid")
@@ -6044,10 +6075,7 @@ impl Lapis {
 
                                                             ui.add_space(8.0);
 
-                                                            if ui
-                                                                .button("󰑐  Restore Export Defaults")
-                                                                .clicked()
-                                                            {
+                                                            if ui.button("󰑐  Restore Export Defaults").clicked() {
                                                                 *cfg = state::ExportSettings::default();
                                                                 export_changed = true;
                                                             }
@@ -6055,13 +6083,11 @@ impl Lapis {
                                                             if export_changed {
                                                                 cfg.clamp_valid();
                                                             }
-                                                        }
-
+                                                        });
                                                         if export_changed {
                                                             settings_dirty = true;
                                                         }
-
-                                                    }     
+                                                    }
                                                     SettingsTab::Storage => {
                                                         let cache_id = ui.make_persistent_id("storage_scan_cache");
                                                         let stretch_id = ui.make_persistent_id("storage_stretch_size");
@@ -6093,35 +6119,9 @@ impl Lapis {
                                                             None
                                                         };
                                                     
-                                                        ui.label(egui::RichText::new("Stored Data & Cleanup").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Notes, audio and original-PDF copies per document, largest first.");
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.label(egui::RichText::new("PDF revision history").strong());
-                                                        ui.weak("Rebuild the current PDF to remove historical Lapis incremental updates. Keeps a copy of the original alongside the PDF. Signed and encrypted PDFs are not supported.");
-                                                        if ui.add_enabled(self.has_pdf(), egui::Button::new("󰐻  Compact Lapis PDF history..."))
-                                                            .on_hover_text("Compact the current PDF (may rewrite external PDF revision history)")
-                                                            .clicked()
-                                                        {
-                                                            self.finish_sketch_edit();
-                                                            self.sync_and_save();
-                                                            self.save_session_state();
-                                                            let result = notes::compact_doc_data(
-                                                                &self.pdf_path, &self.notes, &self.annotations,
-                                                                self.blank_pages.clone(), &self.sketches,
-                                                            );
-                                                            self.toast_message = Some((
-                                                                match result {
-                                                                    Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
-                                                                    Err(err) => format!("PDF compaction failed: {err}"),
-                                                                },
-                                                                std::time::Instant::now(),
-                                                            ));
-                                                        }
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-                                                    
+                                                        settings_page_header(ui, "Storage & Data", "What Lapis keeps on disk, and how to clean it up.");
+
+                                                        settings_section(ui, "Stored documents", "Notes, audio and original-PDF copies per document, largest first.", |ui| {
                                                         let total: u64 = entries.iter().map(|e| e.total()).sum();
                                                         let audio_total: u64 = entries.iter().map(|e| e.audio_size).sum();
                                                         let orphan_count = entries
@@ -6351,18 +6351,32 @@ impl Lapis {
                                                             ui.add_space(6.0);
                                                         }
                                                     
-                                                        // ───────── Cache temporanea ─────────
-                                                        ui.add_space(6.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("Temporary Cache").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak(format!(
-                                                            "Time-stretched audio for playback speeds other than 1x: {}. Re-created on demand.",
-                                                            human_size(stretch_size)
-                                                        ));
-                                                        ui.add_space(4.0);
-                                                        ui.horizontal_wrapped(|ui| {
+                                                        });
+
+                                                        settings_section(ui, "PDF revision history", "Rebuild the current PDF to remove historical Lapis incremental updates. Keeps a copy of the original alongside the PDF. Signed and encrypted PDFs are not supported.", |ui| {
+                                                        if ui.add_enabled(self.has_pdf(), egui::Button::new("󰐻  Compact Lapis PDF history..."))
+                                                            .on_hover_text("Compact the current PDF (may rewrite external PDF revision history)")
+                                                            .clicked()
+                                                        {
+                                                            self.finish_sketch_edit();
+                                                            self.sync_and_save();
+                                                            self.save_session_state();
+                                                            let result = notes::compact_doc_data(
+                                                                &self.pdf_path, &self.notes, &self.annotations,
+                                                                self.blank_pages.clone(), &self.sketches,
+                                                            );
+                                                            self.toast_message = Some((
+                                                                match result {
+                                                                    Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
+                                                                    Err(err) => format!("PDF compaction failed: {err}"),
+                                                                },
+                                                                std::time::Instant::now(),
+                                                            ));
+                                                        }
+                                                        });
+
+                                                        settings_section(ui, "Temporary cache", &format!("Time-stretched audio for playback speeds other than 1x: {}. Re-created on demand.", human_size(stretch_size)), |ui| {
+ui.horizontal_wrapped(|ui| {
                                                             if danger_button(
                                                                 ui,
                                                                 &mut confirm,
@@ -6374,15 +6388,10 @@ impl Lapis {
                                                                 action = Some(StorageAction::ClearStretchCache);
                                                             }
                                                         });
-                                                    
-                                                        // ───────── App state ─────────
-                                                        ui.add_space(6.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("App State").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                    
-                                                        let state_path = crate::state::AppState::config_path();
+                                                        });
+
+                                                        settings_section(ui, "App state", "", |ui| {
+let state_path = crate::state::AppState::config_path();
                                                         let state_size = std::fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
                                                         ui.add(
                                                             egui::Label::new(
@@ -6423,7 +6432,8 @@ impl Lapis {
                                                             "Audio folder: {}",
                                                             audio::AudioDocIndex::media_root().display()
                                                         ));
-                                                    
+                                                        });
+
                                                         // ───────── Esecuzione azione ─────────
                                                         if let Some(act) = action {
                                                             let report = |what: &str, name: &str, r: std::io::Result<()>| -> String {
@@ -6519,15 +6529,14 @@ impl Lapis {
                                                             .data(|d| d.get_temp::<String>(confirm_id))
                                                             .unwrap_or_default();
                                                     
-                                                        ui.label(egui::RichText::new("Spellcheck Dictionaries").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Enable any combination of installed Hunspell language pairs. Disabling a language keeps its files.");
-                                                        ui.add_space(8.0);
-                                                    
-                                                        if ui
-                                                            .checkbox(
+                                                        settings_page_header(ui, "Dictionaries", "Enable any combination of installed Hunspell language pairs. Disabling a language keeps its files.");
+
+                                                        settings_section(ui, "Spellcheck", "", |ui| {
+                                                        if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.spellcheck_enabled,
                                                                 "Enable offline spellcheck in Markdown notes",
+                                                                "Underlines unknown words in the notes editor; right-click one for suggestions.",
                                                             )
                                                             .changed()
                                                         {
@@ -6541,15 +6550,9 @@ impl Lapis {
                                                             self.spellchecker.loaded_languages.len(),
                                                             self.spellchecker.loaded_languages.join(", ")
                                                         ));
-                                                    
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                    
-                                                        // ───────── Dizionari ─────────
-                                                        ui.label(egui::RichText::new("Installed dictionaries").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                    
+                                                        });
+
+                                                        settings_section(ui, "Installed dictionaries", "Languages used to check and suggest words in your notes.", |ui| {
                                                         egui::Frame::NONE
                                                             .fill(egui::Color32::from_black_alpha(35))
                                                             .corner_radius(egui::CornerRadius::same(6))
@@ -6681,15 +6684,9 @@ impl Lapis {
                                                             ));
                                                         }
                                                     
-                                                        // ───────── Parole personali ─────────
-                                                        ui.add_space(10.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("Custom words").size(14.0).strong());
-                                                        ui.add_space(2.0);
-                                                        ui.weak("Words you added with “Add to dictionary” in the notes editor.");
-                                                        ui.add_space(4.0);
-                                                    
+                                                        });
+
+                                                        settings_section(ui, "Custom words", "Words you added with “Add to dictionary” in the notes editor.", |ui| {
                                                         let user_words: Vec<String> = match ui.data(|d| d.get_temp::<Vec<String>>(words_cache_id)) {
                                                             Some(v) => v,
                                                             None => {
@@ -6764,6 +6761,8 @@ impl Lapis {
                                                             });
                                                         }
                                                     
+                                                        });
+
                                                         ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
                                                     }
 

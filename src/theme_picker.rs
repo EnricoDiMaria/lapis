@@ -114,9 +114,6 @@ impl ThemePicker {
             ThemeSource::Catppuccin => self.last_catppuccin = theme.catppuccin_choice(),
             ThemeSource::Custom => self.last_custom = Some(theme.clone()),
         }
-        ui.heading("Theme");
-        ui.weak("Choose one theme source. Switching replaces the active palette.");
-        ui.add_space(6.0);
         let old_source = self.source;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.source, ThemeSource::Presets, "Presets");

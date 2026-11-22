@@ -106,7 +106,7 @@ Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11`
 
 ### Auto-hide topbar — `Alt+T`
 
-The topbar can hide itself to give the page the full window height. Turn it on with **Settings → Theme & Fonts → Interface density → Auto-hide topbar**, or press `Alt+T` (also available as **Show / Hide Topbar** in the Command Palette; the shortcut can be changed in **Settings → Keybindings**).
+The topbar can hide itself to give the page the full window height. Turn it on with **Settings → Appearance → Interface density → Auto-hide topbar**, or press `Alt+T` (also available as **Show / Hide Topbar** in the Command Palette; the shortcut can be changed in **Settings → Keybindings**).
 
 - **Reveal with the mouse:** move the pointer to the top edge of the window. The topbar slides over the page without moving it, and stays while the pointer is over it, one of its menus is open, or you are typing in its page box. It hides again shortly after you move away. Pressing a mouse button elsewhere (drawing, dragging) never reveals it.
 - **Reveal with the shortcut:** the first `Alt+T` hides a normal topbar and turns auto-hide on. Pressing it again pins the topbar open (docked, so the page is pushed down as usual); pressing it once more returns to hover-to-reveal. The pinned state lasts for the session.
@@ -193,7 +193,7 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-- Select tools from the annotation toolbar, available as a horizontal sub-topbar or a vertical bar. Closing either bar returns to Cursor / Select by default; change this in **Settings → Study & Canvas → Annotation toolbar** if you prefer to keep the active tool.
+- Select tools from the annotation toolbar, available as a horizontal sub-topbar or a vertical bar. Closing either bar returns to Cursor / Select by default; change this in **Settings → Tools & Study → Annotation toolbar** if you prefer to keep the active tool.
 - Right-click an unselected area of the PDF canvas to open the radial tools menu when enabled. Right-click a radial item to apply it **without closing the menu**, or left-click to apply it and close the menu. A small image-paste button appears beside the main radial menu only when a clipboard image is available.
 - Right-click selected PDF text to open a **Copy** context menu instead of the radial menu.
 
@@ -306,7 +306,7 @@ Right-click the button to choose a different style:
 
 The current default style is marked in the page-style menu.
 
-You can also change the default style in **Settings → Study & Canvas**.
+You can also change the default style in **Settings → Workspace → Pages & presentation**.
 
 Custom pages are useful for adding handwritten-style notes, calculations, diagrams, or additional explanations between existing PDF slides.
 
@@ -373,7 +373,7 @@ Sketches are saved with the document and move with their page when you insert, d
 included in the PDF export together with the notes: to the right of the slide if the page has no notes, under the
 notes if these are short, otherwise on a page right after the slide and its notes.
 
-If you do not need them, turn the tab off in **Settings → Advanced Settings → Enable Sketch**; your sketches are
+If you do not need them, turn the tab off in **Settings → Workspace → Notes panel → Enable Sketch**; your sketches are
 kept and the tab (and the sketches in exports) come back when you turn it on again.
 
 ### Mathematical notation
@@ -584,7 +584,7 @@ Open it using the **Flashcards** toolbar button or the corresponding Command Pal
   <img src="images/13-flashcards-trainer.png" alt="Flashcards active recall trainer" width="85%">
 </p>
 
-The trainer allows you to review cards, reveal answers, and track your study progress. The Flashcards toolbar button can show a notification dot when the document contains flashcards; **Settings → Study & Canvas → Active Recall** lets you hide the dot without hiding the button.
+The trainer allows you to review cards, reveal answers, and track your study progress. The Flashcards toolbar button can show a notification dot when the document contains flashcards; **Settings → Tools & Study → Active recall** lets you hide the dot without hiding the button.
 
 ### Creating flashcards from notes
 
@@ -668,18 +668,29 @@ Use the palette when you want to trigger an action without searching through the
 
 Open Settings to configure the application.
 
-Settings are divided into dedicated sections.
+Open **Advanced Settings** to configure the application. It has seven sections, listed in the left column. Every section is laid out the same way: a title with a one-line description, then titled cards that group related options, and a short explanation under each option.
 
-### Study & Canvas
+- **Appearance:** theme, interface density and text.
+- **Tools & Study:** annotation toolbar, occlusion tape and flashcards.
+- **Workspace:** panels, Notes panel, audio, new-page style and Slideshow + Notes.
+- **Keybindings:** configurable and fixed shortcuts.
+- **Export & PDF:** saving the document and the options of exported PDFs.
+- **Storage & Data:** stored documents, PDF history, caches and app state.
+- **Dictionaries:** spellcheck, installed dictionaries and custom words.
 
-The controls are grouped to reduce long runs of checkboxes:
+### Tools & Study
 
-- **Annotation toolbar:** show or hide the bar, choose horizontal or vertical placement, adjust tool behavior (including switching back to Cursor when closing the bar), and stroke thickness.
-- **Sidebars & Panels:** panel persistence and Notes, Sketch, and Audio options.
-- **Active Recall:** occlusion controls, Flashcards button visibility and its notification dot.
-- **Pages & Presentation:** page insertion style and Slideshow + Notes options.
+- **Annotation toolbar:** show the Annotation Tools button, enable the radial tools menu, switch back to Cursor when closing the bar, choose horizontal (Sub-Topbar) or vertical placement, and set the stroke thickness.
+- **Active recall:** cover or reveal all occlusion tapes, show the Flashcards button and its notification dot, open the Flashcards modal and export an Anki deck.
 
-### Theme & Fonts
+### Workspace
+
+- **Panels:** remember whether the Notes and Outline panels were open when a document is reopened.
+- **Notes panel:** allow the panel under the page in a portrait window, and enable the Sketch tab.
+- **Audio:** enable Audio notes (voice memos) and Audio Lessons with the audio dock.
+- **Pages & presentation:** the default style of new pages and how Slideshow + Notes handles slides without annotations.
+
+### Appearance
 
 Select one source at the top: **Presets**, **Catppuccin**, or **Custom**. These are alternatives; switching replaces the active palette, and only the selected source’s controls are shown.
 
@@ -699,40 +710,29 @@ Named palettes are stored in `custom_themes.json` alongside the active `theme.js
 
 **Interface density** below the theme section sets how tightly the whole app is packed. **Standard** is the default. **Compact** shortens the topbar by about 7 px and the annotation sub-topbar from 36 to 28 px. **Ultra-compact** goes to about 11 px shorter and a 24 px sub-topbar, with smaller icons, swatches and buttons. Both levels also tighten the notes panel header, the sidebar tabs, the split-view header, and the spacing, padding, margins and default text size used by menus, dialogs and settings. The notes text size is not affected; it keeps its own setting. Ultra-compact suits small screens but has smaller click targets. The Notes and Flashcards dots shrink with the bar so they stay uncropped. The choice applies immediately and is remembered.
 
-PDF dark mode, notes font size, and custom font controls remain below it.
+**PDF & notes text** holds PDF dark mode, the notes font size and the custom notes font.
 
 ### Keybindings
 
 Lapis supports configurable keyboard shortcuts.
 
-Open this section to inspect or reassign supported actions.
+**Customizable shortcuts** lists every action: click a shortcut, then press the new combination. The interface identifies conflicting combinations and offers a reset for one shortcut or for all of them. **Fixed shortcuts** lists the built-in ones, which cannot be changed.
 
-The interface also identifies conflicting shortcut combinations and provides an option to reset all configurable shortcuts to their defaults.
+### Export & PDF
 
-### System & Export
-
-Contains document-management and export-related options.
-
-Available actions include:
-
-- Download the original PDF.
-- Insert a new page.
-- Choose what the PDF export contains: annotations, notes, or both.
-- Configure the typography of exported notes.
-- Configure the share of the page width used by the slide on pages with notes.
-- Restore export defaults.
-
-The export settings are: **Export content** (annotations only, notes only, or annotations + notes), the base font size of the notes, and the percentage of the page width occupied by the slide on pages that have notes. See [Exporting a PDF](#exporting-a-pdf).
+- **Current document:** download the original PDF, or export the PDF with the content selected below.
+- **PDF export options:** **Export content** (annotations only, notes only, or annotations + notes), the base font size of the notes, the percentage of the page width occupied by the slide on pages that have notes, and a button to restore the export defaults. See [Exporting a PDF](#exporting-a-pdf).
 
 ### Storage & Data
 
-Provides access to storage and document-data management.
-
-Use this section to inspect and manage stored application data.
+- **Stored documents:** notes, audio and original-PDF copies per document, largest first, with cleanup actions and a cleaner for orphaned data.
+- **PDF revision history:** compact the current PDF to remove historical Lapis incremental updates.
+- **Temporary cache:** the time-stretched audio created for playback speeds other than 1x.
+- **App state:** the recent files list with its saved page, zoom and bookmarks, and the folders where notes and audio are kept.
 
 ### Dictionaries
 
-Manage additional dictionaries and custom words used by spellchecking.
+Turn spellcheck on or off, enable or add dictionaries (**Installed dictionaries**), and manage the words you added (**Custom words**).
 
 ---
 
@@ -770,7 +770,7 @@ The exported file contains page headings in ascending order, making it easy to r
 
 ### Exporting a PDF
 
-Use **FILE → Export PDF (…)**. The label shows what will be exported; change it in **Settings → System & Export → PDF Export → Export content**.
+Use **FILE → Export PDF (…)**. The label shows what will be exported; change it in **Settings → Export & PDF → PDF export options → Export content**.
 
 | Export content | Result | File name |
 |---|---|---|
