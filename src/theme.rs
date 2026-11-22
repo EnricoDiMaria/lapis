@@ -646,6 +646,48 @@ impl SuiteTheme {
     }
 }
 
+impl SuiteTheme {
+    /// Applies the interface density on top of [`SuiteTheme::apply`]: spacing, margins, widget
+    /// sizes and text sizes. Standard keeps the theme's own spacing and egui's default sizes.
+    pub fn apply_density(&self, ctx: &egui::Context, density: crate::state::UiDensity) {
+        let m = density.global();
+        let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+        if density != crate::state::UiDensity::Standard {
+            style.spacing.item_spacing = egui::vec2(m.item_spacing[0], m.item_spacing[1]);
+            style.spacing.button_padding = egui::vec2(
+                self.button_padding[0].min(m.pad[0]),
+                self.button_padding[1].min(m.pad[1]),
+            );
+        }
+        style.spacing.interact_size.y = m.interact_y;
+        style.spacing.window_margin = egui::Margin::same(m.window_margin);
+        style.spacing.menu_margin = egui::Margin::same(m.menu_margin);
+        style.spacing.indent = m.indent;
+        style.spacing.icon_width = m.icon_width;
+        style.spacing.icon_width_inner = m.icon_inner;
+        // Scale from egui's defaults so repeated calls never compound.
+        for (text_style, base) in egui::Style::default().text_styles {
+            if let Some(font) = style.text_styles.get_mut(&text_style) {
+                font.size = base.size * m.font_scale;
+            }
+        }
+        ctx.set_style_of(egui::Theme::Dark, style.clone());
+        ctx.set_style_of(egui::Theme::Light, style);
+    }
+
+    /// Whether the current style already carries `density` (a theme change resets the spacing).
+    pub fn density_applied(&self, ctx: &egui::Context, density: crate::state::UiDensity) -> bool {
+        let m = density.global();
+        let style = ctx.style_of(egui::Theme::Dark);
+        let item = if density == crate::state::UiDensity::Standard {
+            egui::vec2(5.0, 4.0)
+        } else {
+            egui::vec2(m.item_spacing[0], m.item_spacing[1])
+        };
+        style.spacing.item_spacing == item && style.spacing.indent == m.indent
+    }
+}
+
 fn luminance(color: [u8; 3]) -> f32 {
     let linear = color.map(|c| {
         let v = c as f32 / 255.0;

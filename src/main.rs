@@ -1482,6 +1482,7 @@ impl Lapis {
         let theme = SuiteTheme::load_or_init();
         theme.apply(&cc.egui_ctx);
         let app_state = AppState::load();
+        theme.apply_density(&cc.egui_ctx, app_state.settings.ui_density);
 
         let (req_tx, _req_rx) = channel::<RenderRequest>();
         let (thumb_tx, _thumb_rx) = channel::<RenderRequest>();
@@ -1741,6 +1742,11 @@ impl Lapis {
             panel_sizes: self.panel_sizes,
         });
     }
+    /// Scales a fixed panel size (button height, margin) by the interface density.
+    fn sz(&self, base: f32) -> f32 {
+        (base * self.app_state.settings.ui_density.scale()).round()
+    }
+
     /// Switches view mode. Single <-> Continuous keeps the vertical reading position.
     fn set_view_mode(&mut self, mode: ViewMode) {
         let off = self.pdf_scroll_offset;
@@ -2731,6 +2737,18 @@ impl Lapis {
         }
     }
 
+    /// "Has content" dot on a topbar button corner; smaller in the compact topbar so the
+    /// shorter bar does not crop it.
+    fn paint_topbar_dot(&self, ui: &egui::Ui, button: egui::Rect) {
+        let m = self.app_state.settings.ui_density.bar();
+        ui.painter().circle(
+            egui::pos2(button.right() - m.dot_inset, button.top() + m.dot_inset),
+            m.dot_radius,
+            rgb(self.theme.accent),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
+        );
+    }
+
     fn topbar_flash_button(&mut self, ui: &mut egui::Ui, sq_btn: egui::Vec2, labeled: bool) {
         if !self.app_state.settings.flash_button {
             return;
@@ -2756,14 +2774,7 @@ impl Lapis {
         );
         if has_flashcards && self.app_state.settings.flash_notification_dot {
             // Same dot as the Notes button.
-            let dot_center =
-                egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);
-            ui.painter().circle(
-                dot_center,
-                3.5,
-                theme::rgb(self.theme.accent),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
-            );
+            self.paint_topbar_dot(ui, resp.rect);
         }
         let has_cards_hover = if has_flashcards {
             "\n(This document contains flashcards)"
@@ -5635,6 +5646,28 @@ impl Lapis {
                                                             None => {}
                                                         }
                                                         ui.add_space(12.0);
+                                                        ui.separator();
+                                                        ui.add_space(8.0);
+
+                                                        ui.label(egui::RichText::new("Interface density").size(14.0).strong());
+                                                        ui.weak("Spacing, text and bar sizes across the whole app");
+                                                        ui.add_space(6.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            let current = self.app_state.settings.ui_density;
+                                                            for (mode, label) in [
+                                                                (state::UiDensity::Standard, "Standard"),
+                                                                (state::UiDensity::Compact, "Compact"),
+                                                                (state::UiDensity::Ultra, "Ultra-compact"),
+                                                            ] {
+                                                                let btn = crate::theme::selected_button(label, current == mode, ui.visuals())
+                                                                    .min_size(egui::vec2(110.0, 28.0));
+                                                                if ui.add(btn).clicked() && current != mode {
+                                                                    self.app_state.settings.ui_density = mode;
+                                                                    settings_dirty = true;
+                                                                }
+                                                            }
+                                                        });
+                                                        ui.add_space(8.0);
                                                         ui.separator();
                                                         ui.add_space(8.0);
 
@@ -10739,12 +10772,14 @@ impl Lapis {
         }
     }
     fn render_sub_topbar_tools(&mut self, ui: &mut egui::Ui) {
+        let density = self.app_state.settings.ui_density;
+        let m = density.sub_bar();
         egui::Panel::top("sub_topbar_tools")
-            .exact_size(36.0)
+            .exact_size(m.height)
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_elevated))
-                    .inner_margin(egui::Margin::symmetric(12, 4))
+                    .inner_margin(egui::Margin::symmetric(12, m.margin_y))
                     .stroke(egui::Stroke::new(1.0, rgb(self.theme.border))),
             )
             .show(ui, |ui| {
@@ -10753,9 +10788,13 @@ impl Lapis {
                     egui::Layout::left_to_right(egui::Align::Center)
                         .with_main_align(egui::Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = m.spacing;
+                        if density != state::UiDensity::Standard {
+                            ui.spacing_mut().button_padding.y = m.pad_y;
+                        }
 
-                        let btn_sz = egui::vec2(28.0, 26.0);
+                        let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
+                        let icon_size = m.icon;
 
                         let mut bar_btn = |ui: &mut egui::Ui,
                                            icon: &str,
@@ -10765,7 +10804,7 @@ impl Lapis {
                             let clicked = ui
                                 .add(
                                     crate::theme::selected_button(
-                                        egui::RichText::new(icon).size(14.5),
+                                        egui::RichText::new(icon).size(icon_size),
                                         self.annotation_tool == tool,
                                         ui.visuals(),
                                     )
@@ -10804,15 +10843,17 @@ impl Lapis {
                         for (col, name) in ANNOTATION_PALETTE {
                             let is_sel = self.annotation_color == col;
 
+                            let (sw_box, sw_fill, sw_ring) =
+                                (m.swatch_box, m.swatch_fill, m.swatch_ring);
                             let (sw_rect, sw_resp) = ui
-                                .allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                                .allocate_exact_size(egui::vec2(sw_box, sw_box), egui::Sense::click());
 
-                            ui.painter().circle_filled(sw_rect.center(), 7.5, rgb(col));
+                            ui.painter().circle_filled(sw_rect.center(), sw_fill, rgb(col));
 
                             if is_sel || sw_resp.hovered() {
                                 ui.painter().circle_stroke(
                                     sw_rect.center(),
-                                    9.0,
+                                    sw_ring,
                                     egui::Stroke::new(
                                         if is_sel { 2.0 } else { 1.2 },
                                         rgb(self.theme.fg_primary),
@@ -10873,7 +10914,7 @@ impl Lapis {
                                             self.shape_kind == sk,
                                             ui.visuals(),
                                         )
-                                            .min_size(egui::vec2(52.0, 24.0)),
+                                            .min_size(egui::vec2(52.0, m.shape_btn_h)),
                                     )
                                     .clicked()
                                 {
@@ -11262,13 +11303,15 @@ impl Lapis {
 
         let mut text_open = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(text_popup_id));
 
+        let density = self.app_state.settings.ui_density;
+        let m = density.rail();
         egui::Panel::right("vertical_tools_rail")
             .resizable(false)
-            .exact_size(44.0)
+            .exact_size(m.width)
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_panel))
-                    .inner_margin(egui::Margin::symmetric(5, 8))
+                    .inner_margin(egui::Margin::symmetric(m.margin[0], m.margin[1]))
                     .stroke(egui::Stroke::new(1.0, rgb(self.theme.border))),
             )
             .show(ui, |ui| {
@@ -11277,9 +11320,12 @@ impl Lapis {
                     egui::Layout::top_down(egui::Align::Center)
                         .with_main_align(egui::Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.y = 5.0;
+                        ui.spacing_mut().item_spacing.y = m.spacing;
+                        if density != state::UiDensity::Standard {
+                            ui.spacing_mut().button_padding.y = m.pad_y;
+                        }
 
-                        let btn_sz = egui::vec2(32.0, 30.0);
+                        let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
 
                         let mut rail_btn = |ui: &mut egui::Ui,
                                             icon: &str,
@@ -11289,7 +11335,7 @@ impl Lapis {
                             let resp = ui
                                 .add(
                                     crate::theme::selected_button(
-                                        egui::RichText::new(icon).size(15.5),
+                                        egui::RichText::new(icon).size(m.icon),
                                         self.annotation_tool == tool,
                                         ui.visuals(),
                                     )
@@ -13135,6 +13181,7 @@ impl Lapis {
             let button_radius =
                 egui::CornerRadius::same(self.theme.corner_radius.saturating_sub(1));
 
+            let (nav_h, mode_h) = (self.sz(23.0), self.sz(22.0));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
                 let full_width = ui.available_width();
@@ -13144,7 +13191,7 @@ impl Lapis {
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
                     .add_sized(
-                        [18.0, 23.0],
+                        [18.0, nav_h],
                         crate::theme::selected_button(
                             egui::RichText::new(lock_icon).size(11.0),
                             self.lock_note_page,
@@ -13166,7 +13213,7 @@ impl Lapis {
                     .add_enabled(
                         self.note_page > 1,
                         egui::Button::new(egui::RichText::new("\u{F438}").size(11.0))
-                            .min_size(egui::vec2(17.0, 23.0))
+                            .min_size(egui::vec2(17.0, nav_h))
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13184,7 +13231,7 @@ impl Lapis {
                 };
                 if ui
                     .add_sized(
-                        [if compact { 23.0 } else { 35.0 }, 23.0],
+                        [if compact { 23.0 } else { 35.0 }, nav_h],
                         egui::Button::new(egui::RichText::new(page_label).size(10.0).strong())
                             .corner_radius(button_radius),
                     )
@@ -13200,7 +13247,7 @@ impl Lapis {
                     .add_enabled(
                         self.note_page < self.total_pages,
                         egui::Button::new(egui::RichText::new("\u{F44A}").size(11.0))
-                            .min_size(egui::vec2(17.0, 23.0))
+                            .min_size(egui::vec2(17.0, nav_h))
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13230,7 +13277,7 @@ impl Lapis {
 
                 if sk_on {
                     let resp = ui.add_sized(
-                        [sketch_width, 22.0],
+                        [sketch_width, mode_h],
                         crate::theme::selected_button(
                             egui::RichText::new(" ").size(11.0).strong(),
                             self.note_mode == NoteMode::Sketch,
@@ -13273,7 +13320,7 @@ impl Lapis {
 
                 if ui
                     .add_sized(
-                        [primary_width, 22.0],
+                        [primary_width, mode_h],
                         crate::theme::selected_button(
                             egui::RichText::new(edit_label)
                                 .size(mode_font_size)
@@ -13293,7 +13340,7 @@ impl Lapis {
 
                 if ui
                     .add_sized(
-                        [primary_width, 22.0],
+                        [primary_width, mode_h],
                         crate::theme::selected_button(
                             egui::RichText::new(preview_label)
                                 .size(mode_font_size)
@@ -13312,14 +13359,14 @@ impl Lapis {
             });
 
             let sketch_open = self.note_mode == NoteMode::Sketch && sk_on;
-            ui.add_space(8.0);
+            ui.add_space(self.sz(8.0));
 
             let is_edit = matches!(self.note_mode, NoteMode::Edit);
 
             // Keep the text origin and usable width identical in Edit and Preview.
             // The Edit field has zero internal margin, so this shared frame inset is
             // also the exact origin used by the Markdown viewer.
-            let text_content_margin = egui::Margin::symmetric(14, 8);
+            let text_content_margin = egui::Margin::symmetric(14, self.sz(8.0) as i8);
             let (notes_bg, notes_stroke, notes_margin) = if is_edit {
                 (
                     rgb(self.theme.bg_widget),
@@ -14308,7 +14355,7 @@ impl Lapis {
 
     fn render_slideshow_notes_contents(&mut self, ui: &mut egui::Ui, active_slide_note: String) {
         ui.take_available_width();
-        ui.add_space(6.0);
+        ui.add_space(self.sz(6.0));
         // A frameless header keeps the note pane aligned with the rest of the topbar.
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -14322,7 +14369,7 @@ impl Lapis {
                 let icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
                     .add_sized(
-                        [26.0, 26.0],
+                        [self.sz(26.0), self.sz(26.0)],
                         crate::theme::selected_button(
                             egui::RichText::new(icon).size(13.0),
                             self.lock_note_page,
@@ -14483,6 +14530,14 @@ impl eframe::App for Lapis {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let win_rect = ui.ctx().content_rect();
+
+        // Keep the egui style in step with the interface density (a theme change resets it).
+        let density = self.app_state.settings.ui_density;
+        if !self.theme.density_applied(ui.ctx(), density) {
+            self.theme.apply(ui.ctx());
+            self.theme.apply_density(ui.ctx(), density);
+            ui.ctx().request_repaint();
+        }
 
         // Persist view mode and panel sizes once the pointer is released.
         let pointer_down = ui.input(|i| i.pointer.any_down());
@@ -15026,22 +15081,28 @@ impl eframe::App for Lapis {
         }
 
         if !in_slideshow && self.has_pdf() {
+            // Density sets the row height, margins and button padding.
+            let density = self.app_state.settings.ui_density;
+            let bar = density.bar();
+            let (bar_h, margin_y, pad_y) = (bar.row_h, bar.margin_y, bar.pad_y);
             egui::Panel::top("top_panel")
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_panel))
-                    .inner_margin(egui::Margin::symmetric(8, 3)),
+                    .inner_margin(egui::Margin::symmetric(8, margin_y)),
             )
             .show(ui, |ui| {
-                const BAR_H: f32 = 27.0;
-                let sq_btn = egui::vec2(BAR_H, BAR_H);
+                if density != state::UiDensity::Standard {
+                    ui.spacing_mut().button_padding.y = pad_y;
+                }
+                let sq_btn = egui::vec2(bar_h, bar_h);
 
 
             let bar_rect = ui.max_rect();
                 let bar_w = bar_rect.width();
                 // Fixed-height toolbar row: left group, right group, and title.
                 // are positioned independently at the row edges and center.
-                let row_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w, BAR_H));
+                let row_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w, bar_h));
  
                 // Compactness stage (0 = expanded, 4 = minimal), based on the previous frame.
                 let stage_id = ui.make_persistent_id("topbar_stage");
@@ -15056,12 +15117,12 @@ impl eframe::App for Lapis {
  
                 // Left control group.
                 ui.horizontal(|ui| {
-                    ui.set_height(BAR_H);
+                    ui.set_height(bar_h);
  
                     // Outline toggle
                     let toc_arrow = if self.show_toc { "" } else { "" };
                     let toc_btn = crate::theme::selected_button(format!(" {}", toc_arrow), self.show_toc, ui.visuals())
-                        .min_size(egui::vec2(44.0, BAR_H));
+                        .min_size(egui::vec2(44.0, bar_h));
                     if ui
                         .add(toc_btn)
                         .on_hover_text("Toggle Outline")
@@ -15197,27 +15258,19 @@ impl eframe::App for Lapis {
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+                        ui.spacing_mut().button_padding = egui::vec2(6.0, pad_y);
 
                         // Notes
                         let page_has_note = self.notes.get(&self.current_page).map(|s| !s.trim().is_empty()).unwrap_or(false) || !self.current_note.trim().is_empty();
  
                         let notes_arrow = if self.show_notes { "" } else { "" };
                         let notes_btn = crate::theme::selected_button(format!("{} 󰠮 ", notes_arrow), self.show_notes, ui.visuals())
-                            .min_size(egui::vec2(44.0, BAR_H));
+                            .min_size(egui::vec2(44.0, bar_h));
  
                         let resp = ui.add(notes_btn);
  
                         if page_has_note {
-                            let dot_center = egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);                            
-                            let dot_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255));
- 
-                            ui.painter().circle(
-                                dot_center,
-                                3.5,
-                                theme::rgb(self.theme.accent),
-                                dot_stroke,
-                            );
+                            self.paint_topbar_dot(ui, resp.rect);
                         }
  
                         let has_notes_hover = if page_has_note {"\n(This page contains notes)"} else {""};
@@ -15255,7 +15308,7 @@ impl eframe::App for Lapis {
  
                         let response = ui
                             .add_sized(
-                                [42.0, BAR_H - 2.0],
+                                [42.0, bar_h - 2.0],
                                 egui::DragValue::new(&mut self.target_page)
                                     .range(1..=self.total_pages)
                                     .speed(0.1),
@@ -15400,7 +15453,7 @@ impl eframe::App for Lapis {
  
                 let menu_label = make_label(&chosen_title, arrow);
                 let measure_label = make_label(&chosen_title, "▾");
-                let total_size = egui::vec2(label_w(&measure_label), BAR_H);
+                let total_size = egui::vec2(label_w(&measure_label), bar_h);
                 let half = total_size.x / 2.0;
                 let lo = left_end_x + TITLE_GAP + half;
                 let hi = right_start_x - TITLE_GAP - half;
@@ -15486,6 +15539,8 @@ impl eframe::App for Lapis {
                                         );
                                         ui.add_space(3.0);
                                     };
+                                    // Computed outside the closure so it does not keep `self` borrowed.
+                                    let menu_item_h = self.sz(26.0);
                                     let menu_item = |ui: &mut egui::Ui,
                                                      label: &str,
                                                      enabled: bool|
@@ -15493,7 +15548,7 @@ impl eframe::App for Lapis {
                                         let btn = egui::Button::new(
                                             egui::RichText::new(label).size(11.8),
                                         )
-                                        .min_size(egui::vec2(menu_width, 26.0))
+                                        .min_size(egui::vec2(menu_width, menu_item_h))
                                         .corner_radius(menu_radius);
                                         ui.add_enabled(enabled, btn)
                                             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -15643,11 +15698,12 @@ impl eframe::App for Lapis {
                 .default_size(170.0)
                 .show(ui, |ui| {
                     // Top switcher: thumbnails or outline.
-                    ui.add_space(4.0);
+                    let tab_h = self.sz(26.0);
+                    ui.add_space(self.sz(4.0));
                     ui.columns(2, |cols| {
                         if cols[0]
                             .add_sized(
-                                [cols[0].available_width(), 26.0],
+                                [cols[0].available_width(), tab_h],
                                 crate::theme::selected_button(
                                     " 󰕰 ",
                                     self.sidebar_tab == SidebarTab::Thumbnails,
@@ -15662,7 +15718,7 @@ impl eframe::App for Lapis {
                         }
                         if cols[1]
                             .add_sized(
-                                [cols[1].available_width(), 26.0],
+                                [cols[1].available_width(), tab_h],
                                 crate::theme::selected_button(
                                     "  ",
                                     self.sidebar_tab == SidebarTab::Outline,
@@ -16492,7 +16548,8 @@ impl eframe::App for Lapis {
                                 );
                                 ui.separator();
 
-                                if ui.add_sized([22.0, 22.0], egui::Button::new("")).clicked()
+                                let split_h = self.sz(22.0);
+                                if ui.add_sized([split_h, split_h], egui::Button::new("")).clicked()
                                     && self.split_secondary_page > 1
                                 {
                                     self.split_secondary_page -= 1;
@@ -16501,7 +16558,7 @@ impl eframe::App for Lapis {
                                 let mut sec_p = self.split_secondary_page;
                                 if ui
                                     .add_sized(
-                                        [46.0, 22.0],
+                                        [46.0, split_h],
                                         egui::DragValue::new(&mut sec_p)
                                             .prefix("p.")
                                             .range(1..=self.total_pages.max(1))
@@ -16513,7 +16570,7 @@ impl eframe::App for Lapis {
                                         sec_p.clamp(1, self.total_pages.max(1));
                                 }
 
-                                if ui.add_sized([22.0, 22.0], egui::Button::new("")).clicked()
+                                if ui.add_sized([split_h, split_h], egui::Button::new("")).clicked()
                                     && self.split_secondary_page < self.total_pages
                                 {
                                     self.split_secondary_page += 1;

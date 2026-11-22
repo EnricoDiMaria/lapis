@@ -539,6 +539,158 @@ pub struct RecentFileEntry {
     pub panel_sizes: PanelSizes,
 }
 
+/// How tightly the whole interface is packed: bars, panels, spacing and text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum UiDensity {
+    #[default]
+    Standard,
+    Compact,
+    Ultra,
+}
+
+impl<'de> Deserialize<'de> for UiDensity {
+    /// Also reads the former `compact_topbar` boolean (`true` meant Compact).
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Flag(bool),
+            Name(String),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Flag(true) => Self::Compact,
+            Repr::Flag(false) => Self::Standard,
+            Repr::Name(name) => match name.as_str() {
+                "Compact" => Self::Compact,
+                "Ultra" => Self::Ultra,
+                _ => Self::Standard,
+            },
+        })
+    }
+}
+
+/// Main topbar sizes.
+pub struct BarMetrics {
+    pub row_h: f32,
+    pub margin_y: i8,
+    pub pad_y: f32,
+    pub dot_radius: f32,
+    pub dot_inset: f32,
+}
+
+/// Annotation sub-topbar sizes.
+pub struct SubBarMetrics {
+    pub height: f32,
+    pub margin_y: i8,
+    pub spacing: f32,
+    pub pad_y: f32,
+    pub btn: [f32; 2],
+    pub icon: f32,
+    pub swatch_box: f32,
+    pub swatch_fill: f32,
+    pub swatch_ring: f32,
+    pub shape_btn_h: f32,
+}
+
+/// Annotation vertical rail sizes.
+pub struct RailMetrics {
+    pub width: f32,
+    pub margin: [i8; 2],
+    pub spacing: f32,
+    pub pad_y: f32,
+    pub btn: [f32; 2],
+    pub icon: f32,
+}
+
+/// egui-wide spacing and text sizes. Standard matches egui's own defaults.
+pub struct GlobalMetrics {
+    pub item_spacing: [f32; 2],
+    /// Upper bounds for the theme's button padding.
+    pub pad: [f32; 2],
+    pub interact_y: f32,
+    pub window_margin: i8,
+    pub menu_margin: i8,
+    pub indent: f32,
+    pub icon_width: f32,
+    pub icon_inner: f32,
+    pub font_scale: f32,
+}
+
+impl UiDensity {
+    /// Factor for fixed sizes in panels (button heights, margins).
+    pub fn scale(self) -> f32 {
+        match self {
+            Self::Standard => 1.0,
+            Self::Compact => 0.88,
+            Self::Ultra => 0.78,
+        }
+    }
+
+    pub fn global(self) -> GlobalMetrics {
+        let (item_spacing, pad, interact_y, window_margin, menu_margin) = match self {
+            Self::Standard => ([5.0, 4.0], [6.0, 3.0], 18.0, 6, 6),
+            Self::Compact => ([4.0, 3.0], [5.0, 2.0], 17.0, 5, 4),
+            Self::Ultra => ([3.0, 2.0], [4.0, 1.0], 15.0, 4, 3),
+        };
+        let (indent, icon_width, icon_inner, font_scale) = match self {
+            Self::Standard => (18.0, 14.0, 8.0, 1.0),
+            Self::Compact => (15.0, 13.0, 7.0, 0.93),
+            Self::Ultra => (12.0, 12.0, 6.5, 0.86),
+        };
+        GlobalMetrics {
+            item_spacing,
+            pad,
+            interact_y,
+            window_margin,
+            menu_margin,
+            indent,
+            icon_width,
+            icon_inner,
+            font_scale,
+        }
+    }
+
+    pub fn bar(self) -> BarMetrics {
+        let (row_h, margin_y, pad_y, dot_radius, dot_inset) = match self {
+            Self::Standard => (27.0, 3, 3.0, 3.5, 2.0),
+            Self::Compact => (22.0, 2, 1.0, 3.0, 2.5),
+            Self::Ultra => (20.0, 1, 0.0, 2.5, 2.5),
+        };
+        BarMetrics { row_h, margin_y, pad_y, dot_radius, dot_inset }
+    }
+
+    pub fn sub_bar(self) -> SubBarMetrics {
+        match self {
+            Self::Standard => SubBarMetrics {
+                height: 36.0, margin_y: 4, spacing: 4.0, pad_y: 3.0, btn: [28.0, 26.0], icon: 14.5,
+                swatch_box: 20.0, swatch_fill: 7.5, swatch_ring: 9.0, shape_btn_h: 24.0,
+            },
+            Self::Compact => SubBarMetrics {
+                height: 28.0, margin_y: 2, spacing: 3.0, pad_y: 1.0, btn: [26.0, 22.0], icon: 13.5,
+                swatch_box: 18.0, swatch_fill: 6.5, swatch_ring: 8.0, shape_btn_h: 20.0,
+            },
+            Self::Ultra => SubBarMetrics {
+                height: 24.0, margin_y: 1, spacing: 2.0, pad_y: 0.0, btn: [24.0, 20.0], icon: 12.5,
+                swatch_box: 16.0, swatch_fill: 5.5, swatch_ring: 7.0, shape_btn_h: 18.0,
+            },
+        }
+    }
+
+    pub fn rail(self) -> RailMetrics {
+        match self {
+            Self::Standard => RailMetrics {
+                width: 44.0, margin: [5, 8], spacing: 5.0, pad_y: 3.0, btn: [32.0, 30.0], icon: 15.5,
+            },
+            Self::Compact => RailMetrics {
+                width: 40.0, margin: [4, 5], spacing: 3.0, pad_y: 1.0, btn: [30.0, 25.0], icon: 14.5,
+            },
+            Self::Ultra => RailMetrics {
+                width: 36.0, margin: [3, 4], spacing: 2.0, pad_y: 0.0, btn: [28.0, 22.0], icon: 13.5,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ToolsLayoutMode {
     VerticalRail, // Floating vertical pill on the right edge
@@ -576,6 +728,9 @@ pub struct AppSettings {
     pub default_page_style: crate::notes::BlankPageStyle,
     /// Show the per-page Sketch tab in the notes panel (and include sketches in exports).
     pub sketch_enabled: bool,
+    /// Density of the whole interface (`compact_topbar` was the former boolean key).
+    #[serde(alias = "compact_topbar")]
+    pub ui_density: UiDensity,
 }
 
 impl Default for AppSettings {
@@ -601,6 +756,7 @@ impl Default for AppSettings {
             bottom_notes: true,
             default_page_style: crate::notes::BlankPageStyle::Ruled,
             sketch_enabled: true,
+            ui_density: UiDensity::Standard,
         }
     }
 }
@@ -670,5 +826,52 @@ impl AppState {
     pub fn remove_recent(&mut self, path: &Path) {
         self.recent_files.retain(|e| e.path != path);
         self.save();
+    }
+}
+
+#[cfg(test)]
+mod ui_density_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_former_keys_and_new_names() {
+        let read = |json: &str| serde_json::from_str::<AppSettings>(json).unwrap().ui_density;
+        assert_eq!(read(r#"{"compact_topbar": true}"#), UiDensity::Compact);
+        assert_eq!(read(r#"{"compact_topbar": false}"#), UiDensity::Standard);
+        assert_eq!(read(r#"{"topbar_density": "Ultra"}"#), UiDensity::Ultra);
+        assert_eq!(read(r#"{"ui_density": "Compact"}"#), UiDensity::Compact);
+        assert_eq!(read("{}"), UiDensity::Standard);
+    }
+
+    #[test]
+    fn density_round_trips() {
+        let settings = AppSettings {
+            ui_density: UiDensity::Ultra,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ui_density, UiDensity::Ultra);
+    }
+
+    #[test]
+    fn denser_levels_are_strictly_smaller() {
+        use UiDensity::*;
+        assert!(Standard.bar().row_h > Compact.bar().row_h);
+        assert!(Compact.bar().row_h > Ultra.bar().row_h);
+        assert!(Standard.sub_bar().height > Compact.sub_bar().height);
+        assert!(Compact.sub_bar().height > Ultra.sub_bar().height);
+        assert!(Standard.rail().btn[1] > Compact.rail().btn[1]);
+        assert!(Compact.rail().btn[1] > Ultra.rail().btn[1]);
+        assert!(Standard.scale() > Compact.scale() && Compact.scale() > Ultra.scale());
+        assert!(Standard.global().item_spacing[1] > Compact.global().item_spacing[1]);
+        assert!(Compact.global().item_spacing[1] > Ultra.global().item_spacing[1]);
+        assert!(Standard.global().font_scale > Compact.global().font_scale);
+        assert!(Compact.global().font_scale > Ultra.global().font_scale);
+        // Each button fits inside its bar after the margins.
+        for d in [Standard, Compact, Ultra] {
+            let s = d.sub_bar();
+            assert!(s.btn[1] + 2.0 * f32::from(s.margin_y) <= s.height);
+        }
     }
 }

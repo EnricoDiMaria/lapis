@@ -687,7 +687,9 @@ To keep a palette while trying other themes:
 
 Named palettes are stored in `custom_themes.json` alongside the active `theme.json` in the Lapis configuration folder. Selected controls use the full accent with contrasting palette tones throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars. Catppuccin surfaces retain their official colors; hover and pressed widget text adapts for readability. Custom colors remain editable, so choose text and background colors that work well together.
 
-PDF dark mode, notes font size, and custom font controls remain below the theme section.
+**Interface density** below the theme section sets how tightly the whole app is packed. **Standard** is the default. **Compact** shortens the topbar by about 7 px and the annotation sub-topbar from 36 to 28 px. **Ultra-compact** goes to about 11 px shorter and a 24 px sub-topbar, with smaller icons, swatches and buttons. Both levels also tighten the notes panel header, the sidebar tabs, the split-view header, and the spacing, padding, margins and default text size used by menus, dialogs and settings. The notes text size is not affected; it keeps its own setting. Ultra-compact suits small screens but has smaller click targets. The Notes and Flashcards dots shrink with the bar so they stay uncropped. The choice applies immediately and is remembered.
+
+PDF dark mode, notes font size, and custom font controls remain below it.
 
 ### Keybindings
 
