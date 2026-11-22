@@ -1397,6 +1397,8 @@ struct Lapis {
     topbar_hold_until: f64,
     /// Height of the revealed overlay topbar; 0 while hidden or docked.
     topbar_overlay_h: f32,
+    /// A popup drawn by the topbar (file menu, bookmark popup) was open in the last frame.
+    topbar_popup_open: bool,
     /// Notes-panel sizes of the open document.
     panel_sizes: PanelSizes,
     /// Panels that take the saved size the next time they are shown.
@@ -1623,6 +1625,7 @@ impl Lapis {
             topbar_pinned: false,
             topbar_hold_until: 0.0,
             topbar_overlay_h: 0.0,
+            topbar_popup_open: false,
             panel_sizes: PanelSizes::default(),
             panel_apply: [true; 3],
             panel_seen: [None; 3],
@@ -1866,7 +1869,12 @@ impl Lapis {
         // A press elsewhere (drawing, dragging) must not pop the bar open.
         let at_edge = near_top(5.0) && !button_down;
         let over_bar = was_shown && near_top(self.topbar_overlay_h + 4.0);
-        let menu_open = was_shown && ctx.any_popup_open();
+        // Menus and popups opened from the bar keep it visible while they are open: egui menus
+        // (zoom, overflow), the file and bookmark popups, and the search popup.
+        // `Popup::is_any_open` reads egui's memory, so it already works before the bar is drawn
+        // (`Context::any_popup_open` only sees popups shown earlier in the same frame).
+        let menu_open = was_shown
+            && (egui::Popup::is_any_open(ctx) || self.topbar_popup_open || self.show_search);
         let editing = was_shown
             && ctx
                 .memory(|m| m.focused())
@@ -3224,6 +3232,9 @@ impl Lapis {
             }
         }
         ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(bm_id) = bm_open);
+        if bm_open {
+            self.topbar_popup_open = true;
+        }
     }
 
     fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -15262,6 +15273,8 @@ impl eframe::App for Lapis {
             let topbar_slot = self.topbar_slot(ui);
             // The topbar itself, drawn into whichever ui the slot provides.
             let mut draw_topbar = |ui: &mut egui::Ui| {
+                // Popups opened from the topbar set this again while they are open.
+                self.topbar_popup_open = false;
             // Density sets the row height, margins and button padding.
             let density = self.app_state.settings.ui_density;
             let bar = density.bar();
@@ -15845,6 +15858,9 @@ impl eframe::App for Lapis {
                 }
  
                 ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(menu_id) = is_open);
+                if is_open {
+                    self.topbar_popup_open = true;
+                }
 
             });
             };
@@ -15856,7 +15872,7 @@ impl eframe::App for Lapis {
                 TopbarSlot::Overlay => {
                     let ctx = ui.ctx().clone();
                     let screen = ctx.content_rect();
-                    let area = egui::Area::new(egui::Id::new("topbar_overlay"))
+                    let area = egui::Area::new(ui.make_persistent_id("topbar_overlay"))
                         .order(egui::Order::Foreground)
                         .fixed_pos(screen.min)
                         .constrain(false)
