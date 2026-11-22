@@ -688,6 +688,7 @@ Open **Advanced Settings** to configure the application. It has seven sections, 
 - **Panels:** remember whether the Notes and Outline panels were open when a document is reopened.
 - **Notes panel:** allow the panel under the page in a portrait window, and enable the Sketch tab.
 - **Audio:** enable Audio notes (voice memos) and Audio Lessons with the audio dock.
+- **Page scrolling:** the mouse-wheel speed and the middle-button drag speed. Both work the same in Single Page, Continuous Scroll, the two-page book view and the Split-View pane; Ctrl + wheel still zooms.
 - **Pages & presentation:** the default style of new pages and how Slideshow + Notes handles slides without annotations.
 
 ### Appearance

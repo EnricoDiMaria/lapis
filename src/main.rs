@@ -1896,6 +1896,57 @@ impl Lapis {
         self.topbar_hold_until = 0.0;
     }
 
+    /// Wheel / trackpad scroll multiplier shared by every page view.
+    fn wheel_speed(&self) -> f32 {
+        self.app_state.settings.wheel_scroll_speed.clamp(0.2, 8.0)
+    }
+
+    /// Middle-button drag multiplier shared by every page view.
+    fn pan_speed(&self) -> f32 {
+        self.app_state.settings.pan_scroll_speed.clamp(0.2, 12.0)
+    }
+
+    /// Scales this frame's wheel scrolling over `rect` (Ctrl + wheel stays the zoom).
+    fn apply_wheel_speed(&self, ui: &egui::Ui, rect: egui::Rect) {
+        if !ui.rect_contains_pointer(rect) {
+            return;
+        }
+        let speed = self.wheel_speed();
+        ui.input_mut(|i| {
+            if !i.modifiers.ctrl && !i.modifiers.command {
+                i.smooth_scroll_delta *= speed;
+            }
+        });
+    }
+
+    /// Middle-button drag panning for a scroll area outside the main canvas: the scroll delta
+    /// for this frame. The drag starts inside `rect` and continues wherever the pointer goes.
+    fn middle_drag_pan(&self, ui: &egui::Ui, key: &str, rect: egui::Rect) -> egui::Vec2 {
+        let id = ui.make_persistent_id(("middle_drag_pan", key));
+        let (pressed, down, delta, pos) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.pointer.button_down(egui::PointerButton::Middle),
+                i.pointer.delta(),
+                i.pointer.hover_pos().or(i.pointer.latest_pos()),
+            )
+        });
+        let mut active = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        if pressed && pos.is_some_and(|p| rect.contains(p)) {
+            active = true;
+        }
+        if !down {
+            active = false;
+        }
+        ui.data_mut(|d| d.insert_temp(id, active));
+        if !active {
+            return egui::Vec2::ZERO;
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx().request_repaint();
+        delta * self.pan_speed()
+    }
+
     /// Scales a fixed panel size (button height, margin) by the interface density.
     fn sz(&self, base: f32) -> f32 {
         (base * self.app_state.settings.ui_density.scale()).round()
@@ -5696,6 +5747,50 @@ impl Lapis {
                                                             )
                                                             .changed()
                                                             {
+                                                                settings_dirty = true;
+                                                            }
+                                                        });
+
+                                                        settings_section(ui, "Page scrolling", "How fast the page moves with the mouse. The same in every view mode.", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Mouse wheel speed:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.wheel_scroll_speed,
+                                                                            0.5..=5.0,
+                                                                        )
+                                                                        .step_by(0.1)
+                                                                        .suffix("×"),
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
+                                                            ui.weak("Distance moved per wheel notch or trackpad swipe. Ctrl + wheel still zooms.");
+                                                            ui.add_space(6.0);
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Middle-button drag speed:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.pan_scroll_speed,
+                                                                            1.0..=8.0,
+                                                                        )
+                                                                        .step_by(0.1)
+                                                                        .suffix("×"),
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
+                                                            ui.weak("How far the page moves per pixel you drag with the middle button held down. 1× follows the pointer exactly.");
+                                                            ui.add_space(6.0);
+                                                            if ui.button("Restore scrolling defaults").clicked() {
+                                                                self.app_state.settings.wheel_scroll_speed = state::DEFAULT_WHEEL_SCROLL_SPEED;
+                                                                self.app_state.settings.pan_scroll_speed = state::DEFAULT_PAN_SCROLL_SPEED;
                                                                 settings_dirty = true;
                                                             }
                                                         });
@@ -16758,10 +16853,18 @@ impl eframe::App for Lapis {
                         let disp_w = base_w * self.split_secondary_zoom;
                         let disp_h = base_h * self.split_secondary_zoom;
 
+                        // Same wheel speed and middle-button drag as the main page.
+                        let pane_rect = ui.available_rect_before_wrap();
+                        self.apply_wheel_speed(ui, pane_rect);
+                        let pane_pan = self.middle_drag_pan(ui, "split_secondary", pane_rect);
+
                         egui::ScrollArea::both()
                             .id_salt("split_secondary_scroll")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                if pane_pan != egui::Vec2::ZERO {
+                                    ui.scroll_with_delta(pane_pan);
+                                }
                                 let pad_x = ((avail.x - disp_w) * 0.5).max(0.0);
                                 let pad_y = ((avail.y - disp_h) * 0.5).max(0.0);
                                 ui.add_space(pad_y);
@@ -17608,12 +17711,19 @@ impl eframe::App for Lapis {
             if !mid_down {
                 self.pdf_panning = false;
             }
-            let pan_speed = if self.view_mode == ViewMode::Continuous { 4.8 } else { 3.5 };
+            let pan_speed = self.pan_speed();
             let pan_delta = if self.pdf_panning {
                 ptr_delta * pan_speed
             } else {
                 egui::Vec2::ZERO
             };
+            // One wheel speed for every page view (single, continuous and book).
+            if !in_slideshow
+                && !self.pdf_panning
+                && ptr_pos.is_some_and(|p| self.canvas_rect.contains(p))
+            {
+                self.apply_wheel_speed(ui, self.canvas_rect);
+            }
 
                 if self.pdf_panning {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -17716,17 +17826,6 @@ impl eframe::App for Lapis {
                 }
 
                 else if self.view_mode == ViewMode::Continuous {
-    let hover_in_canvas = ui
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|p| self.canvas_rect.contains(p));
-    if hover_in_canvas && !self.pdf_panning {
-        ui.input_mut(|i| {
-            if !i.modifiers.ctrl && !i.modifiers.command {
-                const CONTINUOUS_WHEEL_MULT: f32 = 2.2;
-                i.smooth_scroll_delta *= CONTINUOUS_WHEEL_MULT;
-            }
-        });
-    }
     ui.spacing_mut().item_spacing.y = 0.0;
     let gap = CONTINUOUS_GAP;
     let row_h = display_h + gap;
@@ -18079,10 +18178,13 @@ impl eframe::App for Lapis {
                         book_page_w
                     };
 
-                    egui::ScrollArea::both()
+                    let book_out = egui::ScrollArea::both()
                         .id_salt("pdf_book_twopage_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            if pan_delta != egui::Vec2::ZERO {
+                                ui.scroll_with_delta(pan_delta);
+                            }
                             let pad_x = ((visible_w - total_spread_w) * 0.5).max(0.0);
                             let pad_y = ((visible_h - book_page_h) * 0.5).max(0.0);
 
@@ -18188,6 +18290,7 @@ impl eframe::App for Lapis {
                                 }
                             });
                         });
+                    self.canvas_rect = book_out.inner_rect;
                     return;
                 }
                 if self.view_mode == ViewMode::SinglePage || self.view_mode == ViewMode::Slideshow || self.view_mode == ViewMode::SlideshowWithNotes  {

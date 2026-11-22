@@ -736,7 +736,16 @@ pub struct AppSettings {
     pub ui_density: UiDensity,
     /// Hide the topbar; reveal it by hovering the top edge or with the shortcut.
     pub topbar_auto_hide: bool,
+    /// Multiplier for mouse-wheel and trackpad scrolling, the same in every page view.
+    pub wheel_scroll_speed: f32,
+    /// Page movement per pixel of middle-button dragging, the same in every page view.
+    pub pan_scroll_speed: f32,
 }
+
+/// Default mouse-wheel scroll multiplier (the former Continuous Scroll value).
+pub const DEFAULT_WHEEL_SCROLL_SPEED: f32 = 2.2;
+/// Default middle-button drag multiplier (between the former 3.5 and 4.8).
+pub const DEFAULT_PAN_SCROLL_SPEED: f32 = 4.0;
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -763,6 +772,8 @@ impl Default for AppSettings {
             sketch_enabled: true,
             ui_density: UiDensity::Standard,
             topbar_auto_hide: false,
+            wheel_scroll_speed: DEFAULT_WHEEL_SCROLL_SPEED,
+            pan_scroll_speed: DEFAULT_PAN_SCROLL_SPEED,
         }
     }
 }
@@ -879,5 +890,28 @@ mod ui_density_tests {
             let s = d.sub_bar();
             assert!(s.btn[1] + 2.0 * f32::from(s.margin_y) <= s.height);
         }
+    }
+}
+
+#[cfg(test)]
+mod scroll_speed_tests {
+    use super::*;
+
+    #[test]
+    fn older_settings_get_the_default_speeds() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.wheel_scroll_speed, DEFAULT_WHEEL_SCROLL_SPEED);
+        assert_eq!(settings.pan_scroll_speed, DEFAULT_PAN_SCROLL_SPEED);
+    }
+
+    #[test]
+    fn saved_speeds_round_trip() {
+        let settings = AppSettings {
+            wheel_scroll_speed: 3.5,
+            pan_scroll_speed: 1.0,
+            ..AppSettings::default()
+        };
+        let back: AppSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!((back.wheel_scroll_speed, back.pan_scroll_speed), (3.5, 1.0));
     }
 }
