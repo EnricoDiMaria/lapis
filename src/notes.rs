@@ -329,6 +329,38 @@ fn load_lopdf(clean: &[u8], pdf_path: &Path, tag: &str) -> Result<lopdf::Documen
     }
 }
 
+/// Re-keys every per-page map of `data`; `None` drops the page.
+fn remap_doc_data_pages(data: &mut DocData, map: &dyn Fn(u32) -> Option<u32>) {
+    fn remap<V>(items: &mut HashMap<u32, V>, map: &dyn Fn(u32) -> Option<u32>) {
+        *items = std::mem::take(items)
+            .into_iter()
+            .filter_map(|(page, value)| map(page).map(|new_page| (new_page, value)))
+            .collect();
+    }
+    remap(&mut data.notes, map);
+    remap(&mut data.annotations, map);
+    remap(&mut data.sketches, map);
+    data.blank_pages = data.blank_pages.iter().filter_map(|&page| map(page)).collect();
+}
+
+/// Applies a page change to the Lapis payload read by [`read_pdf_and_notes`], so the copy
+/// embedded in a structurally rewritten PDF matches its new page numbering even if the app
+/// stops before the next commit (or the file is opened on another machine).
+fn update_embedded_notes(notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec<u8> {
+    let Some(block) = find_embedded_block(notes) else { return notes.to_vec(); };
+    let Some(mut data) = parse_embedded_data(&notes[block.body_start..block.body_end]) else {
+        return notes.to_vec();
+    };
+    change(&mut data);
+    let mut out = Vec::new();
+    out.extend_from_slice(NOTES_START_TAG);
+    if serde_json::to_writer(&mut out, &portable(&data)).is_err() {
+        return notes.to_vec();
+    }
+    out.extend_from_slice(NOTES_END_TAG);
+    out
+}
+
 /// Write the PDF and note data to a temporary file, then replace the original atomically.
 fn save_pdf_with_notes(
     doc: &mut lopdf::Document,
@@ -625,6 +657,15 @@ pub fn insert_blank_page_with_style_into_pdf(
         })
         .unwrap_or(ref_page_num + 1);
 
+    let notes = update_embedded_notes(&notes, |data| {
+        shift_doc_data_on_insert(
+            &mut data.notes,
+            &mut data.annotations,
+            &mut data.blank_pages,
+            &mut data.sketches,
+            actual_new_page_num,
+        );
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "ins", &notes)?;
     Ok(actual_new_page_num)
 }
@@ -651,6 +692,13 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
     doc.delete_pages(&[page_to_delete]);
     let _ = doc.prune_objects(); // Remove orphaned objects and resources.
 
+    let notes = update_embedded_notes(&notes, |data| {
+        remap_doc_data_pages(data, &|page| match page.cmp(&page_to_delete) {
+            std::cmp::Ordering::Less => Some(page),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(page - 1),
+        });
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "del", &notes)
 }
 
@@ -747,6 +795,19 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     );
     root.set("Count", Object::Integer(total as i64));
 
+    let notes = update_embedded_notes(&notes, |data| {
+        remap_doc_data_pages(data, &|page| {
+            Some(if page == from_page {
+                to_page
+            } else if from_page < to_page && page > from_page && page <= to_page {
+                page - 1
+            } else if from_page > to_page && page >= to_page && page < from_page {
+                page + 1
+            } else {
+                page
+            })
+        });
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "reorder", &notes)
 }
 
@@ -1329,11 +1390,7 @@ fn annotation_rect(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> Option<[f
 
 fn pdf_text(dict: &lopdf::Dictionary, key: &[u8]) -> String {
     dict.get(key).ok().and_then(|o| match o {
-        lopdf::Object::String(bytes, _) if bytes.starts_with(&[0xFE, 0xFF]) => {
-            let words: Vec<u16> = bytes[2..].chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
-            Some(String::from_utf16_lossy(&words))
-        }
-        lopdf::Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
         _ => None,
     }).unwrap_or_default()
 }
@@ -1379,9 +1436,57 @@ fn annotation_kind_from_name(name: &str) -> Option<AnnotationKind> {
     })
 }
 
-/// Stable FNV-1a fingerprint of the annotation's semantic geometry and content.
-/// Coordinates are quantized to 1e-4 page units to tolerate PDF float serialization noise.
-fn annotation_signature(ann: &PageAnnotation) -> String {
+/// Font sizes are stored relative to an 800-unit page height (the on-screen and slide-export
+/// convention); PDF viewers read them as points, so they are scaled by the page height.
+const FONT_UNITS_PAGE_H: f32 = 800.0;
+
+/// Page size in PDF units as displayed (width and height swap on 90/270 degree pages).
+fn displayed_page_size(rect: [f32; 4], rotation: i32) -> (f32, f32) {
+    let (w, h) = ((rect[2] - rect[0]).max(1.0), (rect[3] - rect[1]).max(1.0));
+    if rotation == 90 || rotation == 270 { (h, w) } else { (w, h) }
+}
+
+fn model_to_pdf_font_size(model: f32, displayed_h: f32) -> f32 {
+    (model * displayed_h / FONT_UNITS_PAGE_H).clamp(4.0, 120.0)
+}
+
+fn pdf_to_model_font_size(points: f32, displayed_h: f32) -> f32 {
+    (points * FONT_UNITS_PAGE_H / displayed_h.max(1.0)).clamp(4.0, 200.0)
+}
+
+/// A textbox starts with one invisible character that selects its translucent background.
+const TEXTBOX_BG_MARKERS: [char; 2] = ['\u{200B}', '\u{200C}'];
+
+fn textbox_leading_marker(text: &str) -> Option<char> {
+    text.chars().next().filter(|c| TEXTBOX_BG_MARKERS.contains(c))
+}
+
+/// Background fill (color, opacity) matching the on-screen modes.
+fn textbox_background(text: &str) -> Option<([u8; 3], f32)> {
+    match textbox_leading_marker(text)? {
+        '\u{200B}' => Some(([36, 38, 46], 200.0 / 255.0)),
+        _ => Some(([245, 246, 250], 215.0 / 255.0)),
+    }
+}
+
+/// The text other PDF viewers should show: no background marker, no `__`/`~~` formatting
+/// delimiters, and a leading `- ` shown as a bullet, as the on-screen box renders it.
+fn textbox_plain_text(text: &str) -> String {
+    text.trim_start_matches(TEXTBOX_BG_MARKERS)
+        .split('\n')
+        .map(|line| {
+            let (bullet, rest) = match line.strip_prefix("- ") {
+                Some(rest) => ("\u{2022} ", rest),
+                None => ("", line),
+            };
+            format!("{bullet}{}", rest.replace("__", "").replace("~~", ""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Signature written by Lapis builds before textboxes ignored their height and markers.
+fn annotation_signature_v1(ann: &PageAnnotation) -> String {
     let canonical_box = matches!(ann.kind,
         AnnotationKind::TextBox | AnnotationKind::Highlight | AnnotationKind::Rect
         | AnnotationKind::Circle | AnnotationKind::Tape
@@ -1406,7 +1511,62 @@ fn annotation_signature(ann: &PageAnnotation) -> String {
     format!("{hash:016x}")
 }
 
-fn pdf_string_ascii(text: &str) -> String {
+/// Current signature. Textboxes ignore their bottom edge (grown to fit the wrapped text on
+/// export) and the Lapis-only markers, so an exported box matches itself after re-import.
+fn annotation_signature(ann: &PageAnnotation) -> String {
+    if ann.kind != AnnotationKind::TextBox || ann.points.is_empty() {
+        return annotation_signature_v1(ann);
+    }
+    let min_x = ann.points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let min_y = ann.points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let max_x = ann.points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let q = |v: f32| (v * 10_000.0).round() as i64;
+    let payload = format!(
+        "TextBox2|{:?}|{}|{},{}|{}",
+        ann.color, textbox_plain_text(&ann.text), q(min_x), q(min_y), q(max_x)
+    );
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in payload.as_bytes() { hash ^= *byte as u64; hash = hash.wrapping_mul(0x100000001b3); }
+    format!("{hash:016x}")
+}
+
+/// Windows-1252 byte for characters in the 0x80-0x9F block (WinAnsiEncoding).
+fn winansi_high_byte(c: char) -> Option<u8> {
+    Some(match c {
+        '\u{20AC}' => 0x80, '\u{201A}' => 0x82, '\u{0192}' => 0x83, '\u{201E}' => 0x84,
+        '\u{2026}' => 0x85, '\u{2020}' => 0x86, '\u{2021}' => 0x87, '\u{02C6}' => 0x88,
+        '\u{2030}' => 0x89, '\u{0160}' => 0x8A, '\u{2039}' => 0x8B, '\u{0152}' => 0x8C,
+        '\u{017D}' => 0x8E, '\u{2018}' => 0x91, '\u{2019}' => 0x92, '\u{201C}' => 0x93,
+        '\u{201D}' => 0x94, '\u{2022}' => 0x95, '\u{2013}' => 0x96, '\u{2014}' => 0x97,
+        '\u{02DC}' => 0x98, '\u{2122}' => 0x99, '\u{0161}' => 0x9A, '\u{203A}' => 0x9B,
+        '\u{0153}' => 0x9C, '\u{017E}' => 0x9E, '\u{0178}' => 0x9F,
+        _ => return None,
+    })
+}
+
+/// Decodes a PDF text string: UTF-16BE or UTF-8 with a BOM, UTF-8 without one (common in
+/// practice), otherwise PDFDocEncoding (Latin-1 plus the 0x80-0xA0 block).
+fn decode_pdf_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let words: Vec<u16> = bytes[2..].chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+        return String::from_utf16_lossy(&words);
+    }
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if let Ok(text) = std::str::from_utf8(bytes) { return text.to_owned(); }
+    const HIGH: [char; 33] = [
+        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{0192}',
+        '\u{2044}', '\u{2039}', '\u{203A}', '\u{2212}', '\u{2030}', '\u{201E}', '\u{201C}',
+        '\u{201D}', '\u{2018}', '\u{2019}', '\u{201A}', '\u{2122}', '\u{FB01}', '\u{FB02}',
+        '\u{0141}', '\u{0152}', '\u{0160}', '\u{0178}', '\u{017D}', '\u{0131}', '\u{0142}',
+        '\u{0153}', '\u{0161}', '\u{017E}', '\u{FFFD}', '\u{20AC}',
+    ];
+    bytes.iter().map(|&b| match b {
+        0x80..=0xA0 => HIGH[(b - 0x80) as usize],
+        _ => b as char,
+    }).collect()
+}
+
+fn pdf_string_winansi(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         match ch {
@@ -1414,27 +1574,45 @@ fn pdf_string_ascii(text: &str) -> String {
             '\n' | '\r' => out.push(' '),
             c if (c as u32) >= 32 && (c as u32) <= 126 => out.push(c),
             c if (160..=255).contains(&(c as u32)) => out.push_str(&format!("\\{:03o}", c as u8)),
-            _ => out.push('?'),
+            c => match winansi_high_byte(c) {
+                Some(byte) => out.push_str(&format!("\\{byte:03o}")),
+                None => out.push('?'),
+            },
         }
     }
     out
 }
 
-fn annotation_appearance_stream(text: &str, width: f32, height: f32, ann: &PageAnnotation) -> lopdf::Stream {
+fn annotation_appearance_stream(
+    text: &str,
+    width: f32,
+    height: f32,
+    font_size: f32,
+    ann: &PageAnnotation,
+    background: Option<([u8; 3], f32)>,
+) -> lopdf::Stream {
     use lopdf::{dictionary, Object};
-    let font_size = ann.font_size.clamp(6.0, 96.0);
+    let font_size = font_size.clamp(4.0, 120.0);
     let leading = font_size * 1.2;
     let x = 3.0f32;
     let baseline = (height - 3.0 - font_size).max(1.0);
-    let mut content = format!(
+    let mut content = String::new();
+    if let Some((c, _)) = background {
+        content.push_str(&format!(
+            "q /GSbg gs {:.5} {:.5} {:.5} rg 0 0 {:.3} {:.3} re f Q ",
+            c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0,
+            width.max(1.0), height.max(1.0)
+        ));
+    }
+    content.push_str(&format!(
         "BT /Helv {:.3} Tf {:.5} {:.5} {:.5} rg {:.3} {:.3} Td ",
         font_size, ann.color[0] as f32 / 255.0, ann.color[1] as f32 / 255.0,
         ann.color[2] as f32 / 255.0, x, baseline
-    );
+    ));
     for (i, line) in text.split('\n').enumerate() {
         if i > 0 { content.push_str(&format!("0 -{leading:.3} Td ")); }
         content.push('(');
-        content.push_str(&pdf_string_ascii(line));
+        content.push_str(&pdf_string_winansi(line));
         content.push_str(") Tj ");
     }
     content.push_str("ET");
@@ -1443,7 +1621,12 @@ fn annotation_appearance_stream(text: &str, width: f32, height: f32, ann: &PageA
         (false, true) => "Helvetica-Oblique", (false, false) => "Helvetica",
     };
     let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base_font, "Encoding" => "WinAnsiEncoding" };
-    let resources = dictionary! { "Font" => dictionary! { "Helv" => font } };
+    let mut resources = dictionary! { "Font" => dictionary! { "Helv" => font } };
+    if let Some((_, alpha)) = background {
+        resources.set("ExtGState", dictionary! {
+            "GSbg" => dictionary! { "Type" => "ExtGState", "ca" => Object::Real(alpha) }
+        });
+    }
     lopdf::Stream::new(dictionary! {
         "Type" => "XObject", "Subtype" => "Form", "FormType" => 1,
         "BBox" => vec![0.into(), 0.into(), Object::Real(width.max(1.0)), Object::Real(height.max(1.0))],
@@ -1456,6 +1639,7 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
     let Ok(doc) = lopdf::Document::load_mem(&bytes) else { return; };
     for (page_num, page_id) in doc.get_pages() {
         let Some((page_rect, rotation)) = page_pdf_geometry(&doc,page_id) else { continue; };
+        let (_, disp_h) = displayed_page_size(page_rect, rotation);
         let Ok(page_dict) = doc.get_dictionary(page_id) else { continue; };
         let Some(annots_obj) = page_dict.get(b"Annots").ok().cloned() else { continue; };
         let annots_obj = resolve_obj(&doc,annots_obj);
@@ -1502,7 +1686,7 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
                 }
                 b"FreeText" | b"Text" => {
                     if let Some(r)=annotation_rect(&doc,dict) {
-                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:free_text_font_size(&doc,dict),bold:false,italic:false,stroke_width:2.5 });
+                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:pdf_to_model_font_size(free_text_font_size(&doc,dict), disp_h),bold:false,italic:false,stroke_width:2.5 });
                     }
                 }
                 _ => {}
@@ -1522,36 +1706,57 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
                 lopdf::Object::Name(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
                 _ => None,
             });
-            if is_lapis_exported && stored_sig.as_deref().is_some_and(|sig| {
-                imported.iter().all(|annotation| annotation_signature(annotation) == sig)
-            }) {
-                // /LapisSig intentionally fingerprints geometry, color and text, not
-                // font size. If Edge changes only the size, the signature still
-                // matches: update the existing local box without resurrecting a
-                // locally deleted annotation.
-                if let (Some(sig), Some(external)) = (stored_sig.as_deref(), imported.first()) {
-                    if let Some(local) = target.get_mut(&page_num)
-                        .and_then(|items| items.iter_mut()
-                            .find(|item| annotation_signature(item) == sig))
-                    {
-                        if local.kind == AnnotationKind::TextBox
-                            && (local.font_size - external.font_size).abs() > 0.01
-                        {
-                            local.font_size = external.font_size;
+            // Files written by older builds carry the previous signature scheme.
+            let sig_matches = |ann: &PageAnnotation, sig: &str| {
+                annotation_signature(ann) == sig || annotation_signature_v1(ann) == sig
+            };
+            if is_lapis_exported && let Some(sig) = stored_sig.as_deref() {
+                // The local annotation this object was exported from, if it still exists.
+                let local_idx = target.get(&page_num)
+                    .and_then(|items| items.iter().position(|item| sig_matches(item, sig)));
+                // Unchanged: it still has its stored signature, or the same content as the
+                // local annotation (the export grows textboxes and drops Lapis-only markers).
+                let unchanged = imported.iter().all(|a| sig_matches(a, sig))
+                    || local_idx.is_some_and(|i| {
+                        let local_sig = annotation_signature(&target[&page_num][i]);
+                        imported.iter().all(|a| annotation_signature(a) == local_sig)
+                    });
+                if unchanged {
+                    // The signature ignores the font size: if an external editor changed only
+                    // the size, update the local box without resurrecting a deleted one.
+                    if let (Some(i), Some(external)) = (local_idx, imported.first()) {
+                        let local = &mut target.get_mut(&page_num).expect("page has annotations")[i];
+                        if local.kind == AnnotationKind::TextBox && external.kind == AnnotationKind::TextBox {
+                            let model = external.font_size;
+                            // Older builds stored the PDF point size directly.
+                            let legacy = model * disp_h / FONT_UNITS_PAGE_H;
+                            if (local.font_size - model).abs() > 0.01 && (local.font_size - legacy).abs() > 0.01 {
+                                local.font_size = model;
+                            }
                         }
                     }
+                    continue;
                 }
-                continue;
+                // Edited externally: take the new content but keep what the PDF cannot hold.
+                if let Some(i) = local_idx && !imported.is_empty() {
+                    let existing = target.get_mut(&page_num).expect("page has annotations");
+                    let mut replacement = imported.remove(0);
+                    let local = &existing[i];
+                    if replacement.kind == AnnotationKind::TextBox && local.kind == AnnotationKind::TextBox {
+                        replacement.bold = local.bold;
+                        replacement.italic = local.italic;
+                        replacement.stroke_width = local.stroke_width;
+                        if let Some(marker) = textbox_leading_marker(&local.text)
+                            && textbox_leading_marker(&replacement.text).is_none()
+                        {
+                            replacement.text.insert(0, marker);
+                        }
+                    }
+                    existing[i] = replacement;
+                }
             }
             if !imported.is_empty() {
                 let existing = target.entry(page_num).or_default();
-                if is_lapis_exported {
-                    if let Some(sig) = stored_sig.as_deref() {
-                        if let Some(index) = existing.iter().position(|current| annotation_signature(current) == sig) {
-                            existing[index] = imported.remove(0);
-                        }
-                    }
-                }
                 for annotation in imported {
                     if !existing.iter().any(|current| same_page_annotation(current, &annotation)) {
                         existing.push(annotation);
@@ -1686,26 +1891,28 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
         AnnotationKind::TextBox => {
                 let Some(mut r) = pdf_rect_for_points(&ann.points, page_rect, rotation) else {
                     return Vec::new();
-                };            
+                };
+                let (_, disp_h) = displayed_page_size(page_rect, rotation);
+                let font_size = model_to_pdf_font_size(ann.font_size, disp_h);
                 let font_name = match (ann.bold, ann.italic) {
                 (true, true) => "Helvetica-BoldOblique",
                 (true, false) => "Helvetica-Bold",
                 (false, true) => "Helvetica-Oblique",
                 (false, false) => "Helvetica",
             };
-            let da = format!("/Helv {} Tf {} {} {} rg", ann.font_size.clamp(6.0,96.0),
+            let da = format!("/Helv {} Tf {} {} {} rg", font_size,
                 ann.color[0] as f32 / 255.0, ann.color[1] as f32 / 255.0, ann.color[2] as f32 / 255.0);
             let font = dictionary! { "Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>font_name, "Encoding"=>"WinAnsiEncoding" };
             let dr = dictionary! { "Font"=>dictionary! { "Helv"=>font } };
 
-            let font_size = ann.font_size.clamp(6.0, 96.0);
             let leading = font_size * 1.2;
             let width = (r[2] - r[0]).max(1.0);
-            // Background markers are internal to Lapis.
-            let text = ann.text.trim_start_matches(['\u{200B}', '\u{200C}']);
+            // Background markers and inline formatting delimiters are internal to Lapis.
+            let text = textbox_plain_text(&ann.text);
+            let background = textbox_background(&ann.text);
 
             let wrapped = wrap_annotation_text(
-                text,
+                &text,
                 width,
                 font_size,
                 font_name,
@@ -1714,23 +1921,32 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
             let line_count = wrapped.split('\n').count();
             let required_height =
                 6.0 + font_size * 1.3 + leading * line_count.saturating_sub(1) as f32;
-            let height = (r[3] - r[1]).max(required_height);
+            // Fit the box to its wrapped text, as on screen; a taller stored box would show
+            // as an empty band (and as extra background) in other viewers.
+            let height = required_height;
 
-            // Preserve the top edge and leave room for every line.
+            // Preserve the top edge.
             r[1] = r[3] - height;
 
             let appearance = annotation_appearance_stream(
                 &wrapped,
                 width,
                 height,
+                font_size,
                 ann,
+                background,
             );
-            return vec![PdfAnnotationObject { object: Object::Dictionary(dictionary!{
+            let mut annot = dictionary!{
                 "Type"=>"Annot", "Subtype"=>"FreeText", "Rect"=>vec![r[0].into(),r[1].into(),r[2].into(),r[3].into()],
-                "Contents"=>pdf_text_object(text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
+                "Contents"=>pdf_text_object(&text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
                 "C"=>rgb, "F"=>4, "Q"=>0, "BS"=>dictionary!{"W"=>0}, "LapisExported"=>true,
                 "LapisSig"=>Object::string_literal(sig.into_bytes()), "LapisKind"=>Object::string_literal(kind_name.as_bytes().to_vec()),
-            }), appearance: Some(appearance) }];
+            };
+            if let Some((c, _)) = background {
+                // Interior color: viewers that redraw the box keep its background.
+                annot.set("IC", vec![Object::Real(c[0] as f32 / 255.0), Object::Real(c[1] as f32 / 255.0), Object::Real(c[2] as f32 / 255.0)]);
+            }
+            return vec![PdfAnnotationObject { object: Object::Dictionary(annot), appearance: Some(appearance) }];
         }
         AnnotationKind::Rect | AnnotationKind::Tape => {
             if ann.points.len()<2 { return Vec::new(); }
@@ -1740,7 +1956,11 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
         AnnotationKind::Circle => {
             if ann.points.len()<2 { return Vec::new(); }
             let a=ann.points[0]; let b=*ann.points.last().unwrap();
-            let cx=(a.0+b.0)*0.5; let cy=(a.1+b.1)*0.5; let rx=(b.0-a.0).abs()*0.5; let ry=(b.1-a.1).abs()*0.5;
+            let cx=(a.0+b.0)*0.5; let cy=(a.1+b.1)*0.5;
+            // On screen the circle is inscribed in the box (the smaller side), not an ellipse.
+            let (disp_w, disp_h) = displayed_page_size(page_rect, rotation);
+            let radius = ((b.0-a.0).abs()*disp_w).min((b.1-a.1).abs()*disp_h)*0.5;
+            let (rx, ry) = (radius/disp_w, radius/disp_h);
             let path=(0..=32).map(|i| { let t=i as f32*std::f32::consts::TAU/32.0; (cx+rx*t.cos(),cy+ry*t.sin()) }).collect();
             paths.push(path);
         }
@@ -3515,8 +3735,222 @@ mod tests {
         let mut local = HashMap::from([(1, vec![sample])]);
         import_external_annotations(&path, &mut local);
         assert_eq!(local[&1].len(), 1);
-        assert_eq!(local[&1][0].font_size, 26.0);
+        // 26 pt on a 792 pt page is stored relative to the 800-unit page height.
+        assert!((local[&1][0].font_size - 26.0 * 800.0 / 792.0).abs() < 0.01);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn sample_textbox(text: &str, points: Vec<(f32, f32)>) -> PageAnnotation {
+        PageAnnotation {
+            kind: AnnotationKind::TextBox, color: [10, 20, 30], points,
+            text: text.to_owned(), font_size: 20.0, bold: true, italic: true, stroke_width: 3.0,
+        }
+    }
+
+    #[test]
+    fn textbox_plain_text_matches_the_on_screen_rendering() {
+        assert_eq!(textbox_plain_text("\u{200B}- a __b__ ~~c~~"), "\u{2022} a b c");
+        assert_eq!(textbox_plain_text("- one\ntwo\n- three"), "\u{2022} one\ntwo\n\u{2022} three");
+        // A line that starts with a delimiter is not a bullet.
+        assert_eq!(textbox_plain_text("__- x__"), "- x");
+        assert_eq!(textbox_background("\u{200B}x").map(|b| b.0), Some([36, 38, 46]));
+        assert_eq!(textbox_background("\u{200C}x").map(|b| b.0), Some([245, 246, 250]));
+        assert!(textbox_background("plain").is_none());
+    }
+
+    #[test]
+    fn textbox_signature_ignores_height_and_lapis_markers() {
+        let local = sample_textbox("\u{200B}hi __x__", vec![(0.1, 0.1), (0.4, 0.2)]);
+        // What an export-then-import produces: grown box, cleaned text.
+        let imported = sample_textbox("hi x", vec![(0.1, 0.1), (0.4, 0.5)]);
+        assert_eq!(annotation_signature(&local), annotation_signature(&imported));
+        assert_ne!(annotation_signature_v1(&local), annotation_signature_v1(&imported));
+        let moved = sample_textbox("hi x", vec![(0.2, 0.1), (0.5, 0.5)]);
+        assert_ne!(annotation_signature(&local), annotation_signature(&moved));
+        let edited = sample_textbox("hi there", vec![(0.1, 0.1), (0.4, 0.2)]);
+        assert_ne!(annotation_signature(&local), annotation_signature(&edited));
+    }
+
+    #[test]
+    fn appearance_text_uses_winansi_for_typographic_characters() {
+        assert_eq!(
+            pdf_string_winansi("\u{2019} \u{201C} \u{201D} \u{2013} \u{2022} \u{E9} ("),
+            r"\222 \223 \224 \226 \225 \351 \("
+        );
+        assert_eq!(pdf_string_winansi("\u{4E2D}"), "?");
+    }
+
+    #[test]
+    fn pdf_text_without_a_bom_is_decoded_as_utf8_or_pdfdoc() {
+        assert_eq!(decode_pdf_text(b"caf\xE9"), "caf\u{E9}");
+        assert_eq!(decode_pdf_text("caf\u{E9}".as_bytes()), "caf\u{E9}");
+        assert_eq!(decode_pdf_text(&[0xFE, 0xFF, 0x00, 0x41]), "A");
+        assert_eq!(decode_pdf_text(&[0x80, 0x90]), "\u{2022}\u{2019}");
+        assert_eq!(decode_pdf_text(&[0xEF, 0xBB, 0xBF, b'o', b'k']), "ok");
+    }
+
+    #[test]
+    fn font_sizes_follow_the_page_height() {
+        assert!((model_to_pdf_font_size(16.0, 540.0) - 10.8).abs() < 0.001);
+        assert!((model_to_pdf_font_size(16.0, 800.0) - 16.0).abs() < 0.001);
+        assert!((pdf_to_model_font_size(10.8, 540.0) - 16.0).abs() < 0.001);
+        // Rotated pages use the displayed height (the PDF width).
+        assert_eq!(displayed_page_size([0.0, 0.0, 540.0, 960.0], 90), (960.0, 540.0));
+        assert_eq!(displayed_page_size([0.0, 0.0, 540.0, 960.0], 0), (540.0, 960.0));
+    }
+
+    #[test]
+    fn exported_textbox_scales_font_and_keeps_its_background() {
+        let ann = sample_textbox("\u{200B}Hello", vec![(0.1, 0.1), (0.5, 0.2)]);
+        let objects = annotation_to_pdf_objects(&ann, [0.0, 0.0, 960.0, 540.0], 0);
+        assert_eq!(objects.len(), 1);
+        let dict = objects[0].object.as_dict().unwrap();
+        let Ok(lopdf::Object::String(da, _)) = dict.get(b"DA") else { panic!("missing /DA") };
+        let da = String::from_utf8_lossy(da).into_owned();
+        let size: f32 = da.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!((size - 20.0 * 540.0 / 800.0).abs() < 0.001, "{da}");
+        assert!(dict.get(b"IC").is_ok());
+        let appearance = objects[0].appearance.as_ref().unwrap();
+        assert!(String::from_utf8_lossy(&appearance.content).contains("/GSbg gs"));
+        let Ok(lopdf::Object::String(contents, _)) = dict.get(b"Contents") else { panic!("missing /Contents") };
+        assert_eq!(decode_pdf_text(contents), "Hello");
+    }
+
+    #[test]
+    fn exported_textbox_is_fitted_to_its_text() {
+        let page = [0.0, 0.0, 960.0, 540.0];
+        let rect_of = |ann: &PageAnnotation| -> Vec<f32> {
+            let objects = annotation_to_pdf_objects(ann, page, 0);
+            let rect = objects[0].object.as_dict().unwrap().get(b"Rect").unwrap().as_array().unwrap();
+            rect.iter().map(|o| pdf_num(o).unwrap()).collect()
+        };
+        // A tall stored box still exports at the height of one line (10.8 pt text).
+        let tall = rect_of(&sample_textbox("Hi", vec![(0.1, 0.1), (0.5, 0.9)]));
+        assert!(((tall[3] - tall[1]) - (6.0 + 10.8 * 1.3)).abs() < 0.01);
+        // The top edge stays where it was placed.
+        assert!((tall[3] - 540.0 * 0.9).abs() < 0.01);
+        // Each extra line adds one leading (1.2 x the text size).
+        let three = rect_of(&sample_textbox("a\nb\nc", vec![(0.1, 0.1), (0.5, 0.9)]));
+        assert!(((three[3] - three[1]) - (6.0 + 10.8 * 1.3 + 10.8 * 1.2 * 2.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn exported_circle_is_inscribed_like_on_screen() {
+        let ann = PageAnnotation {
+            kind: AnnotationKind::Circle, color: [0, 0, 0],
+            points: vec![(0.1, 0.1), (0.5, 0.2)], text: String::new(),
+            font_size: 16.0, bold: false, italic: false, stroke_width: 2.5,
+        };
+        let objects = annotation_to_pdf_objects(&ann, [0.0, 0.0, 612.0, 792.0], 0);
+        let rect = objects[0].object.as_dict().unwrap().get(b"Rect").unwrap().as_array().unwrap();
+        let v: Vec<f32> = rect.iter().map(|o| pdf_num(o).unwrap()).collect();
+        // Box is 244.8 x 79.2 pt: the circle takes the smaller side, in both directions.
+        assert!(((v[2] - v[0]) - 79.2).abs() < 0.01 && ((v[3] - v[1]) - 79.2).abs() < 0.01);
+    }
+
+    fn export_to_file(path: &Path, annotations: &HashMap<u32, Vec<PageAnnotation>>) {
+        let base = fs::read(path).unwrap();
+        let mut incremental =
+            lopdf::IncrementalDocument::load_from(std::io::Cursor::new(base)).unwrap();
+        assert!(export_pdf_annotations(&mut incremental, annotations).unwrap());
+        let mut out = Vec::new();
+        incremental.save_to(&mut out).unwrap();
+        fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn exported_textbox_keeps_its_formatting_after_an_external_save() {
+        let root = std::env::temp_dir().join(format!("lapis_audit_tb_same_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tb.pdf");
+        valid_test_pdf(&path);
+        // A short box: the export grows it to fit the text, which used to look like an edit.
+        let ann = sample_textbox("\u{200B}- hello __world__", vec![(0.1, 0.1), (0.4, 0.11)]);
+        let annotations = HashMap::from([(1u32, vec![ann.clone()])]);
+        export_to_file(&path, &annotations);
+
+        let mut local = annotations.clone();
+        import_external_annotations(&path, &mut local);
+        assert_eq!(local[&1].len(), 1);
+        let kept = &local[&1][0];
+        assert_eq!(kept.text, ann.text);
+        assert!(kept.bold && kept.italic);
+        assert_eq!(kept.stroke_width, 3.0);
+        assert!((kept.font_size - 20.0).abs() < 0.01);
+        assert_eq!(kept.points, ann.points);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn externally_edited_textbox_text_keeps_background_and_formatting() {
+        let root = std::env::temp_dir().join(format!("lapis_audit_tb_edit_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tb.pdf");
+        valid_test_pdf(&path);
+        let ann = sample_textbox("\u{200B}original", vec![(0.1, 0.1), (0.4, 0.2)]);
+        let annotations = HashMap::from([(1u32, vec![ann])]);
+        export_to_file(&path, &annotations);
+
+        let mut doc = lopdf::Document::load(&path).unwrap();
+        for object in doc.objects.values_mut() {
+            if let lopdf::Object::Dictionary(d) = object {
+                let is_free_text = d.get(b"Subtype").ok().and_then(|o| o.as_name().ok())
+                    == Some(b"FreeText".as_slice());
+                if is_free_text { d.set("Contents", pdf_text_object("changed")); }
+            }
+        }
+        doc.save(&path).unwrap();
+
+        let mut local = annotations.clone();
+        import_external_annotations(&path, &mut local);
+        assert_eq!(local[&1].len(), 1);
+        let edited = &local[&1][0];
+        assert_eq!(edited.text, "\u{200B}changed");
+        assert!(edited.bold && edited.italic);
+        assert_eq!(edited.stroke_width, 3.0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn page_changes_remap_every_per_page_map() {
+        let mut data = DocData::default();
+        for page in 1..=3u32 {
+            data.notes.insert(page, format!("note {page}"));
+        }
+        data.annotations.insert(2, vec![sample_textbox("x", vec![(0.1, 0.1), (0.2, 0.2)])]);
+        data.blank_pages.insert(3);
+        // Delete page 2.
+        remap_doc_data_pages(&mut data, &|page| match page.cmp(&2) {
+            std::cmp::Ordering::Less => Some(page),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(page - 1),
+        });
+        assert_eq!(data.notes.len(), 2);
+        assert_eq!(data.notes[&2], "note 3");
+        assert!(data.annotations.is_empty());
+        assert!(data.blank_pages.contains(&2) && data.blank_pages.len() == 1);
+    }
+
+    #[test]
+    fn embedded_payload_is_rewritten_for_a_page_change() {
+        let mut data = DocData::default();
+        data.notes.insert(1, "first".to_owned());
+        data.notes.insert(2, "second".to_owned());
+        let mut payload = NOTES_START_TAG.to_vec();
+        serde_json::to_writer(&mut payload, &data).unwrap();
+        payload.extend_from_slice(NOTES_END_TAG);
+
+        let updated = update_embedded_notes(&payload, |d| {
+            shift_doc_data_on_insert(&mut d.notes, &mut d.annotations, &mut d.blank_pages, &mut d.sketches, 2);
+        });
+        let block = find_embedded_block(&updated).unwrap();
+        let back = parse_embedded_data(&updated[block.body_start..block.body_end]).unwrap();
+        assert_eq!(back.notes[&1], "first");
+        assert_eq!(back.notes[&3], "second");
+        assert!(!back.notes.contains_key(&2));
+        assert!(back.blank_pages.contains(&2));
+        // A payload that cannot be parsed is returned untouched.
+        assert_eq!(update_embedded_notes(b"garbage", |_| {}), b"garbage".to_vec());
     }
 
     #[test]

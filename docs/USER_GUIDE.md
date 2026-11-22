@@ -228,6 +228,8 @@ Place text annotations directly on a PDF page.
 
 This is useful for short explanations, labels, and reminders that should remain visually attached to the slide.
 
+In other PDF viewers a text box is fitted to its text and keeps its background, color and size relative to the page. Underline and strikethrough markers are not shown there and a leading `- ` appears as a bullet. If you edit only its text in another viewer, the box keeps its background, bold and italic when you reopen the PDF in Lapis.
+
 ### Eraser
 
 Remove annotations from the page.

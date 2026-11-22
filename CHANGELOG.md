@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Textboxes after an external edit:** Saving a PDF in another viewer no longer resets the background, bold and italic of Lapis textboxes. The textbox signature now ignores the box height (grown on export) and the Lapis-only markers; older signatures are still recognized.
+- **Textbox size in other viewers:** Text boxes are exported and imported relative to the page height (800-unit convention, like the slides export), so they look the same in Lapis and in other viewers on 16:9 slides and other non-800 pt pages. Older files keep their size.
+- **Textbox height in other viewers:** The exported box is fitted to its text instead of keeping a taller stored height, so no empty band (or extra background) appears below the text.
+- **Textbox appearance:** The background fill (dark or light) is exported, so light text stays readable elsewhere; typographic characters (’ “ ” – • …) no longer turn into `?`; `__`/`~~` delimiters are hidden and `- ` shows as a bullet, as in Lapis.
+- **Imported annotation text:** Text without a byte-order mark is decoded as UTF-8 or PDFDocEncoding, so accented characters from other editors are no longer corrupted.
+- **Circle export:** A circle is exported inscribed in its box, as drawn in Lapis, instead of as a stretched ellipse.
+- **Page edits:** Deleting, moving or inserting a page now rewrites the embedded Lapis data with the new page numbers immediately, not only at the next save.
 - **Eraser cursor:** The circle now scales with the page zoom and sits halfway between the old fixed size and the real erase radius, instead of being much smaller than the area it erases.
 - **Sidebar tab sync:** Switching between Thumbnails and Outline/Bookmarks now scrolls the new tab to the current page, even if the page changed while the other tab was open.
 - **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
