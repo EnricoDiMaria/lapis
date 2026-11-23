@@ -338,7 +338,7 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
             &mut cfg.toggle_continuous_single,
         ),
         ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
-        ("Show / hide topbar", &mut cfg.toggle_topbar),
+        ("Toggle topbar auto-hide", &mut cfg.toggle_topbar),
     ]
 }
 

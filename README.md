@@ -379,7 +379,7 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `C` | Toggle Continuous / Single Page when not typing |
 | `Alt + S` | Open / close the Sketch tab of the notes panel |
 | `F11` | Toggle fullscreen (also outside slideshow) |
-| `Alt + T` | Show / hide the topbar (see auto-hide) |
+| `Alt + T` | Turn topbar auto-hide on / off |
 | `PageUp` | Previous page |
 | `PageDown` | Next page |
 | `Left / Right` | Previous / Next page when not typing |

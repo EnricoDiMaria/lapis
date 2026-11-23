@@ -1391,8 +1391,6 @@ struct Lapis {
     prev_view_mode: ViewMode,
     /// View mode last written to `state.json`; a difference triggers a save.
     saved_view_mode: ViewMode,
-    /// Auto-hide: the shortcut keeps the topbar docked and visible.
-    topbar_pinned: bool,
     /// Auto-hide: time until which a revealed topbar stays (hover grace period).
     topbar_hold_until: f64,
     /// Height of the revealed overlay topbar; 0 while hidden or docked.
@@ -1622,7 +1620,6 @@ impl Lapis {
             view_mode: ViewMode::SinglePage,
             prev_view_mode: ViewMode::SinglePage,
             saved_view_mode: ViewMode::SinglePage,
-            topbar_pinned: false,
             topbar_hold_until: 0.0,
             topbar_overlay_h: 0.0,
             topbar_popup_open: false,
@@ -1857,7 +1854,7 @@ impl Lapis {
     /// it down) while the pointer is at the top edge, or over the bar, a menu of the bar is
     /// open or one of its fields is edited; it hides 0.4 s later. A pinned bar stays docked.
     fn topbar_slot(&mut self, ui: &egui::Ui) -> TopbarSlot {
-        if !self.app_state.settings.topbar_auto_hide || self.topbar_pinned {
+        if !self.app_state.settings.topbar_auto_hide {
             return TopbarSlot::Docked;
         }
         let ctx = ui.ctx();
@@ -1891,17 +1888,14 @@ impl Lapis {
         TopbarSlot::Overlay
     }
 
-    /// Shortcut: the first press hides a docked topbar (turning auto-hide on); later presses
-    /// pin it open (docked) or release it back to hover-to-reveal.
+    /// Shortcut: turns topbar auto-hide on or off (saved, like the setting).
     fn toggle_topbar(&mut self) {
-        if !self.app_state.settings.topbar_auto_hide {
-            self.app_state.settings.topbar_auto_hide = true;
-            self.topbar_pinned = false;
-            self.app_state.save();
-        } else {
-            self.topbar_pinned = !self.topbar_pinned;
-        }
+        let settings = &mut self.app_state.settings;
+        settings.topbar_auto_hide = !settings.topbar_auto_hide;
+        self.app_state.save();
+        // Start from a clean state: hidden when auto-hide was just turned on.
         self.topbar_hold_until = 0.0;
+        self.topbar_overlay_h = 0.0;
     }
 
     /// Wheel / trackpad scroll multiplier shared by every page view.
@@ -5908,11 +5902,10 @@ impl Lapis {
                                                                 ui,
                                                                 &mut self.app_state.settings.topbar_auto_hide,
                                                                 "Auto-hide topbar",
-                                                                "Hover the top edge of the window or press Alt+T to show it.",
+                                                                "Hover the top edge of the window to show it. Alt+T turns auto-hide on or off.",
                                                             )
                                                             .changed()
                                                             {
-                                                                self.topbar_pinned = false;
                                                                 settings_dirty = true;
                                                             }
                                                         });
@@ -7401,7 +7394,7 @@ let state_path = crate::state::AppState::config_path();
                 "󰠱  Toggle Sketch (page scratchpad) [Alt+S]",
                 "View",
             ),
-            ("toggle_topbar", "󰁝  Show / Hide Topbar [Alt+T]", "View"),
+            ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide [Alt+T]", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
                 "insert_blank",
