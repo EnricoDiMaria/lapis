@@ -732,7 +732,7 @@ pub struct AppSettings {
     /// Show the per-page Sketch tab in the notes panel (and include sketches in exports).
     pub sketch_enabled: bool,
     /// Density of the whole interface (`compact_topbar` was the former boolean key).
-    #[serde(alias = "compact_topbar")]
+    #[serde(alias = "compact_topbar", alias = "topbar_density")]
     pub ui_density: UiDensity,
     /// Hide the topbar; reveal it by hovering the top edge or with the shortcut.
     pub topbar_auto_hide: bool,

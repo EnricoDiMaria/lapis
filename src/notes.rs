@@ -3824,14 +3824,16 @@ mod tests {
             let rect = objects[0].object.as_dict().unwrap().get(b"Rect").unwrap().as_array().unwrap();
             rect.iter().map(|o| pdf_num(o).unwrap()).collect()
         };
-        // A tall stored box still exports at the height of one line (10.8 pt text).
+        // The sample box uses size 20, which is 13.5 pt on a 540 pt page.
+        let pt = 20.0 * 540.0 / 800.0;
+        // A tall stored box still exports at the height of one line.
         let tall = rect_of(&sample_textbox("Hi", vec![(0.1, 0.1), (0.5, 0.9)]));
-        assert!(((tall[3] - tall[1]) - (6.0 + 10.8 * 1.3)).abs() < 0.01);
+        assert!(((tall[3] - tall[1]) - (6.0 + pt * 1.3)).abs() < 0.01);
         // The top edge stays where it was placed.
         assert!((tall[3] - 540.0 * 0.9).abs() < 0.01);
         // Each extra line adds one leading (1.2 x the text size).
         let three = rect_of(&sample_textbox("a\nb\nc", vec![(0.1, 0.1), (0.5, 0.9)]));
-        assert!(((three[3] - three[1]) - (6.0 + 10.8 * 1.3 + 10.8 * 1.2 * 2.0)).abs() < 0.01);
+        assert!(((three[3] - three[1]) - (6.0 + pt * 1.3 + pt * 1.2 * 2.0)).abs() < 0.01);
     }
 
     #[test]
