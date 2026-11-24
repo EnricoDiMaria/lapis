@@ -682,7 +682,7 @@ Use the palette when you want to trigger an action without searching through the
 
 Open Settings to configure the application.
 
-Open **Advanced Settings** to configure the application. It has seven sections, listed in the left column. Every section is laid out the same way: a title with a one-line description, then titled cards that group related options, and a short explanation under each option.
+Open **Advanced Settings** to configure the application. It has eight sections, listed in the left column. Every section is laid out the same way: a title with a one-line description, then titled cards that group related options, and a short explanation under each option.
 
 - **Appearance:** theme, interface density and text.
 - **Tools & Study:** annotation toolbar, occlusion tape and flashcards.
@@ -691,6 +691,7 @@ Open **Advanced Settings** to configure the application. It has seven sections, 
 - **Export & PDF:** saving the document and the options of exported PDFs.
 - **Storage & Data:** stored documents, PDF history, caches and app state.
 - **Dictionaries:** spellcheck, installed dictionaries and custom words.
+- **Credits:** application version, license, project links and open-source acknowledgements.
 
 ### Tools & Study
 
@@ -769,6 +770,10 @@ Tooltips and radial-menu labels show the current shortcut rather than the defaul
 ### Dictionaries
 
 Turn spellcheck on or off, enable or add dictionaries (**Installed dictionaries**), and manage the words you added (**Custom words**).
+
+### Credits
+
+The Credits button is pinned to the bottom of the left sidebar. Its page displays the installed Lapis version, project license, copyright, links to the source code, releases, issue tracker and User Guide, and acknowledgements of selected dependencies.
 
 ---
 

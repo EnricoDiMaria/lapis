@@ -1406,6 +1406,7 @@ pub enum SettingsTab {
     SystemAndData,
     Storage,
     Dictionaries,
+    Credits,
 }
 
 #[derive(Clone, Copy)]
@@ -5730,20 +5731,21 @@ impl Lapis {
             return;
         }
 
-        const MODAL_W: f32 = 690.0;
-        const MODAL_H: f32 = 460.0;
-        const SIDEBAR_W: f32 = 175.0;
-        const PANE_W: f32 = 475.0;
-        const BODY_H: f32 = 395.0;
+        let screen = ui.ctx().content_rect();
+        let modal_w = (screen.width() - 56.0).clamp(1.0, 1000.0);
+        let modal_h = (screen.height() - 56.0).clamp(1.0, 650.0);
+        let sidebar_w = (modal_w * 0.25).clamp(100.0, 185.0);
+        let pane_w = (modal_w - sidebar_w - 64.0).max(1.0);
+        let body_h = (modal_h - 65.0).max(1.0);
 
         let rebinding_at_start = self.rebinding_action.is_some();
         let response = egui::Modal::new(ui.make_persistent_id("settings_modal_window"))
             .frame(self.modal_glass_frame(242))
             .backdrop_color(egui::Color32::from_black_alpha(115))
             .show(ui.ctx(), |ui| {
-                    // Dimensione davvero fissa: min == max
-                    ui.set_min_size(egui::vec2(MODAL_W, MODAL_H));
-                    ui.set_max_size(egui::vec2(MODAL_W, MODAL_H));
+                    // Keep the dialog within the available window.
+                    ui.set_min_size(egui::vec2(modal_w, modal_h));
+                    ui.set_max_size(egui::vec2(modal_w, modal_h));
 
                     // Force a vertical layout; the parent may be horizontal.
                     ui.vertical(|ui| {
@@ -5771,38 +5773,58 @@ impl Lapis {
                         ui.horizontal_top(|ui| {
                             // 1. Left column: category navigation.
                             egui::Frame::NONE
-                                .fill(egui::Color32::from_black_alpha(45))
-                                .corner_radius(egui::CornerRadius::same(8))
                                 .inner_margin(egui::Margin::same(8))
                                 .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(SIDEBAR_W, BODY_H));
-                                    ui.set_max_size(egui::vec2(SIDEBAR_W, BODY_H));
+                                    ui.set_min_size(egui::vec2(sidebar_w, body_h));
+                                    ui.set_max_size(egui::vec2(sidebar_w, body_h));
 
-                                    // Frame::show inherits the parent layout.
                                     ui.vertical(|ui| {
-                                        let tabs = [
-                                            (SettingsTab::AppearanceAndTheme, "󰔎  Appearance"),
-                                            (SettingsTab::StudyAndTools, "󰏫  Tools & Study"),
-                                            (SettingsTab::Workspace, "󰕮  Workspace"),
-                                            (SettingsTab::Shortcuts, "󰌌  Keybindings"),
-                                            (SettingsTab::SystemAndData, "󰚥  Export & PDF"),
-                                            (SettingsTab::Storage, "󰋊  Storage & Data"),
-                                            (SettingsTab::Dictionaries, "󰗊  Dictionaries"),
-                                        ];
+                                        let idle = &mut ui.visuals_mut().widgets.inactive;
+                                        idle.bg_fill = egui::Color32::TRANSPARENT;
+                                        idle.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                        idle.bg_stroke = egui::Stroke::NONE;
 
-                                        for (tab, label) in tabs {
-                                            let selected = self.settings_tab == tab;
-                                            let btn = crate::theme::selected_button(
-                                                egui::RichText::new(label).size(13.0),
-                                                selected,
-                                                ui.visuals(),
-                                            )
-                                            .min_size(egui::vec2(SIDEBAR_W - 16.0, 32.0));
+                                        let footer_h = 32.0;
+                                        let gap = ui.spacing().item_spacing.y;
+                                        let nav_h = (body_h - footer_h - gap).max(0.0);
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("settings_navigation")
+                                            .max_height(nav_h)
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                let tabs = [
+                                                    (SettingsTab::AppearanceAndTheme, "󰔎  Appearance"),
+                                                    (SettingsTab::StudyAndTools, "󰏫  Tools & Study"),
+                                                    (SettingsTab::Workspace, "󰕮  Workspace"),
+                                                    (SettingsTab::Shortcuts, "󰌌  Keybindings"),
+                                                    (SettingsTab::SystemAndData, "󰚥  Export & PDF"),
+                                                    (SettingsTab::Storage, "󰋊  Storage & Data"),
+                                                    (SettingsTab::Dictionaries, "󰗊  Dictionaries"),
+                                                ];
 
-                                            if ui.add(btn).clicked() {
-                                                self.settings_tab = tab;
-                                            }
-                                            ui.add_space(4.0);
+                                                for (tab, label) in tabs {
+                                                    let btn = crate::theme::selected_button(
+                                                        egui::RichText::new(label).size(13.0),
+                                                        self.settings_tab == tab,
+                                                        ui.visuals(),
+                                                    )
+                                                    .min_size(egui::vec2(sidebar_w - 16.0, 32.0));
+
+                                                    if ui.add(btn).clicked() {
+                                                        self.settings_tab = tab;
+                                                    }
+                                                    ui.add_space(4.0);
+                                                }
+                                            });
+
+                                        let btn = crate::theme::selected_button(
+                                            egui::RichText::new("󰋼  Credits").size(13.0),
+                                            self.settings_tab == SettingsTab::Credits,
+                                            ui.visuals(),
+                                        )
+                                        .min_size(egui::vec2(sidebar_w - 16.0, footer_h));
+                                        if ui.add(btn).clicked() {
+                                            self.settings_tab = SettingsTab::Credits;
                                         }
                                     });
                                 });
@@ -5813,17 +5835,17 @@ impl Lapis {
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(6, 2))
                                 .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(PANE_W, BODY_H));
-                                    ui.set_max_size(egui::vec2(PANE_W, BODY_H));
+                                    ui.set_min_size(egui::vec2(pane_w, body_h));
+                                    ui.set_max_size(egui::vec2(pane_w, body_h));
 
                                     egui::ScrollArea::vertical()
                                         .id_salt("settings_right_pane_scroll")
-                                        .max_height(BODY_H - 5.0)
+                                        .max_height(body_h - 5.0)
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             // Use an explicit vertical layout.
                                             ui.vertical(|ui| {
-                                                ui.set_max_width(PANE_W - 24.0);
+                                                ui.set_max_width(pane_w - 24.0);
 
                                                 let mut settings_dirty = false;
 
@@ -6348,14 +6370,23 @@ impl Lapis {
                                                                         .find(|(l, b)| *l != label && binding.enabled && b.enabled && b.conflicts_with(binding))
                                                                         .map(|(l, _)| *l);
 
-                                                                    ui.vertical(|ui| {
+                                                                    let text = if is_rebinding {
+                                                                        "󰌌  Press keys…  (Esc to cancel)".to_string()
+                                                                    } else {
+                                                                        binding.format_label()
+                                                                    };
+                                                                    let label_w = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                    let key_w = ui.painter().layout_no_wrap(text.clone(), egui::TextStyle::Monospace.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                    let control_w = (key_w + 70.0).max(220.0);
+                                                                    let inline = ui.available_width() >= label_w + control_w + 48.0;
+                                                                    let mut row = |ui: &mut egui::Ui| {
                                                                         if ui.checkbox(&mut binding.enabled, label).on_hover_text("Enable this shortcut").changed() {
                                                                             settings_dirty = true;
                                                                             if !binding.enabled && is_rebinding {
                                                                                 self.rebinding_action = None;
                                                                             }
                                                                         }
-                                                                        ui.horizontal(|ui| {
+                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                             if let Some(def) = &default {
                                                                                 if ui.add_enabled(*binding != *def, egui::Button::new("󰑐").small())
                                                                                     .on_hover_text("Reset to default and enable").clicked()
@@ -6365,20 +6396,13 @@ impl Lapis {
                                                                                     self.rebinding_action = None;
                                                                                 }
                                                                             }
-
-                                                                            let text = if is_rebinding {
-                                                                                "󰌌  Press keys…  (Esc to cancel)".to_string()
-                                                                            } else {
-                                                                                binding.format_label()
-                                                                            };
                                                                             let btn = crate::theme::selected_button(
-                                                                                egui::RichText::new(text).monospace(),
+                                                                                egui::RichText::new(&text).monospace(),
                                                                                 is_rebinding,
                                                                                 ui.visuals(),
                                                                             )
-                                                                                .min_size(egui::vec2(ui.available_width().max(0.0), 24.0))
+                                                                                .min_size(egui::vec2((control_w - 32.0).min(ui.available_width()).max(0.0), 24.0))
                                                                                 .wrap();
-
                                                                             if ui.add(btn).clicked() {
                                                                                 ui.data_mut(|d| d.remove::<PendingChord>(egui::Id::new(PENDING_ID)));
                                                                                 self.rebinding_action = if is_rebinding {
@@ -6388,7 +6412,12 @@ impl Lapis {
                                                                                 };
                                                                             }
                                                                         });
-                                                                    });
+                                                                    };
+                                                                    if inline {
+                                                                        ui.horizontal(&mut row);
+                                                                    } else {
+                                                                        ui.vertical(&mut row);
+                                                                    }
 
                                                                     if let Some(other) = conflict {
                                                                         ui.label(
@@ -6419,8 +6448,19 @@ impl Lapis {
                                                                 ("Zoom in / out / reset", "Ctrl + Plus / Minus / 0"),
                                                                 ("Exit slideshow", "Esc"),
                                                             ] {
-                                                                ui.label(name);
-                                                                ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                let name_w = ui.painter().layout_no_wrap(name.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                let keys_w = ui.painter().layout_no_wrap(keys.to_string(), egui::TextStyle::Monospace.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                if ui.available_width() >= name_w + keys_w + 24.0 {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(name);
+                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                            ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                        });
+                                                                    });
+                                                                } else {
+                                                                    ui.label(name);
+                                                                    ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                }
                                                                 ui.add_space(3.0);
                                                             }
                                                         });
@@ -6961,6 +7001,40 @@ let state_path = crate::state::AppState::config_path();
                                                         }
                                                     
                                                         ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
+                                                    }
+                                                    SettingsTab::Credits => {
+                                                        settings_page_header(ui, "Credits", "About Lapis, project links and acknowledgements.");
+                                                        settings_section(ui, "Lapis", "Advanced PDF Study & Lecture Workspace", |ui| {
+                                                            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                                                            ui.label(format!("License: {}", env!("CARGO_PKG_LICENSE")));
+                                                            ui.weak("Copyright © 2026 Enrico Di Maria");
+                                                        });
+                                                        settings_section(ui, "Project links", "", |ui| {
+                                                            ui.hyperlink_to("Source code on GitHub", "https://github.com/EnricoDiMaria/lapis");
+                                                            ui.hyperlink_to("Releases", "https://github.com/EnricoDiMaria/lapis/releases");
+                                                            ui.hyperlink_to("Report an issue", "https://github.com/EnricoDiMaria/lapis/issues");
+                                                            ui.hyperlink_to("User Guide", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/docs/USER_GUIDE.md");
+                                                            ui.hyperlink_to("Full license text", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/LICENSE");
+                                                        });
+                                                        settings_section(ui, "Built with", "Selected open-source technologies used by Lapis.", |ui| {
+                                                            for (name, url, description) in [
+                                                                ("Rust", "https://www.rust-lang.org/", "Programming language"),
+                                                                ("egui / eframe", "https://github.com/emilk/egui", "Application interface"),
+                                                                ("MuPDF", "https://mupdf.com/", "PDF rendering"),
+                                                                ("lopdf", "https://crates.io/crates/lopdf", "PDF editing"),
+                                                                ("egui_commonmark", "https://crates.io/crates/egui_commonmark", "Markdown preview"),
+                                                                ("CPAL / Rodio", "https://github.com/RustAudio", "Audio capture and playback"),
+                                                                ("parakeet-rs", "https://crates.io/crates/parakeet-rs", "Offline transcription"),
+                                                                ("spellbook", "https://crates.io/crates/spellbook", "Spellchecking"),
+                                                            ] {
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    ui.hyperlink_to(name, url);
+                                                                    ui.weak(description);
+                                                                });
+                                                            }
+                                                            ui.hyperlink_to("Full dependency manifest", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/Cargo.toml");
+                                                            ui.weak("Third-party components retain their respective licenses.");
+                                                        });
                                                     }
                                                     SettingsTab::Dictionaries => {
                                                         let confirm_id = ui.make_persistent_id("dict_confirm");

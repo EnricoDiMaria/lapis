@@ -456,4 +456,4 @@ The application does not require a cloud account to use its core PDF annotation 
 
 Lapis is distributed under the **MIT License**.
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details. The **Advanced Settings → Credits** page displays the installed version, license, project links and selected dependency acknowledgements.

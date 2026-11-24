@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Credits:** A dedicated page pinned to the bottom of the Advanced Settings sidebar shows the application version, license, project links and open-source acknowledgements.
 - **Annotation cursors:** Tool-specific PDF cursors with a thin pen ring, chisel-tip highlighter cursor and stable, unframed tool glyphs; the topbar tools button shows the active tool.
 - **PDF and workspace shortcuts:** Configurable single-key shortcuts for annotation tools, Fit Page (`F`), Fit Width (`W`), night mode (`M`), the annotation toolbar (`D`), notes (`N`), Edit / Preview (`X`) and outline (`G`). `Alt+F` still fits both the PDF and notes panel. Each configurable shortcut can be disabled without losing its binding. Keybindings are grouped by function, with bulk enable/disable controls and current shortcut hints in toolbars, the radial menu and the Command Palette. Former default panel bindings migrate to the new layout without replacing custom bindings.
 
@@ -32,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Radial annotation menu:** Reduced shadow spread and opacity, refined translucent surfaces, subtle accent-colored ring borders, tool selection, color swatches and hover labels.
 
 - **Consistent page scrolling:** The mouse wheel and middle-button drag now move the page the same way in every view mode. Before, Continuous Scroll used a faster wheel and drag than Single Page, and the two-page book view and the Split-View pane ignored middle-button dragging. Both speeds are adjustable under **Settings → Workspace → Page scrolling** (defaults: wheel 2.2×, drag 4.0×).
-- **Advanced Settings layout:** Every page now uses the same structure: a title with a description, titled cards for related options, and a short explanation under each option. Options are regrouped into seven sections (Appearance, Tools & Study, Workspace, Keybindings, Export & PDF, Storage & Data, Dictionaries); no option was removed. The Study & Canvas options are split into Tools & Study and Workspace, choices such as toolbar position, density and page style use the same button style, and the audio option label now reads "recording" instead of "registation".
+- **Advanced Settings layout:** The navigation sidebar blends into the dialog background, with frameless inactive categories, including the bottom-pinned Credits button. Every page now uses the same structure: a title with a description, titled cards for related options, and a short explanation under each option. Options are regrouped into seven sections (Appearance, Tools & Study, Workspace, Keybindings, Export & PDF, Storage & Data, Dictionaries); no option was removed. The Study & Canvas options are split into Tools & Study and Workspace, choices such as toolbar position, density and page style use the same button style, and the audio option label now reads "recording" instead of "registation".
 - **Textbox controls:** Compact translucent toolbar with glass formatting and color popups, a fixed-width Edit/Done action at the right edge, reliable formatting-control focus, and consistent text positioning while editing and viewing. An icon toolbar action copies the whole textbox.
 
 - **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
@@ -46,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Drawing responsiveness:** Avoid duplicate local backup writes when finishing an annotation stroke.
 
-- **Keybindings layout:** Prevent overlapping action labels and key combinations in both configurable and fixed shortcuts, including narrow settings windows.
+- **Keybindings layout:** Enlarge Advanced Settings to fit the window and display configurable and fixed shortcuts on one line when space permits, falling back to stacked rows to prevent overlap.
 
 - **Auto-hide toolbar layout:** When both horizontal bars share an edge, the revealed topbar stays outermost and the annotation toolbar docks directly inward without leaving a gap or covering the PDF canvas, including the last page in Continuous Scroll. Notifications account for both bars at the bottom. Notes and Flashcards notification dots retain their corner overlap without clipping in auto-hide mode.
 
