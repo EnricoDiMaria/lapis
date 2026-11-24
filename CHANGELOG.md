@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Notes panel resizing:** Reuse cached PDF textures during a resize and defer automatic Continuous Scroll page changes until release, reducing rendering work and session writes while keeping the layout responsive.
+
 - **Slideshow:** Keep the notes panel width stable when interacting with code blocks, and refresh PDF rendering at the fullscreen viewport resolution.
 - **Markdown preview:** Preserve shell arguments such as `$@` and dollar signs inside inline and fenced code instead of interpreting them as LaTeX.
 

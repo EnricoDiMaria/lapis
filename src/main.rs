@@ -1408,6 +1408,7 @@ struct Lapis {
     /// Last size seen per panel, to detect resizes by the user.
     panel_seen: [Option<f32>; 3],
     panel_sizes_dirty: bool,
+    notes_panel_resizing: bool,
     fit_notes_layout_pending: bool,
     continuous_scroll_to_page: Option<u32>,
     /// Scroll offset to keep when switching between Single and Continuous:
@@ -1634,6 +1635,7 @@ impl Lapis {
             panel_apply: [true; 3],
             panel_seen: [None; 3],
             panel_sizes_dirty: false,
+            notes_panel_resizing: false,
             fit_notes_layout_pending: false,
             continuous_scroll_to_page: None,
             mode_switch_offset: None,
@@ -1852,6 +1854,11 @@ impl Lapis {
         if pointer_active && self.panel_seen[idx].is_some_and(|seen| (seen - size).abs() > 0.5) {
             self.panel_sizes.set(slot, size);
             self.panel_sizes_dirty = true;
+            if ui.input(|inp| inp.pointer.any_down()) {
+                self.notes_panel_resizing = true;
+            } else {
+                ui.ctx().request_repaint();
+            }
         }
         self.panel_seen[idx] = Some(size);
     }
@@ -2208,7 +2215,8 @@ impl Lapis {
     /// Called once per frame. Sends a request only when the *desired* state changed
     /// (page set or resolution), never every frame.
     fn pump_render_requests(&mut self, ctx: &egui::Context) {
-        if !self.has_pdf() {
+        // Keep scaling cached textures until the panel drag ends.
+        if !self.has_pdf() || self.notes_panel_resizing {
             return;
         }
         let scale = self.needed_scale(ctx.pixels_per_point());
@@ -3443,6 +3451,7 @@ impl Lapis {
         self.panel_apply = [true; 3];
         self.panel_seen = [None; 3];
         self.panel_sizes_dirty = false;
+        self.notes_panel_resizing = false;
         self.fit_notes_layout_pending = false;
 
         if self.pdf_path != path {
@@ -14852,6 +14861,10 @@ impl eframe::App for Lapis {
 
         // Persist view mode and panel sizes once the pointer is released.
         let pointer_down = ui.input(|i| i.pointer.any_down());
+        if !pointer_down && self.notes_panel_resizing {
+            self.notes_panel_resizing = false;
+            ui.ctx().request_repaint();
+        }
         if self.has_pdf()
             && !pointer_down
             && (self.panel_sizes_dirty || self.reading_view_mode() != self.saved_view_mode)
@@ -18290,6 +18303,7 @@ impl eframe::App for Lapis {
             .is_none_or(|d| (actual_y - d.min(real_max)).abs() < 40.0);
         if content_ok && at_target {
             self.reanchor_left = 0;
+            ui.ctx().request_repaint();
         } else {
             self.reanchor_left -= 1;
             ui.ctx().request_repaint();
@@ -18323,7 +18337,8 @@ impl eframe::App for Lapis {
 
     // 3. At the bottom, select the last page;
     // otherwise select the page nearest the center.
-    if !reanchoring
+    if !self.notes_panel_resizing
+        && !reanchoring
         && !just_jumped
         && self.jump_lock_y.is_none()
         && self.continuous_scroll_to_page.is_none()
