@@ -388,6 +388,7 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `Ctrl + Plus` | Zoom in |
 | `Ctrl + Minus` | Zoom out |
 | `Ctrl + 0` | Reset zoom to 100% |
+| `Alt + F` | Fit PDF and right notes panel to the available workspace |
 
 The configurable shortcut system also provides global previous/next slide navigation and other application actions.
 

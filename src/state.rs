@@ -316,7 +316,7 @@ impl ShortcutBinding {
     }
 }
 
-pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 18] {
+pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 19] {
     [
         ("Save notes", &mut cfg.save_notes),
         ("Toggle notes panel", &mut cfg.toggle_notes),
@@ -339,6 +339,7 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
         ),
         ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
         ("Toggle topbar auto-hide", &mut cfg.toggle_topbar),
+        ("Fit PDF and notes layout", &mut cfg.fit_page),
     ]
 }
 
@@ -454,6 +455,7 @@ pub struct ShortcutsConfig {
     pub toggle_continuous_single: ShortcutBinding,
     pub toggle_sketch: ShortcutBinding,
     pub toggle_topbar: ShortcutBinding,
+    pub fit_page: ShortcutBinding,
 }
 
 impl Default for ShortcutsConfig {
@@ -477,6 +479,7 @@ impl Default for ShortcutsConfig {
             toggle_continuous_single: ShortcutBinding::new(false, false, false, "C"),
             toggle_sketch: ShortcutBinding::new(false, true, false, "S"),
             toggle_topbar: ShortcutBinding::new(false, true, false, "T"),
+            fit_page: ShortcutBinding::new(false, true, false, "F"),
         }
     }
 }

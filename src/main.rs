@@ -1408,6 +1408,7 @@ struct Lapis {
     /// Last size seen per panel, to detect resizes by the user.
     panel_seen: [Option<f32>; 3],
     panel_sizes_dirty: bool,
+    fit_notes_layout_pending: bool,
     continuous_scroll_to_page: Option<u32>,
     /// Scroll offset to keep when switching between Single and Continuous:
     /// x, and y relative to the top of the current page.
@@ -1633,6 +1634,7 @@ impl Lapis {
             panel_apply: [true; 3],
             panel_seen: [None; 3],
             panel_sizes_dirty: false,
+            fit_notes_layout_pending: false,
             continuous_scroll_to_page: None,
             mode_switch_offset: None,
             continuous_scroll_delta: 0.0,
@@ -1685,7 +1687,7 @@ impl Lapis {
             slide_rects: Vec::new(),
             canvas_rect: egui::Rect::NOTHING,
             show_settings: false,
-            settings_tab: SettingsTab::StudyAndTools,
+            settings_tab: SettingsTab::AppearanceAndTheme,
             rebinding_action: None,
             show_search: false,
             focus_search_input: false,
@@ -1802,6 +1804,26 @@ impl Lapis {
         match self.view_mode {
             ViewMode::Slideshow | ViewMode::SlideshowWithNotes => self.prev_view_mode,
             mode => mode,
+        }
+    }
+
+    fn fitted_notes_width(
+        width: f32, height: f32, aspect: f32, count: usize, min: f32, max: f32,
+    ) -> f32 {
+        let gap = if count == 2 { 2.0 } else { 0.0 };
+        let pdf_width = (height - 2.0).max(1.0) * aspect * count as f32 + gap + 2.0;
+        (width - pdf_width).clamp(min, max)
+    }
+
+    fn can_fit_notes_layout(&self) -> bool {
+        self.has_pdf() && self.show_notes && !self.split_view_enabled
+            && !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes)
+    }
+
+    fn request_fit_notes_layout(&mut self, ctx: &egui::Context) {
+        if self.can_fit_notes_layout() {
+            self.fit_notes_layout_pending = true;
+            ctx.request_repaint();
         }
     }
 
@@ -3415,6 +3437,7 @@ impl Lapis {
         self.panel_apply = [true; 3];
         self.panel_seen = [None; 3];
         self.panel_sizes_dirty = false;
+        self.fit_notes_layout_pending = false;
 
         if self.pdf_path != path {
             self.audio_engine.stop_and_release();
@@ -7477,6 +7500,7 @@ let state_path = crate::state::AppState::config_path();
                 "View",
             ),
             ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide [Alt+T]", "View"),
+            ("fit_page", "󰊓  Fit PDF and Notes Layout", "View"),
             ("toggle_topbar_position", "󰁝  Move Topbar to Bottom / Top", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
@@ -7686,6 +7710,7 @@ let state_path = crate::state::AppState::config_path();
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
             "toggle_sketch" => self.toggle_sketch_tab(),
             "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
+            "fit_page" => self.request_fit_notes_layout(ctx),
             "toggle_topbar_position" => self.toggle_topbar_position(),
             "toggle_fullscreen" => {
                 if !matches!(
@@ -13453,6 +13478,20 @@ let state_path = crate::state::AppState::config_path();
                 let full_width = ui.available_width();
                 let compact = full_width < 320.0;
 
+                if !use_bottom && !self.split_view_enabled {
+                    let hint = format!("Fit PDF and notes layout [{}]",
+                        self.app_state.shortcuts.fit_page.format_label());
+                    if ui.add_sized([18.0, nav_h],
+                        egui::Button::new(egui::RichText::new("󰊓").size(11.0))
+                            .corner_radius(button_radius))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        self.request_fit_notes_layout(ui.ctx());
+                    }
+                }
+
                 // Page navigation stays compact and left aligned.
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
@@ -15015,6 +15054,7 @@ impl eframe::App for Lapis {
         let mut act_view_mode: Option<ViewMode> = None;
         let mut act_toggle_sketch = false;
         let mut act_toggle_topbar = false;
+        let mut act_fit_page = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
@@ -15085,6 +15125,9 @@ impl eframe::App for Lapis {
                 }
                 if sc.toggle_sketch.consume(i) {
                     act_toggle_sketch = true;
+                }
+                if sc.fit_page.consume(i) {
+                    act_fit_page = true;
                 }
                 if sc.toggle_topbar.consume(i) {
                     act_toggle_topbar = true;
@@ -15285,6 +15328,9 @@ impl eframe::App for Lapis {
         }
         if act_toggle_sketch {
             self.toggle_sketch_tab();
+        }
+        if act_fit_page && !use_bottom_notes {
+            self.request_fit_notes_layout(ui.ctx());
         }
         if act_toggle_topbar && self.has_pdf() {
             self.toggle_topbar();
@@ -16679,6 +16725,9 @@ impl eframe::App for Lapis {
                 });
         }
 
+        let fit_notes_layout = std::mem::take(&mut self.fit_notes_layout_pending)
+            && self.can_fit_notes_layout() && !use_bottom_notes;
+
         // Right Panel (Notes + Bottom Annotation Tools)
         if self.has_pdf() {
             if self.view_mode == ViewMode::SlideshowWithNotes {
@@ -16811,10 +16860,31 @@ impl eframe::App for Lapis {
                     });
                     self.track_panel_size(ui, PanelSlot::Bottom, resp.response.rect.height());
                 } else {
+                    let available = ui.available_rect_before_wrap();
+                    let min_w = 250.0_f32.min((available.width() - 100.0).max(1.0));
+                    let reserved_pdf_w = if self.split_view_enabled { 340.0 } else { 100.0 };
+                    let max_w = (available.width() - reserved_pdf_w).max(min_w);
+                    if fit_notes_layout {
+                        let (w, h) = self.page_cache.get(&self.current_page)
+                            .map(|(_, dims)| *dims).unwrap_or(self.page_dims);
+                        let aspect = if w > 0 && h > 0 { w as f32 / h as f32 } else { 4.0 / 3.0 };
+                        let count = if self.view_mode == ViewMode::TwoPage {
+                            let (left, right) = self.current_book_spread();
+                            (left.iter().count() + right.iter().count()).max(1)
+                        } else { 1 };
+                        let size = Self::fitted_notes_width(available.width(), available.height(), aspect,
+                            count, min_w, max_w);
+                        self.panel_sizes.set(PanelSlot::Right, size);
+                        self.panel_apply[PanelSlot::Right as usize] = true;
+                        self.panel_sizes_dirty = true;
+                        self.zoom_mode = ZoomMode::FitPage;
+                        self.zoom_anchor = None;
+                        ui.ctx().request_repaint();
+                    }
                     let notes_panel = egui::Panel::right("notes_panel")
                         .resizable(true)
                         .default_size(350.0)
-                        .size_range(250.0..=520.0)
+                        .size_range(min_w..=max_w)
                         // Match the bottom-panel treatment: a stable frame across all note modes,
                         // with a modest horizontal inset around the notes content.
                         .frame(
@@ -16825,7 +16895,7 @@ impl eframe::App for Lapis {
                         notes_panel,
                         PanelSlot::Right,
                         350.0,
-                        (250.0, 520.0),
+                        (min_w, max_w),
                     );
                     let resp = notes_panel.show(ui, |ui| {
                         self.render_notes_panel_contents(ui, text_edit_id, false);
@@ -17774,8 +17844,8 @@ impl eframe::App for Lapis {
                         (h / aspect_ratio, h)
                     }
                     ZoomMode::FitPage => {
-                        let max_w = (visible_w - EDGE_PAD).max(100.0);
-                        let max_h = (visible_h - EDGE_PAD).max(100.0);
+                        let max_w = (visible_w - EDGE_PAD).max(1.0);
+                        let max_h = (visible_h - EDGE_PAD).max(1.0);
                         let scale = (max_w / base_w).min(max_h / base_h);
                         (base_w * scale, base_h * scale)
                     }
@@ -18122,6 +18192,9 @@ impl eframe::App for Lapis {
             let margin = ((visible_w - display_w) * 0.5).max(0.0);
 
             ui.horizontal(|ui| {
+                if effective_zoom == ZoomMode::FitPage {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                }
                 if margin > 0.0 {
                     ui.add_space(margin);
                 }
@@ -18266,8 +18339,10 @@ impl eframe::App for Lapis {
                             (h / aspect_ratio, h)
                         }
                         ZoomMode::FitPage => {
-                            let max_single_w = ((visible_w - 4.0 - spine_gap) * 0.5).max(80.0);
-                            let max_h = (visible_h - 4.0).max(80.0);
+                            let count = left_opt.iter().count() + right_opt.iter().count();
+                            let gap = if count == 2 { spine_gap } else { 0.0 };
+                            let max_single_w = ((visible_w - EDGE_PAD - gap) / count.max(1) as f32).max(1.0);
+                            let max_h = (visible_h - EDGE_PAD).max(1.0);
                             let scale = (max_single_w / base_w).min(max_h / base_h);
                             (base_w * scale, base_h * scale)
                         }
@@ -18295,6 +18370,9 @@ impl eframe::App for Lapis {
                         .show(ui, |ui| {
                             if pan_delta != egui::Vec2::ZERO {
                                 ui.scroll_with_delta(pan_delta);
+                            }
+                            if effective_zoom == ZoomMode::FitPage {
+                                ui.spacing_mut().item_spacing.y = 0.0;
                             }
                             let pad_x = ((visible_w - total_spread_w) * 0.5).max(0.0);
                             let pad_y = ((visible_h - book_page_h) * 0.5).max(0.0);
@@ -18460,7 +18538,10 @@ impl eframe::App for Lapis {
 
                             let sense = egui::Sense::click_and_drag();
 
-                            // Compute horizontal and vertical padding.
+                            // Keep centering padding independent of widget spacing.
+                            if effective_zoom == ZoomMode::FitPage {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                            }
                             let pad_x = ((visible_w - display_w) * 0.5).max(0.0);
                             let pad_y = ((visible_h - display_h) * 0.5).max(0.0);
 
@@ -18470,6 +18551,9 @@ impl eframe::App for Lapis {
 
                             let img_resp = ui
                                 .horizontal(|ui| {
+                                    if effective_zoom == ZoomMode::FitPage {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                    }
                                     if pad_x > 0.0 {
                                         ui.add_space(pad_x);
                                     }
@@ -18694,4 +18778,24 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(|cc| Ok(Box::new(Lapis::new(cc, initial_pdf)))),
     )
+}
+
+#[cfg(test)]
+mod fit_notes_layout_tests {
+    use super::Lapis;
+
+    #[test]
+    fn gives_unused_width_to_notes() {
+        assert_eq!(Lapis::fitted_notes_width(1600.0, 802.0, 1.0, 1, 250.0, 1500.0), 798.0);
+    }
+
+    #[test]
+    fn preserves_minimum_notes_width() {
+        assert_eq!(Lapis::fitted_notes_width(1200.0, 802.0, 2.0, 1, 250.0, 1100.0), 250.0);
+    }
+
+    #[test]
+    fn accounts_for_book_spine() {
+        assert_eq!(Lapis::fitted_notes_width(1800.0, 802.0, 0.75, 2, 250.0, 1700.0), 596.0);
+    }
 }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fit PDF and notes layout:** A button beside the notes page lock, configurable **Alt+F** shortcut and Command Palette action maximize the PDF page or book spread, then give the remaining width to the right notes panel. The panel can expand beyond its former width limit and remains manually resizable.
+
 - **Catppuccin:** Choose Latte, Frappe, Macchiato, or Mocha, then select one of the 14 accent colors.
 - **Saved custom themes:** Save a named palette, recall it from the custom-theme menu, or explicitly update an existing name. JSON import/export remains available.
 - **Topbar position:** The topbar can sit at the bottom of the window instead of the top, under **Settings → Appearance → Topbar → Position** (or **Move Topbar to Bottom / Top** in the Command Palette). Its menus, the bookmark popup and the search popup open upwards, auto-hide reveals it from the bottom edge, and notifications stay above it. The horizontal annotation toolbar moves to the same edge, and a topbar revealed by auto-hide floats next to it instead of covering it. The vertical rail is unchanged.

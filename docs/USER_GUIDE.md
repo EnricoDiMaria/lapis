@@ -98,6 +98,10 @@ Combines the presentation view with the notes workspace.
 
 This mode is useful when presenting or reviewing a slide while keeping its associated notes available. Its notes header uses compact, frameless controls consistent with the application topbar.
 
+### Fit PDF and Notes Layout — `Alt + F`
+
+Click the fit icon to the left of the lock in the right notes panel header, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu still fits the PDF without moving the divider.
+
 ### Fullscreen — `F11`
 
 Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11` (or use
