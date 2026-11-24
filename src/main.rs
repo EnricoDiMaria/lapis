@@ -2907,9 +2907,9 @@ impl Lapis {
             .add(
                 crate::theme::selected_button(
                     if labeled {
-                        format!("{}  Annotation tools", "")
+                        format!("{}  Annotation tools", self.annotation_cursor_icon())
                     } else {
-                        " ".to_string()
+                        self.annotation_cursor_icon().to_string()
                     },
                     self.show_tools_rail,
                     ui.visuals(),
@@ -5115,6 +5115,79 @@ impl Lapis {
         }
     }
 
+    fn annotation_cursor_icon(&self) -> &'static str {
+        match self.annotation_tool {
+            AnnotationTool::Cursor => "󰇀",
+            AnnotationTool::Draw => "󱦹",
+            AnnotationTool::Highlight => "",
+            AnnotationTool::Underline => "󰊇",
+            AnnotationTool::TextBox => "󰊄",
+            AnnotationTool::Eraser => "󰇾",
+            AnnotationTool::Tape => "󰝤",
+            AnnotationTool::Snip => "󰆞",
+            AnnotationTool::Laser => "󰐾",
+            AnnotationTool::Shape => match self.shape_kind {
+                ShapeKind::Rect => "󰝣",
+                ShapeKind::Circle => "󰝥",
+                ShapeKind::Line => "󰕞",
+                ShapeKind::Arrow => "󰁔",
+            },
+        }
+    }
+
+    fn paint_annotation_cursor(&self, ctx: &egui::Context) {
+        if self.annotation_tool == AnnotationTool::Cursor
+            || self.pdf_panning || self.show_settings || self.radial_menu_pos.is_some()
+            || ctx.output(|o| o.cursor_icon) != egui::CursorIcon::Crosshair
+        {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return; };
+        let Some((layer, clip)) = ctx.data(|d| {
+            d.get_temp::<(egui::LayerId, egui::Rect)>(egui::Id::new("annotation_cursor_target"))
+        }) else { return; };
+        if !clip.contains(pos) || ctx.layer_id_at(pos) != Some(layer) {
+            return;
+        }
+        if self.annotation_tool == AnnotationTool::Eraser {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            return;
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+        let painter = ctx.layer_painter(layer).with_clip_rect(ctx.content_rect());
+        let color = if self.annotation_tool.color_slot().is_some() {
+            rgb(self.annotation_color())
+        } else {
+            egui::Color32::WHITE
+        };
+        // Snap the painted cursor, not the annotation coordinates.
+        let ppp = ctx.pixels_per_point();
+        let pos = egui::pos2((pos.x * ppp).round() / ppp, (pos.y * ppp).round() / ppp);
+        if self.annotation_tool == AnnotationTool::Draw {
+            painter.circle_stroke(pos, 3.0, egui::Stroke::new(1.5, egui::Color32::BLACK));
+            painter.circle_stroke(pos, 3.0, egui::Stroke::new(0.75, color));
+            return;
+        }
+        let line = |a: (f32, f32), b: (f32, f32)| {
+            let points = [pos + egui::vec2(a.0, a.1), pos + egui::vec2(b.0, b.1)];
+            painter.line_segment(points, egui::Stroke::new(1.5, egui::Color32::BLACK));
+            painter.line_segment(points, egui::Stroke::new(0.75, color));
+        };
+        if self.annotation_tool == AnnotationTool::Highlight {
+            let corners = [(-7.0, 3.0), (3.0, -7.0), (7.0, -3.0), (-3.0, 7.0)];
+            let points = corners.iter().map(|&(x, y)| pos + egui::vec2(x, y)).collect();
+            painter.add(egui::Shape::convex_polygon(
+                points, color, egui::Stroke::new(0.9, egui::Color32::BLACK),
+            ));
+            return;
+        }
+        line((-5.0, 0.0), (5.0, 0.0));
+        line((0.0, -5.0), (0.0, 5.0));
+        // Keep the glyph at a fixed offset instead of flipping at screen edges.
+        painter.text(pos + egui::vec2(12.0, 12.0), egui::Align2::CENTER_CENTER,
+            self.annotation_cursor_icon(), egui::FontId::proportional(13.0), color);
+    }
+
     fn handle_slide_annotations(
         &mut self,
         ui: &mut egui::Ui,
@@ -5162,7 +5235,7 @@ impl Lapis {
         let pointer_on_pdf_layer = pointer_pos
             .map(|pos| ui.ctx().layer_id_at(pos) == Some(img_resp.layer_id))
             .unwrap_or(false);
-        if img_resp.hovered() && pointer_on_pdf_layer {
+        if (img_resp.hovered() || img_resp.dragged()) && pointer_on_pdf_layer {
             let icon = match self.annotation_tool {
                 AnnotationTool::Cursor => egui::CursorIcon::Default,
                 _ => egui::CursorIcon::Crosshair,
@@ -5173,6 +5246,10 @@ impl Lapis {
         let pointer_in_slide = pointer_pos
             .map(|p| slide_rect.contains(p) && pointer_on_pdf_layer)
             .unwrap_or(false);
+        if pointer_in_slide && pointer_pos.is_some_and(|p| ui.clip_rect().contains(p)) {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("annotation_cursor_target"),
+                (img_resp.layer_id, slide_rect.intersect(ui.clip_rect()))));
+        }
         let any_text_focused = ui.ctx().memory(|m| m.focused().is_some());
 
         let hold_key_down = !any_text_focused
@@ -5278,6 +5355,7 @@ impl Lapis {
             }
             AnnotationTool::Eraser => {
                 if let Some(pos) = pointer_pos {
+                    if pointer_in_slide && ui.clip_rect().contains(pos) {
                     // Halfway between the old fixed 7 px and the real reach, so the circle
                     // follows the page zoom and still stays small enough to aim with.
                     let reach_px = ERASER_REACH * (slide_rect.width() + slide_rect.height()) * 0.5;
@@ -5286,6 +5364,7 @@ impl Lapis {
                         (7.0 + reach_px) * 0.5,
                         egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
                     );
+                    }
                     if img_resp.clicked() || img_resp.dragged() || hold_key_down {
                     let (nx, ny) = to_norm(pos);
                     let before_state = self.annotations.get(&page_num).cloned().unwrap_or_default();
@@ -5495,13 +5574,8 @@ impl Lapis {
                     self.push_undo_snapshot(page_num);
                     self.commit_annotation_color(stroke.kind, stroke.color);
                     self.annotations.entry(page_num).or_default().push(stroke);
-                    let _ = notes::save_doc_data(
-                        &self.pdf_path,
-                        &self.notes,
-                        &self.annotations,
-                        self.blank_pages.clone(),
-                        &self.sketches,
-                    );
+                    // Update the checkpoint so the end of the frame does not save again.
+                    self.sync_and_save();
                 }
             }
         }
@@ -15018,6 +15092,7 @@ impl eframe::App for Lapis {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let win_rect = ui.ctx().content_rect();
+        ui.ctx().data_mut(|d| d.remove::<(egui::LayerId, egui::Rect)>(egui::Id::new("annotation_cursor_target")));
 
         // Keep the egui style in step with the interface density (a theme change resets it).
         let density = self.app_state.settings.ui_density;
@@ -19005,6 +19080,7 @@ impl eframe::App for Lapis {
         if self.radial_menu_pos.is_some() && self.has_pdf() {
             self.render_radial_tools_menu(ui);
         }
+        self.paint_annotation_cursor(&ctx);
         // End-of-frame local-only checkpoint. A SIGKILL/pkill -9 cannot invoke
         // on_exit, so the most recent completed UI action must already be on disk.
         if self.has_pdf() {

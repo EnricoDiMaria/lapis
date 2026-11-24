@@ -207,6 +207,8 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
 
 The pen, highlighter, textboxes, underline, shapes and occlusion tape each remember their last-used color across restarts. The default pen color is blue and the default highlighter color is yellow. Choose a swatch in any annotation toolbar or the radial menu before or after choosing a tool. The chosen color stays pending until you create an annotation; only that tool then remembers it. Switching tools without drawing does not change their remembered colors. To recolor an existing textbox, use its own color popup instead of the global palette.
 
+The PDF canvas shows a thin hollow ring for the pen, a small chisel-tip mark for the highlighter, and a thin crosshair with a tool glyph for other drawing tools. Colored cursors reflect the selected annotation color. The topbar annotation tools icon also reflects the active tool. Native text, link and resize cursors remain available.
+
 ### Cursor
 
 Use the Cursor tool to interact with existing content and annotations without drawing a new mark. Press `V` when not typing to return to Cursor / Select, even if the annotation toolbar is closed. The other annotation tools also have single-letter defaults; see [Keybindings](#keybindings) for the full list. All these shortcuts can be changed or disabled in **Settings → Keybindings**.
