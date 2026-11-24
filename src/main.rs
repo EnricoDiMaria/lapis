@@ -2153,8 +2153,12 @@ impl Lapis {
         }
         let ideal = self.display_w_pt * ppp / pw;
         let cap = (MAX_TEXTURE_SIDE / pw.max(ph))
-            .min((MAX_PAGE_PIXELS / (pw * ph)).sqrt())
-            .min(MAX_RENDER_SCALE);
+            .min((MAX_PAGE_PIXELS / (pw * ph)).sqrt());
+        let cap = if matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+            cap
+        } else {
+            cap.min(MAX_RENDER_SCALE)
+        };
         let quantized = (ideal / SCALE_STEP).ceil() * SCALE_STEP;
         quantized.max(MIN_RENDER_SCALE).min(cap)
     }
@@ -2194,7 +2198,9 @@ impl Lapis {
     /// that the GPU would have to downscale it by more than 2x (LINEAR has no mipmaps).
     fn page_is_adequate(&self, p: u32, key: u32) -> bool {
         match self.page_scale.get(&p) {
-            Some(&k) if self.page_cache.contains_key(&p) => k >= key && k <= key * 2,
+            Some(&k) if self.page_cache.contains_key(&p) => {
+                k % 2 == key % 2 && k >= key && k <= key * 2
+            }
             _ => false,
         }
     }
@@ -15003,14 +15009,22 @@ impl eframe::App for Lapis {
                 continue;
             }
 
+            let result_key = result.scale_key * 2 + (result.dark_mode as u32);
+            // A superseded request may finish after the viewport changes.
+            if let Some((key, wanted)) = &self.last_page_req
+                && wanted.contains(&page_num)
+                && result_key != *key
+                && self.page_is_adequate(page_num, *key)
+            {
+                continue;
+            }
             let handle = ui.ctx().load_texture(
                 format!("pdf_page_{}", page_num),
                 result.image,
                 egui::TextureOptions::LINEAR,
             );
             self.page_cache.insert(page_num, (handle.clone(), (w, h)));
-            self.page_scale
-                .insert(page_num, result.scale_key * 2 + (result.dark_mode as u32));
+            self.page_scale.insert(page_num, result_key);
 
             self.touch_cache(page_num);
             self.evict_cache();
@@ -15397,6 +15411,12 @@ impl eframe::App for Lapis {
                 self.user_fullscreen = actual;
                 self.fullscreen_sent = Some(actual);
             }
+        }
+
+        if in_slideshow && self.fullscreen_cmd_at.is_some_and(|t| {
+            t.elapsed() < std::time::Duration::from_millis(800)
+        }) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         if !in_slideshow && self.has_pdf() {
@@ -16823,14 +16843,24 @@ impl eframe::App for Lapis {
                             });
                     }
 
+                    let max_w = (win_rect.width() * 0.8).max(150.0);
                     let panel = egui::Panel::right("slideshow_notes_panel")
                         .resizable(true)
-                        .default_size(320.0);
-                    let max_w = (win_rect.width() * 0.8).max(150.0);
+                        .default_size(320.0)
+                        .size_range(150.0..=max_w);
                     let panel =
                         self.restore_panel_size(panel, PanelSlot::Slideshow, 320.0, (150.0, max_w));
                     let resp = panel.show(ui, |ui| {
-                        self.render_slideshow_notes_contents(ui, active_slide_note);
+                        // Keep Markdown widgets from growing the panel's measured width.
+                        let rect = ui.max_rect();
+                        let mut child = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+                        self.render_slideshow_notes_contents(&mut child, active_slide_note);
+                        ui.allocate_rect(rect, egui::Sense::hover());
                     });
                     self.track_panel_size(ui, PanelSlot::Slideshow, resp.response.rect.width());
                 }

@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Slideshow:** Keep the notes panel width stable when interacting with code blocks, and refresh PDF rendering at the fullscreen viewport resolution.
+- **Markdown preview:** Preserve shell arguments such as `$@` and dollar signs inside inline and fenced code instead of interpreting them as LaTeX.
+
 - **Textboxes after an external edit:** Saving a PDF in another viewer no longer resets the background, bold and italic of Lapis textboxes. The textbox signature now ignores the box height (grown on export) and the Lapis-only markers; older signatures are still recognized.
 - **Textbox size in other viewers:** Text boxes are exported and imported relative to the page height (800-unit convention, like the slides export), so they look the same in Lapis and in other viewers on 16:9 slides and other non-800 pt pages. Older files keep their size.
 - **Textbox height in other viewers:** The exported box is fitted to its text instead of keeping a taller stored height, so no empty band (or extra background) appears below the text.

@@ -2812,68 +2812,73 @@ fn alias_code_fences(markdown: &str) -> String {
 /// Markdown preparation for on-screen rendering: math preprocessing plus code-fence language
 /// aliases, so more programming languages get syntax highlighting.
 pub fn preprocess_markdown_view(markdown: &str) -> String {
-    alias_code_fences(&preprocess_markdown_math(markdown))
+    alias_code_fences(&preprocess_markdown_math_impl(markdown, true))
 }
 
 // Convert display and inline math into styled Markdown for egui_commonmark.
 
 pub fn preprocess_markdown_math(markdown: &str) -> String {
-    let mut result = String::with_capacity(markdown.len() + 64);
-    let mut rem = markdown; // 1. Process display math blocks. 
-    while let Some(start) = rem.find("$$") {
-        result.push_str(&rem[..start]);
-        let after_start = &rem[start + 2..];
-        if let Some(end) = after_start.find("$$") {
-            let expr = &after_start[..end];
-            let formatted = format_latex_expr(expr);
-            result.push_str(&format!("\n\n**`{}`**\n\n", formatted));
-            rem = &after_start[end + 2..];
-        } else {
-            result.push_str("$$");
-            rem = after_start;
-            break;
+    preprocess_markdown_math_impl(markdown, false)
+}
+
+fn preprocess_markdown_math_impl(markdown: &str, escape_shell: bool) -> String {
+    fn push_literal(out: &mut String, text: &str, escape_shell: bool) {
+        if !escape_shell {
+            out.push_str(text);
+            return;
         }
-    }
-    result.push_str(rem);
-
-    // 2. Process inline math line by line, skipping code blocks.
-    let mut final_out = String::with_capacity(result.len());
-    let mut in_code_block = false;
-    let lines: Vec<&str> = result.lines().collect();
-
-    for (line_idx, &line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            final_out.push_str(line);
-            final_out.push('\n');
-            continue;
-        }
-
-        if in_code_block {
-            final_out.push_str(line);
-            final_out.push('\n');
-            continue;
-        }
-
-        let mut l_rem = line;
-        while let Some(s_idx) = l_rem.find('$') {
-            final_out.push_str(&l_rem[..s_idx]);
-            let after_s = &l_rem[s_idx + 1..];
-            if let Some(e_idx) = after_s.find('$') {
-                let expr = &after_s[..e_idx];
-                if !expr.is_empty() && !expr.starts_with(' ') && !expr.ends_with(' ') {
-                    let formatted = format_latex_expr(expr);
-                    final_out.push_str(&format!("`{}`", formatted));
-                    l_rem = &after_s[e_idx + 1..];
-                    continue;
+        for (i, ch) in text.char_indices() {
+            if ch == '$' && text[i..].starts_with("$@") {
+                let escapes = text.as_bytes()[..i].iter().rev().take_while(|&&b| b == b'\\').count();
+                if escapes % 2 == 0 {
+                    out.push('\\');
                 }
             }
-            final_out.push('$');
-            l_rem = after_s;
+            out.push(ch);
         }
-        final_out.push_str(l_rem);
+    }
+
+    let mut result = String::with_capacity(markdown.len() + 64);
+    let mut pos = 0;
+    for range in code_and_math_ranges(markdown) {
+        push_literal(&mut result, &markdown[pos..range.start], escape_shell);
+        let span = &markdown[range.clone()];
+        if span.starts_with("$$") {
+            let formatted = format_latex_expr(&span[2..span.len() - 2]);
+            result.push_str(&format!("\n\n**`{}`**\n\n", formatted));
+        } else if span.starts_with('$') {
+            let formatted = format_latex_expr(&span[1..span.len() - 1]);
+            result.push_str(&format!("`{}`", formatted));
+        } else {
+            result.push_str(span);
+        }
+        pos = range.end;
+    }
+    push_literal(&mut result, &markdown[pos..], escape_shell);
+
+    let mut final_out = String::with_capacity(result.len());
+    let mut fence: Option<(char, usize)> = None;
+    let lines: Vec<&str> = result.lines().collect();
+    for (line_idx, &line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some(marker) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') {
+            let run = trimmed.chars().take_while(|&c| c == marker).count();
+            if let Some((open, len)) = fence {
+                if marker == open && run >= len && trimmed[run..].trim().is_empty() {
+                    fence = None;
+                    final_out.push_str(line);
+                    final_out.push('\n');
+                    continue;
+                }
+            } else if run >= 3 {
+                fence = Some((marker, run));
+            }
+        }
+        final_out.push_str(line);
+        if fence.is_some() {
+            final_out.push('\n');
+            continue;
+        }
 
         let is_blockquote = trimmed.starts_with('>');
         let next_is_blockquote = lines
@@ -3025,13 +3030,18 @@ pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     /// End of the fenced block opening at the line starting at `start`, if there is one.
     fn fence_end(text: &str, start: usize) -> Option<usize> {
         let first_end = line_end(text, start);
-        let marker = ["```", "~~~"]
-            .into_iter()
-            .find(|m| text[start..first_end].trim_start().starts_with(m))?;
+        let opening = text[start..first_end].trim_start();
+        let marker = opening.chars().next().filter(|c| *c == '`' || *c == '~')?;
+        let run = opening.chars().take_while(|&c| c == marker).count();
+        if run < 3 {
+            return None;
+        }
         let mut pos = first_end;
         while pos < text.len() {
             let end = line_end(text, pos);
-            if text[pos..end].trim_start().starts_with(marker) {
+            let closing = text[pos..end].trim_start();
+            let len = closing.chars().take_while(|&c| c == marker).count();
+            if len >= run && closing[len..].trim().is_empty() {
                 return Some(end);
             }
             pos = end;
@@ -3077,6 +3087,7 @@ pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
                 at_line_start = true;
                 i += 1;
             }
+            b'\\' if matches!(bytes.get(i + 1), Some(b'$' | b'\\' | b'`')) => i += 2,
             b'`' => {
                 let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
                 match closing_backticks(bytes, i + run, line_end(text, i), run) {
@@ -3087,6 +3098,7 @@ pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
                     None => i += run,
                 }
             }
+            b'$' if text[i..].starts_with("$@") => i += 2,
             b'$' if text[i..].starts_with("$$") => match text[i + 2..].find("$$") {
                 Some(p) => {
                     let end = i + 2 + p + 2;
@@ -3097,7 +3109,10 @@ pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
             },
             b'$' => {
                 let after = i + 1;
-                let closing = text[after..line_end(text, i)].find('$').map(|p| after + p);
+                let closing = text[after..line_end(text, i)]
+                    .find(['$', '`']).map(|p| after + p)
+                    .filter(|&p| bytes[p] == b'$' && !text[p..].starts_with("$@")
+                        && bytes[..p].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0);
                 match closing {
                     Some(close)
                         if close > after
@@ -4165,6 +4180,19 @@ mod tests {
         assert_eq!(skipped("é `ü` $α$ ok"), ["`ü`", "$α$"]);
         let r = code_and_math_ranges("a `b` c");
         assert!(in_ranges(&r, 2) && in_ranges(&r, 4) && !in_ranges(&r, 1) && !in_ranges(&r, 5));
+    }
+
+    #[test]
+    fn markdown_math_preserves_shell_arguments_and_code() {
+        let input = "Use `$@` and `$1` with $x$.\n```sh\necho \"$@\" $$ $1\n```\n~~~sh\necho $$ $@\n~~~\n$@ and $@; $y$";
+        let rendered = preprocess_markdown_view(input);
+        assert!(rendered.contains("`$@` and `$1` with `x`."));
+        assert!(rendered.contains("```sh\necho \"$@\" $$ $1\n```"));
+        assert!(rendered.contains("~~~sh\necho $$ $@\n~~~"));
+        assert!(rendered.contains("\\$@ and \\$@; `y`"));
+        assert!(preprocess_markdown_math("$$x$$").contains("**`x`**"));
+        assert!(preprocess_markdown_math("$@ and $@").starts_with("$@ and $@"));
+        assert_eq!(skipped("$@ and $@; $x$"), ["$x$"]);
     }
 
     #[test]
