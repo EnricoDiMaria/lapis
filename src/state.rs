@@ -801,7 +801,7 @@ impl AppSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppState {
     pub recent_files: VecDeque<RecentFileEntry>,
@@ -810,6 +810,32 @@ pub struct AppState {
     pub export_settings: ExportSettings,
     pub shortcuts: ShortcutsConfig,
     pub settings: AppSettings,
+    #[serde(default = "default_annotation_colors")]
+    pub annotation_colors: [[u8; 3]; 6],
+}
+
+fn default_annotation_colors() -> [[u8; 3]; 6] {
+    [
+        [37, 99, 235], // Pen
+        [250, 204, 21], // Highlighter
+        [17, 24, 39], // Textbox
+        [17, 24, 39], // Underline
+        [17, 24, 39], // Shapes
+        [17, 24, 39], // Tape
+    ]
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            recent_files: VecDeque::new(),
+            home_grid_view: false,
+            export_settings: ExportSettings::default(),
+            shortcuts: ShortcutsConfig::default(),
+            settings: AppSettings::default(),
+            annotation_colors: default_annotation_colors(),
+        }
+    }
 }
 
 fn default_home_grid_view() -> bool {

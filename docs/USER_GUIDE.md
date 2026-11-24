@@ -203,6 +203,10 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
 
 > Hold Spacebar and move the pointer to draw without clicking on the PDF canvas. On laptops, you may need to disable your OS’s “Disable touchpad while typing” setting.
 
+### Annotation colors
+
+The pen, highlighter, textboxes, underline, shapes and occlusion tape each remember their last-used color across restarts. The default pen color is blue and the default highlighter color is yellow. Choose a swatch in any annotation toolbar or the radial menu before or after choosing a tool. The chosen color stays pending until you create an annotation; only that tool then remembers it. Switching tools without drawing does not change their remembered colors. To recolor an existing textbox, use its own color popup instead of the global palette.
+
 ### Cursor
 
 Use the Cursor tool to interact with existing content and annotations without drawing a new mark.

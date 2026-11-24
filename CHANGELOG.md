@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Annotation colors:** Pen, highlighter, textboxes, underline, shapes and occlusion tape remember their own last-used colors. The pen defaults to blue and the highlighter to yellow. Palette selections apply to the next annotation, even when selected before switching tools.
+
 - **Radial annotation menu:** Reduced shadow spread and opacity, refined translucent surfaces, subtle accent-colored ring borders, tool selection, color swatches and hover labels.
 
 - **Consistent page scrolling:** The mouse wheel and middle-button drag now move the page the same way in every view mode. Before, Continuous Scroll used a faster wheel and drag than Single Page, and the two-page book view and the Split-View pane ignored middle-button dragging. Both speeds are adjustable under **Settings → Workspace → Page scrolling** (defaults: wheel 2.2×, drag 4.0×).

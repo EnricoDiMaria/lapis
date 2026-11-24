@@ -1296,6 +1296,35 @@ enum AnnotationTool {
     Laser,
 }
 
+impl AnnotationTool {
+    fn color_slot(self) -> Option<usize> {
+        match self {
+            Self::Draw => Some(0),
+            Self::Highlight => Some(1),
+            Self::TextBox => Some(2),
+            Self::Underline => Some(3),
+            Self::Shape => Some(4),
+            Self::Tape => Some(5),
+            _ => None,
+        }
+    }
+}
+
+fn annotation_kind_color_slot(kind: notes::AnnotationKind) -> Option<usize> {
+    match kind {
+        notes::AnnotationKind::Freehand => AnnotationTool::Draw.color_slot(),
+        notes::AnnotationKind::Highlight => AnnotationTool::Highlight.color_slot(),
+        notes::AnnotationKind::TextBox => AnnotationTool::TextBox.color_slot(),
+        notes::AnnotationKind::Underline => AnnotationTool::Underline.color_slot(),
+        notes::AnnotationKind::Rect
+        | notes::AnnotationKind::Circle
+        | notes::AnnotationKind::Line
+        | notes::AnnotationKind::Arrow => AnnotationTool::Shape.color_slot(),
+        notes::AnnotationKind::Tape => AnnotationTool::Tape.color_slot(),
+        notes::AnnotationKind::Image => None,
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum ShapeKind {
     Rect,
@@ -1454,7 +1483,8 @@ struct Lapis {
     last_synced_sidebar_tab: SidebarTab,
     thumb_cache: HashMap<u32, (egui::TextureHandle, (u32, u32))>,
     annotation_tool: AnnotationTool,
-    annotation_color: [u8; 3],
+    pending_annotation_color: Option<[u8; 3]>,
+    last_annotation_color: [u8; 3],
     annotations: HashMap<u32, Vec<notes::PageAnnotation>>,
     active_stroke: Option<notes::PageAnnotation>,
     stroke_width: f32,
@@ -1675,7 +1705,8 @@ impl Lapis {
             last_synced_sidebar_tab: SidebarTab::Thumbnails,
             thumb_cache: HashMap::new(),
             annotation_tool: AnnotationTool::Cursor,
-            annotation_color: ANNOTATION_PALETTE[0].0,
+            pending_annotation_color: None,
+            last_annotation_color: ANNOTATION_PALETTE[0].0,
             annotations: HashMap::new(),
             active_stroke: None,
             stroke_width: 2.5,
@@ -1861,6 +1892,31 @@ impl Lapis {
             }
         }
         self.panel_seen[idx] = Some(size);
+    }
+
+    fn annotation_color(&self) -> [u8; 3] {
+        self.pending_annotation_color.unwrap_or_else(|| {
+            self.annotation_tool
+                .color_slot()
+                .map_or(self.last_annotation_color, |slot| self.app_state.annotation_colors[slot])
+        })
+    }
+
+    fn remember_annotation_color(&mut self, kind: notes::AnnotationKind, color: [u8; 3]) {
+        if let Some(slot) = annotation_kind_color_slot(kind)
+            && self.app_state.annotation_colors[slot] != color
+        {
+            self.app_state.annotation_colors[slot] = color;
+            self.app_state.save();
+        }
+    }
+
+    fn commit_annotation_color(&mut self, kind: notes::AnnotationKind, color: [u8; 3]) {
+        if self.pending_annotation_color == Some(color) {
+            self.pending_annotation_color = None;
+        }
+        self.last_annotation_color = color;
+        self.remember_annotation_color(kind, color);
     }
 
     fn save_session_state(&mut self) {
@@ -4088,7 +4144,7 @@ impl Lapis {
                 self.push_undo_snapshot(page);
                 let ann = notes::PageAnnotation {
                     kind: notes::AnnotationKind::TextBox,
-                    color: self.annotation_color,
+                    color: self.annotation_color(),
                     points: vec![(nx, ny), (nx + w, ny + h)],
                     text: String::new(),
                     font_size: self.textbox_font_size,
@@ -4096,6 +4152,7 @@ impl Lapis {
                     italic: self.textbox_italic,
                     stroke_width: self.stroke_width,
                 };
+                self.commit_annotation_color(ann.kind, ann.color);
                 let list = self.annotations.entry(page).or_default();
                 list.push(ann);
                 let new_idx = list.len() - 1;
@@ -4677,6 +4734,11 @@ impl Lapis {
                     || t_toggle_bg
                 {
                     self.push_undo_snapshot(page);
+                    if let Some(color) = t_color
+                        && self.annotations.get(&page).and_then(|v| v.get(idx)).is_some()
+                    {
+                        self.remember_annotation_color(notes::AnnotationKind::TextBox, color);
+                    }
                     if let Some(ann) = self.annotations.get_mut(&page).and_then(|v| v.get_mut(idx))
                     {
                         if let Some(s) = t_size {
@@ -4693,7 +4755,6 @@ impl Lapis {
                         }
                         if let Some(c) = t_color {
                             ann.color = c;
-                            self.annotation_color = c;
                         }
                         if let Some(tok) = t_wrap_token {
                             if ann.text.starts_with(tok)
@@ -5381,7 +5442,7 @@ impl Lapis {
                         let pt = to_norm(pos);
                         self.active_stroke = Some(notes::PageAnnotation {
                             kind,
-                            color: self.annotation_color,
+                            color: self.annotation_color(),
                             points: vec![pt, pt],
                             text: String::new(),
                             font_size: self.textbox_font_size,
@@ -5411,6 +5472,7 @@ impl Lapis {
                         stroke.points = notes::smooth_freehand_points(&stroke.points);
                     }
                     self.push_undo_snapshot(page_num);
+                    self.commit_annotation_color(stroke.kind, stroke.color);
                     self.annotations.entry(page_num).or_default().push(stroke);
                     let _ = notes::save_doc_data(
                         &self.pdf_path,
@@ -11206,7 +11268,7 @@ let state_path = crate::state::AppState::config_path();
 
                         // Inline Color Swatches
                         for (col, name) in ANNOTATION_PALETTE {
-                            let is_sel = self.annotation_color == col;
+                            let is_sel = self.annotation_color() == col;
 
                             let (sw_box, sw_fill, sw_ring) =
                                 (m.swatch_box, m.swatch_fill, m.swatch_ring);
@@ -11227,7 +11289,7 @@ let state_path = crate::state::AppState::config_path();
                             }
 
                             if sw_resp.on_hover_text(name).clicked() {
-                                self.annotation_color = col;
+                                self.pending_annotation_color = Some(col);
                             }
                         }
 
@@ -11485,7 +11547,7 @@ let state_path = crate::state::AppState::config_path();
                         let angle = (i as f32) * std::f32::consts::TAU / (n_cols as f32)
                             - std::f32::consts::FRAC_PI_2;
                         let pt = c + egui::vec2(angle.cos(), angle.sin()) * col_ring_r;
-                        let is_sel = self.annotation_color == col;
+                        let is_sel = self.annotation_color() == col;
                         let is_hov = hover_pos.map(|p| p.distance(pt) <= 10.0).unwrap_or(false);
 
                         painter.circle_filled(pt, 8.0, rgb(col));
@@ -11503,7 +11565,7 @@ let state_path = crate::state::AppState::config_path();
                             label_hover = Some(name.to_string());
                         }
                         if clicked && is_hov {
-                            self.annotation_color = col;
+                            self.pending_annotation_color = Some(col);
                             close_menu = left_clicked;
                         }
                     }
@@ -11797,7 +11859,7 @@ let state_path = crate::state::AppState::config_path();
                         ui.painter().circle_filled(
                             c_rect.center(),
                             10.0,
-                            rgb(self.annotation_color),
+                            rgb(self.annotation_color()),
                         );
 
                         ui.painter().circle_stroke(
@@ -11945,7 +12007,7 @@ let state_path = crate::state::AppState::config_path();
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 for (col, name) in ANNOTATION_PALETTE {
-                                    let is_sel = self.annotation_color == col;
+                                    let is_sel = self.annotation_color() == col;
 
                                     let (sw_rect, sw_resp) = ui.allocate_exact_size(
                                         egui::vec2(22.0, 22.0),
@@ -11963,25 +12025,7 @@ let state_path = crate::state::AppState::config_path();
                                     }
 
                                     if sw_resp.on_hover_text(name).clicked() {
-                                        self.annotation_color = col;
-
-                                        if let Some(idx) = self.selected_textbox {
-                                            if let Some(ann) = self
-                                                .annotations
-                                                .get_mut(&self.current_page)
-                                                .and_then(|v| v.get_mut(idx))
-                                            {
-                                                ann.color = col;
-                                            }
-
-                                            let _ = notes::save_doc_data(
-                                                &self.pdf_path,
-                                                &self.notes,
-                                                &self.annotations,
-                                                self.blank_pages.clone(),
-                                                &self.sketches,
-                                            );
-                                        }
+                                        self.pending_annotation_color = Some(col);
 
                                         color_open = false;
                                     }
