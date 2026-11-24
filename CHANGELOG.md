@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unicode font fallback:** Use installed system fonts for missing characters in Markdown notes and other interface text, while preserving custom fonts and Nerd Font icons.
+
 - **Independent annotation toolbar placement:** Choose Top, Bottom, or Follow topbar under **Settings → Tools & Study → Annotation toolbar**. The vertical rail remains available.
 
 - **Fit PDF and notes layout:** A button beside the notes page lock, configurable **Alt+F** shortcut and Command Palette action maximize the PDF page or book spread, then give the remaining width to the right notes panel. The panel can expand beyond its former width limit and remains manually resizable.

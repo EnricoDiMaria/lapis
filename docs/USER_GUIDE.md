@@ -380,6 +380,10 @@ notes if these are short, otherwise on a page right after the slide and its note
 If you do not need them, turn the tab off in **Settings → Workspace → Notes panel → Enable Sketch**; your sketches are
 kept and the tab (and the sketches in exports) come back when you turn it on again.
 
+### Unicode and multilingual text
+
+Edit and Preview use installed system fonts as fallbacks for missing characters, including non-Latin scripts, symbols and emoji. Your selected font and the built-in icon font retain priority. Install fonts for any missing script and restart Lapis. Emoji may appear monochrome; complex script shaping, bidirectional layout and combined emoji sequences are limited by the text renderer. This does not change PDF export fonts.
+
 ### Mathematical notation
 
 Lapis supports LaTeX-style mathematical notation.

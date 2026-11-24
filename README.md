@@ -40,6 +40,7 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 ## Features at a Glance
 
 - **Advanced PDF Viewer** — Single Page, Continuous Scroll, Two-Page Book, Slideshow, and Slideshow with Notes modes.
+- **Unicode Notes**: Installed system fonts provide fallback glyphs for multilingual Markdown text, symbols and emoji without replacing the selected font.
 - **Customizable Workspace**: Choose which features to enable, which buttons to display, and tailor the app to your liking. Switch between Presets, Catppuccin, and Custom: choose from 18 color-previewed presets or four Catppuccin flavors with 14 official accents each, save named custom themes, choose a standard, compact, or ultra-compact interface density, upload custom fonts, personalize keyboard shortcuts, and much more — all from advanced settings.
 - **Split View** — Display and annotate two PDF pages side by side.
 - **PDF Night Mode** — Toggle a dark viewing treatment for PDFs.
