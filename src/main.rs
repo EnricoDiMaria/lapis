@@ -1395,6 +1395,10 @@ struct Lapis {
     topbar_hold_until: f64,
     /// Height of the revealed overlay topbar; 0 while hidden or docked.
     topbar_overlay_h: f32,
+    /// Height of the docked topbar in the last frame (0 while hidden or floating).
+    topbar_dock_h: f32,
+    /// Height of the docked annotation sub-topbar in the last frame (0 when not shown).
+    subbar_h: f32,
     /// A popup drawn by the topbar (file menu, bookmark popup) was open in the last frame.
     topbar_popup_open: bool,
     /// Notes-panel sizes of the open document.
@@ -1622,6 +1626,8 @@ impl Lapis {
             saved_view_mode: ViewMode::SinglePage,
             topbar_hold_until: 0.0,
             topbar_overlay_h: 0.0,
+            topbar_dock_h: 0.0,
+            subbar_h: 0.0,
             topbar_popup_open: false,
             panel_sizes: PanelSizes::default(),
             panel_apply: [true; 3],
@@ -1862,10 +1868,19 @@ impl Lapis {
         let now = ctx.input(|i| i.time);
         let (pointer, button_down) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_down()));
         let was_shown = self.topbar_overlay_h > 0.0;
-        let near_top = |reach: f32| pointer.is_some_and(|p| p.y <= screen.top() + reach);
+        let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+        // Distance from the window edge the bar sits on.
+        let near_edge = |reach: f32| {
+            pointer.is_some_and(|p| {
+                if at_bottom { p.y >= screen.bottom() - reach } else { p.y <= screen.top() + reach }
+            })
+        };
         // A press elsewhere (drawing, dragging) must not pop the bar open.
-        let at_edge = near_top(5.0) && !button_down;
-        let over_bar = was_shown && near_top(self.topbar_overlay_h + 4.0);
+        let at_edge = near_edge(5.0) && !button_down;
+        // The overlay floats next to the annotation sub-topbar (never over it), so the pointer
+        // path from the window edge to the bar crosses the sub-topbar.
+        let reach = self.subbar_h + self.topbar_overlay_h + 4.0;
+        let over_bar = was_shown && near_edge(reach);
         // Menus and popups opened from the bar keep it visible while they are open: egui menus
         // (zoom, overflow), the file and bookmark popups, and the search popup.
         // `Popup::is_any_open` reads egui's memory, so it already works before the bar is drawn
@@ -1876,7 +1891,13 @@ impl Lapis {
             && ctx
                 .memory(|m| m.focused())
                 .and_then(|id| ctx.read_response(id))
-                .is_some_and(|r| r.rect.bottom() <= screen.top() + self.topbar_overlay_h + 2.0);
+                .is_some_and(|r| {
+                    if at_bottom {
+                        r.rect.top() >= screen.bottom() - reach + 2.0
+                    } else {
+                        r.rect.bottom() <= screen.top() + reach - 2.0
+                    }
+                });
         if at_edge || over_bar || menu_open || editing {
             self.topbar_hold_until = now + 0.4;
         }
@@ -1894,6 +1915,42 @@ impl Lapis {
         settings.topbar_auto_hide = !settings.topbar_auto_hide;
         self.app_state.save();
         // Start from a clean state: hidden when auto-hide was just turned on.
+        self.topbar_hold_until = 0.0;
+        self.topbar_overlay_h = 0.0;
+    }
+
+    /// Placement of a popup opened from a topbar button: under it, or above it when the bar is
+    /// at the bottom of the window. `centered` centres it on the button, otherwise it starts at
+    /// the button's left edge.
+    fn topbar_popup_placement(&self, button: egui::Rect, centered: bool) -> (egui::Pos2, egui::Align2) {
+        let x = if centered { button.center().x } else { button.left() };
+        let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+        match (at_bottom, centered) {
+            (false, true) => (egui::pos2(x, button.bottom() + 6.0), egui::Align2::CENTER_TOP),
+            (false, false) => (egui::pos2(x, button.bottom() + 6.0), egui::Align2::LEFT_TOP),
+            (true, true) => (egui::pos2(x, button.top() - 6.0), egui::Align2::CENTER_BOTTOM),
+            (true, false) => (egui::pos2(x, button.top() - 6.0), egui::Align2::LEFT_BOTTOM),
+        }
+    }
+
+    /// Space taken at the bottom of the window by the docked topbar and annotation sub-topbar
+    /// when they sit at the bottom.
+    fn bottom_bars_h(&self) -> f32 {
+        if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
+            self.topbar_dock_h + self.subbar_h
+        } else {
+            0.0
+        }
+    }
+
+    /// Moves the topbar between the top and the bottom edge (saved).
+    fn toggle_topbar_position(&mut self) {
+        let settings = &mut self.app_state.settings;
+        settings.topbar_position = match settings.topbar_position {
+            state::TopbarPosition::Top => state::TopbarPosition::Bottom,
+            state::TopbarPosition::Bottom => state::TopbarPosition::Top,
+        };
+        self.app_state.save();
         self.topbar_hold_until = 0.0;
         self.topbar_overlay_h = 0.0;
     }
@@ -3147,11 +3204,11 @@ impl Lapis {
         let mut bm_open = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(bm_id));
         if bm_open {
             let mut close_bm = false;
-            let popup_pos = egui::pos2(anchor.center().x, anchor.bottom() + 6.0);
+            let (popup_pos, popup_pivot) = self.topbar_popup_placement(anchor, true);
 
             let area_resp = egui::Area::new(ui.make_persistent_id("bookmark_popup_area"))
                 .fixed_pos(popup_pos)
-                .pivot(egui::Align2::CENTER_TOP)
+                .pivot(popup_pivot)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     self.modal_glass_frame(MENU_GLASS_ALPHA)
@@ -5897,12 +5954,31 @@ impl Lapis {
                                                                 self.app_state.settings.ui_density = density;
                                                                 settings_dirty = true;
                                                             }
+                                                        });
+
+                                                        settings_section(ui, "Topbar", "Where the topbar sits and when it shows.", |ui| {
+                                                            let mut position = self.app_state.settings.topbar_position;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut position,
+                                                                &[
+                                                                    (state::TopbarPosition::Top, "Top"),
+                                                                    (state::TopbarPosition::Bottom, "Bottom"),
+                                                                ],
+                                                                110.0,
+                                                            ) {
+                                                                self.app_state.settings.topbar_position = position;
+                                                                self.topbar_hold_until = 0.0;
+                                                                self.topbar_overlay_h = 0.0;
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.weak("Bottom puts the topbar on the bottom edge; its menus open upwards. The annotation toolbar stays where it is.");
                                                             ui.add_space(6.0);
                                                             if settings_toggle(
                                                                 ui,
                                                                 &mut self.app_state.settings.topbar_auto_hide,
                                                                 "Auto-hide topbar",
-                                                                "Hover the top edge of the window to show it. Alt+T turns auto-hide on or off.",
+                                                                "Hover the window edge the topbar sits on to show it. Alt+T turns auto-hide on or off.",
                                                             )
                                                             .changed()
                                                             {
@@ -7112,8 +7188,14 @@ let state_path = crate::state::AppState::config_path();
         // Rows visible before the list scrolls. The half row shows that there is more below.
         const LIST_ROWS: f32 = 3.5;
 
+        let (search_align, search_offset) =
+            if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
+                (egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -46.0))
+            } else {
+                (egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
+            };
         egui::Area::new(ui.make_persistent_id("global_search_popover"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
+            .anchor(search_align, search_offset)
             .order(egui::Order::Foreground)
             .constrain(true)
             .show(&ctx, |ui| {
@@ -7395,6 +7477,7 @@ let state_path = crate::state::AppState::config_path();
                 "View",
             ),
             ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide [Alt+T]", "View"),
+            ("toggle_topbar_position", "󰁝  Move Topbar to Bottom / Top", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
                 "insert_blank",
@@ -7603,6 +7686,7 @@ let state_path = crate::state::AppState::config_path();
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
             "toggle_sketch" => self.toggle_sketch_tab(),
             "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
+            "toggle_topbar_position" => self.toggle_topbar_position(),
             "toggle_fullscreen" => {
                 if !matches!(
                     self.view_mode,
@@ -10949,7 +11033,13 @@ let state_path = crate::state::AppState::config_path();
     fn render_sub_topbar_tools(&mut self, ui: &mut egui::Ui) {
         let density = self.app_state.settings.ui_density;
         let m = density.sub_bar();
-        egui::Panel::top("sub_topbar_tools")
+        // It sits on the same edge as the topbar.
+        let panel = if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
+            egui::Panel::bottom("sub_topbar_tools")
+        } else {
+            egui::Panel::top("sub_topbar_tools")
+        };
+        let panel_out = panel
             .exact_size(m.height)
             .frame(
                 egui::Frame::NONE
@@ -11127,6 +11217,7 @@ let state_path = crate::state::AppState::config_path();
                     },
                 );
             });
+        self.subbar_h = panel_out.response.rect.height();
     }
 
     fn render_radial_tools_menu(&mut self, ui: &mut egui::Ui) {
@@ -15265,14 +15356,24 @@ impl eframe::App for Lapis {
         if !in_slideshow && self.has_pdf() {
             let topbar_slot = self.topbar_slot(ui);
             // The topbar itself, drawn into whichever ui the slot provides.
-            let mut draw_topbar = |ui: &mut egui::Ui| {
+            let overlay_at_bottom =
+                self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+            // The annotation sub-topbar keeps the window edge; the overlay goes beside it.
+            let overlay_offset = self.subbar_h;
+            let mut draw_topbar = |ui: &mut egui::Ui| -> f32 {
                 // Popups opened from the topbar set this again while they are open.
                 self.topbar_popup_open = false;
             // Density sets the row height, margins and button padding.
             let density = self.app_state.settings.ui_density;
             let bar = density.bar();
             let (bar_h, margin_y, pad_y) = (bar.row_h, bar.margin_y, bar.pad_y);
-            egui::Panel::top("top_panel")
+            let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+            let panel = if at_bottom {
+                egui::Panel::bottom("top_panel")
+            } else {
+                egui::Panel::top("top_panel")
+            };
+            let panel_out = panel
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_panel))
@@ -15688,17 +15789,8 @@ impl eframe::App for Lapis {
  
                 if is_open {
                     let mut close_requested = false;
-                    let (popup_pos, popup_pivot) = if !title_fits {
-                        (
-                            egui::pos2(button_rect.left(), button_rect.bottom() + 6.0),
-                            egui::Align2::LEFT_TOP,
-                        )
-                    } else {
-                        (
-                            egui::pos2(button_rect.center().x, button_rect.bottom() + 6.0),
-                            egui::Align2::CENTER_TOP,
-                        )
-                    };
+                    let (popup_pos, popup_pivot) =
+                        self.topbar_popup_placement(button_rect, title_fits);
  
                     let area_resp = egui::Area::new(ui.make_persistent_id("file_menu_area"))
                         .fixed_pos(popup_pos)
@@ -15856,20 +15948,27 @@ impl eframe::App for Lapis {
                 }
 
             });
+            panel_out.response.rect.height()
             };
 
             // Docked, revealed as an overlay (auto-hide), or hidden.
             let mut overlay_h = 0.0;
+            let mut dock_h = 0.0;
             match topbar_slot {
-                TopbarSlot::Docked => draw_topbar(ui),
+                TopbarSlot::Docked => dock_h = draw_topbar(ui),
                 TopbarSlot::Overlay => {
                     let ctx = ui.ctx().clone();
                     let screen = ctx.content_rect();
                     let area = egui::Area::new(ui.make_persistent_id("topbar_overlay"))
                         .order(egui::Order::Foreground)
-                        .fixed_pos(screen.min)
                         .constrain(false)
-                        .default_size(egui::vec2(screen.width(), 60.0))
+                        .default_size(egui::vec2(screen.width(), 60.0));
+                    let area = if overlay_at_bottom {
+                        area.anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(0.0, -overlay_offset))
+                    } else {
+                        area.fixed_pos(screen.min + egui::vec2(0.0, overlay_offset))
+                    };
+                    let area = area
                         .show(&ctx, |area_ui| {
                             area_ui.set_width(screen.width());
                             area_ui.set_max_height(screen.height());
@@ -15880,8 +15979,11 @@ impl eframe::App for Lapis {
                 TopbarSlot::Hidden => {}
             }
             self.topbar_overlay_h = overlay_h;
+            self.topbar_dock_h = dock_h;
         }
 
+        // Set again by the sub-topbar when it is drawn this frame.
+        self.subbar_h = 0.0;
         if self.has_pdf() && self.view_mode != ViewMode::Slideshow {
             match self.app_state.settings.tools_layout {
                 state::ToolsLayoutMode::SubTopbar => {
@@ -18461,7 +18563,7 @@ impl eframe::App for Lapis {
                 let shadow_color = egui::Color32::from_black_alpha(88).gamma_multiply(smooth_alpha);
 
                 // Slide-up in entrata e leggero slide-down in uscita
-                let y_offset = -24.0 + (1.0 - smooth_alpha) * 12.0;
+                let y_offset = -24.0 - self.bottom_bars_h() + (1.0 - smooth_alpha) * 12.0;
 
                 egui::Area::new(ui.make_persistent_id("toast_notification"))
                     .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(24.0, y_offset))

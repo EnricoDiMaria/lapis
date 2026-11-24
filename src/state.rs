@@ -572,6 +572,14 @@ impl<'de> Deserialize<'de> for UiDensity {
     }
 }
 
+/// Where the topbar is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TopbarPosition {
+    #[default]
+    Top,
+    Bottom,
+}
+
 /// Main topbar sizes.
 pub struct BarMetrics {
     pub row_h: f32,
@@ -736,6 +744,8 @@ pub struct AppSettings {
     pub ui_density: UiDensity,
     /// Hide the topbar; reveal it by hovering the top edge or with the shortcut.
     pub topbar_auto_hide: bool,
+    /// Top or bottom edge of the window.
+    pub topbar_position: TopbarPosition,
     /// Multiplier for mouse-wheel and trackpad scrolling, the same in every page view.
     pub wheel_scroll_speed: f32,
     /// Page movement per pixel of middle-button dragging, the same in every page view.
@@ -772,6 +782,7 @@ impl Default for AppSettings {
             sketch_enabled: true,
             ui_density: UiDensity::Standard,
             topbar_auto_hide: false,
+            topbar_position: TopbarPosition::Top,
             wheel_scroll_speed: DEFAULT_WHEEL_SCROLL_SPEED,
             pan_scroll_speed: DEFAULT_PAN_SCROLL_SPEED,
         }
@@ -913,5 +924,22 @@ mod scroll_speed_tests {
         };
         let back: AppSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!((back.wheel_scroll_speed, back.pan_scroll_speed), (3.5, 1.0));
+    }
+}
+
+#[cfg(test)]
+mod topbar_position_tests {
+    use super::*;
+
+    #[test]
+    fn the_topbar_defaults_to_the_top_and_the_choice_is_saved() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.topbar_position, TopbarPosition::Top);
+        let moved = AppSettings {
+            topbar_position: TopbarPosition::Bottom,
+            ..AppSettings::default()
+        };
+        let back: AppSettings = serde_json::from_str(&serde_json::to_string(&moved).unwrap()).unwrap();
+        assert_eq!(back.topbar_position, TopbarPosition::Bottom);
     }
 }
