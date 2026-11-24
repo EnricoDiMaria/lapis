@@ -11362,23 +11362,29 @@ let state_path = crate::state::AppState::config_path();
                 let c = box_rect.min + egui::vec2(105.0, 105.0);
                 let painter = ui.painter();
 
-                // Glass backdrop like the other popups: soft shadow, translucent fill, hairline
-                // border, then the inner ring guide.
-                for k in 0..8 {
+                // Tight, subtle shadow and a translucent surface.
+                for (radius, alpha) in [(109.0, 3), (107.0, 5), (105.0, 7), (103.0, 9)] {
                     painter.circle_filled(
-                        c + egui::vec2(0.0, 8.0),
-                        104.0 + (8 - k) as f32 * 2.5,
-                        egui::Color32::from_black_alpha(10),
+                        c + egui::vec2(0.0, 2.0),
+                        radius,
+                        egui::Color32::from_black_alpha(alpha),
                     );
                 }
                 let [gr, gg, gb] = self.theme.bg_elevated;
                 painter.circle_filled(
                     c,
                     102.0,
-                    egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
+                    egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 232),
                 );
-                painter.circle_stroke(c, 102.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
-                painter.circle_stroke(c, 52.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
+                let accent = rgb(self.theme.accent);
+                painter.circle_stroke(
+                    c, 102.0,
+                    egui::Stroke::new(1.0, accent.gamma_multiply(0.65)),
+                );
+                painter.circle_stroke(
+                    c, 52.0,
+                    egui::Stroke::new(0.75, accent.gamma_multiply(0.40)),
+                );
 
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
                 let left_clicked = bg_resp.clicked_by(egui::PointerButton::Primary);
@@ -11396,12 +11402,12 @@ let state_path = crate::state::AppState::config_path();
 
                 let in_hub = hover_pos.map(|p| p.distance(c) <= hub_r).unwrap_or(false);
 
-                painter.circle_filled(c, hub_r, rgb(self.theme.bg_elevated));
+                painter.circle_filled(
+                    c, hub_r,
+                    rgb(if in_hub && can_undo { self.theme.bg_hover } else { self.theme.bg_widget }),
+                );
                 painter.circle_stroke(c, hub_r, egui::Stroke::new(1.0, rgb(self.theme.border)));
                 let undo_pos = c;
-                if in_hub && can_undo {
-                    painter.circle_filled(undo_pos, 18.0, rgb(self.theme.bg_active));
-                }
 
                 let fg = rgb(self.theme.fg_primary);
                 let fg_dim = fg.gamma_multiply(0.35);
@@ -11420,7 +11426,7 @@ let state_path = crate::state::AppState::config_path();
                     }
                 }
 
-                // Intenal colors ring
+                // Inner colors ring
                 if shape_pick {
                     // Choose a shape instead of a color.
                     let kinds = [
@@ -11442,9 +11448,9 @@ let state_path = crate::state::AppState::config_path();
                             if is_sel {
                                 rgb(self.theme.accent)
                             } else if is_hov {
-                                rgb(self.theme.bg_active)
+                                rgb(self.theme.bg_hover)
                             } else {
-                                rgb(self.theme.bg_elevated)
+                                rgb(self.theme.bg_widget)
                             },
                         );
                         painter.circle_stroke(
@@ -11458,7 +11464,7 @@ let state_path = crate::state::AppState::config_path();
                             icon,
                             egui::FontId::proportional(14.0),
                             if is_sel {
-                                egui::Color32::from_rgb(18, 20, 26)
+                                self.theme.on_accent()
                             } else {
                                 rgb(self.theme.fg_primary)
                             },
@@ -11482,12 +11488,15 @@ let state_path = crate::state::AppState::config_path();
                         let is_sel = self.annotation_color == col;
                         let is_hov = hover_pos.map(|p| p.distance(pt) <= 10.0).unwrap_or(false);
 
-                        painter.circle_filled(pt, if is_hov { 9.5 } else { 8.0 }, rgb(col));
+                        painter.circle_filled(pt, 8.0, rgb(col));
                         if is_sel || is_hov {
                             painter.circle_stroke(
                                 pt,
                                 10.0,
-                                egui::Stroke::new(1.8, egui::Color32::WHITE),
+                                egui::Stroke::new(
+                                    if is_sel { 1.5 } else { 1.0 },
+                                    rgb(self.theme.fg_primary),
+                                ),
                             );
                         }
                         if is_hov {
@@ -11537,23 +11546,22 @@ let state_path = crate::state::AppState::config_path();
                     let fill = if is_active {
                         rgb(self.theme.accent)
                     } else if is_hov {
-                        rgb(self.theme.bg_active)
+                        rgb(self.theme.bg_hover)
                     } else {
-                        rgb(self.theme.bg_elevated)
+                        rgb(self.theme.bg_widget)
                     };
                     painter.circle_filled(pt, node_r, fill);
-                    painter.circle_stroke(
-                        pt,
-                        node_r,
-                        egui::Stroke::new(
-                            if is_active || is_hov { 1.8 } else { 1.0 },
-                            if is_active {
-                                self.theme.on_accent()
-                            } else {
-                                rgb(self.theme.border)
-                            },
-                        ),
-                    );
+                    if !is_active {
+                        painter.circle_stroke(
+                            pt,
+                            node_r,
+                            egui::Stroke::new(
+                                1.0,
+                                if is_hov { rgb(self.theme.accent) }
+                                else { rgb(self.theme.border).gamma_multiply(0.65) },
+                            ),
+                        );
+                    }
                     painter.text(
                         pt,
                         egui::Align2::CENTER_CENTER,
@@ -11588,7 +11596,7 @@ let state_path = crate::state::AppState::config_path();
                     let paste_hovered = hover_pos.map(|p| p.distance(paste_pos) <= 12.0).unwrap_or(false);
                     painter.circle_filled(
                         paste_pos, 12.0,
-                        if paste_hovered { rgb(self.theme.bg_active) } else { rgb(self.theme.bg_elevated) },
+                        if paste_hovered { rgb(self.theme.bg_hover) } else { rgb(self.theme.bg_widget) },
                     );
                     painter.circle_stroke(paste_pos, 12.0, egui::Stroke::new(1.2, rgb(self.theme.accent)));
                     painter.text(
@@ -11608,13 +11616,15 @@ let state_path = crate::state::AppState::config_path();
                 // Label for the node under the pointer.
                 if let Some(txt) = &label_hover {
                     let pos = c + egui::vec2(0.0, 122.0);
-                    let w = txt.chars().count() as f32 * 7.0 + 20.0;
-                    let r = egui::Rect::from_center_size(pos, egui::vec2(w, 20.0));
+                    let galley = painter.layout_no_wrap(
+                        txt.clone(), egui::FontId::proportional(12.0), rgb(self.theme.fg_primary),
+                    );
+                    let r = egui::Rect::from_center_size(pos, galley.size() + egui::vec2(18.0, 8.0));
                     let [gr, gg, gb] = self.theme.bg_elevated;
                     painter.rect_filled(
                         r,
                         egui::CornerRadius::same(8),
-                        egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
+                        egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 232),
                     );
                     painter.rect_stroke(
                         r,
@@ -11622,13 +11632,7 @@ let state_path = crate::state::AppState::config_path();
                         egui::Stroke::new(1.0, rgb(self.theme.border)),
                         egui::StrokeKind::Inside,
                     );
-                    painter.text(
-                        pos,
-                        egui::Align2::CENTER_CENTER,
-                        txt,
-                        egui::FontId::proportional(12.0),
-                        rgb(self.theme.fg_primary),
-                    );
+                    painter.galley(pos - galley.size() * 0.5, galley, rgb(self.theme.fg_primary));
                 }
             });
 

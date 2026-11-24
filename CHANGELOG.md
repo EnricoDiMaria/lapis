@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Radial annotation menu:** Reduced shadow spread and opacity, refined translucent surfaces, subtle accent-colored ring borders, tool selection, color swatches and hover labels.
+
 - **Consistent page scrolling:** The mouse wheel and middle-button drag now move the page the same way in every view mode. Before, Continuous Scroll used a faster wheel and drag than Single Page, and the two-page book view and the Split-View pane ignored middle-button dragging. Both speeds are adjustable under **Settings → Workspace → Page scrolling** (defaults: wheel 2.2×, drag 4.0×).
 - **Advanced Settings layout:** Every page now uses the same structure: a title with a description, titled cards for related options, and a short explanation under each option. Options are regrouped into seven sections (Appearance, Tools & Study, Workspace, Keybindings, Export & PDF, Storage & Data, Dictionaries); no option was removed. The Study & Canvas options are split into Tools & Study and Workspace, choices such as toolbar position, density and page style use the same button style, and the audio option label now reads "recording" instead of "registation".
 - **Textbox controls:** Compact translucent toolbar with glass formatting and color popups, a fixed-width Edit/Done action at the right edge, reliable formatting-control focus, and consistent text positioning while editing and viewing. An icon toolbar action copies the whole textbox.
