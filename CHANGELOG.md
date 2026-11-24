@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Audio shutdown:** Open output devices only when playback starts and fade active audio before closing the application to reduce audible pops.
+
 - **Drawing responsiveness:** Avoid duplicate local backup writes when finishing an annotation stroke.
 
 - **Keybindings layout:** Prevent overlapping action labels and key combinations in both configurable and fixed shortcuts, including narrow settings windows.

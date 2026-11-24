@@ -15077,6 +15077,8 @@ let state_path = crate::state::AppState::config_path();
 
 impl eframe::App for Lapis {
     fn on_exit(&mut self) {
+        self.audio_engine.shutdown_output();
+        self.memo_audio_engine.shutdown_output();
         self.finish_sketch_edit();
         self.sync_and_save();
         if self.has_pdf() {

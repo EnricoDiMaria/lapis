@@ -381,9 +381,9 @@ pub enum RecordingTarget {
 }
 
 pub struct AudioEngine {
-    // It must be kept alive for as long as audio is playing.
-    device_sink: Option<rodio::MixerDeviceSink>,
     player: Option<rodio::Player>,
+    // Keep the output alive until the player is dropped.
+    device_sink: Option<rodio::MixerDeviceSink>,
     pub active_file: Option<PathBuf>,
     playing_label: String,
     pub speed: f32,
@@ -405,17 +405,8 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> Self {
-        let device_sink = match rodio::DeviceSinkBuilder::open_default_sink() {
-            Ok(mut s) => {
-                // Avoid rodio printing a message to stderr on drop (breaks TUIs/GUIs)
-                s.log_on_drop(false);
-                Some(s)
-            }
-            Err(_) => None,
-        };
-
         Self {
-            device_sink,
+            device_sink: None,
             player: None,
             active_file: None,
             playing_label: String::new(),
@@ -614,13 +605,18 @@ impl AudioEngine {
         start_ms: u64,
         stretched: Option<PathBuf>,
     ) -> Result<(), String> {
-        let Some(device_sink) = &self.device_sink else {
-            return Err("No audio output device available".to_string());
-        };
         let is_stretched = stretched.is_some();
         let play_path = stretched.unwrap_or_else(|| original.to_path_buf());
         let file = File::open(&play_path).map_err(|e| e.to_string())?;
         let decoder = rodio::Decoder::try_from(file).map_err(|e| e.to_string())?;
+
+        if self.device_sink.is_none() {
+            let mut sink = rodio::DeviceSinkBuilder::open_default_sink()
+                .map_err(|e| format!("No audio output device available: {e}"))?;
+            sink.log_on_drop(false);
+            self.device_sink = Some(sink);
+        }
+        let device_sink = self.device_sink.as_ref().unwrap();
 
         let play_speed = if is_stretched { self.speed } else { 1.0 };
         let player = rodio::Player::connect_new(device_sink.mixer());
@@ -771,6 +767,23 @@ impl AudioEngine {
             let lbl = self.playing_label.clone();
             let _ = self.load_and_play(&path, lbl, clamped);
         }
+    }
+
+    pub fn shutdown_output(&mut self) {
+        if self.is_playing() {
+            if let Some(player) = &self.player {
+                let volume = player.volume();
+                for step in (0..8).rev() {
+                    player.set_volume(volume * step as f32 / 8.0);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Give buffered samples time to reach the device.
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+        self.stop_and_release();
+        self.pending_stretch = None;
+        self.device_sink.take();
     }
 
     pub fn stop_and_release(&mut self) {
@@ -1840,4 +1853,17 @@ pub fn strip_silences_from_lecture(
     index.waveform_peaks = compute_waveform_peaks(wav_path, 240);
 
     Ok((old_dur_ms, new_accum_ms))
+}
+
+#[cfg(test)]
+mod output_lifecycle_tests {
+    use super::AudioEngine;
+
+    #[test]
+    fn unused_engine_does_not_open_output() {
+        let mut engine = AudioEngine::new();
+        assert!(engine.device_sink.is_none());
+        engine.shutdown_output();
+        assert!(engine.device_sink.is_none());
+    }
 }
