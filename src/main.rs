@@ -5145,7 +5145,7 @@ impl Lapis {
         }
         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return; };
         let Some((layer, clip)) = ctx.data(|d| {
-            d.get_temp::<(egui::LayerId, egui::Rect)>(egui::Id::new("annotation_cursor_target"))
+            d.get_temp::<(egui::LayerId, egui::Rect)>(egui::Id::unique("annotation_cursor_target"))
         }) else { return; };
         if !clip.contains(pos) || ctx.layer_id_at(pos) != Some(layer) {
             return;
@@ -5248,7 +5248,7 @@ impl Lapis {
             .map(|p| slide_rect.contains(p) && pointer_on_pdf_layer)
             .unwrap_or(false);
         if pointer_in_slide && pointer_pos.is_some_and(|p| ui.clip_rect().contains(p)) {
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("annotation_cursor_target"),
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("annotation_cursor_target"),
                 (img_resp.layer_id, slide_rect.intersect(ui.clip_rect()))));
         }
         let any_text_focused = ui.ctx().memory(|m| m.focused().is_some());
@@ -6404,7 +6404,7 @@ impl Lapis {
                                                                                 .min_size(egui::vec2((control_w - 32.0).min(ui.available_width()).max(0.0), 24.0))
                                                                                 .wrap();
                                                                             if ui.add(btn).clicked() {
-                                                                                ui.data_mut(|d| d.remove::<PendingChord>(egui::Id::new(PENDING_ID)));
+                                                                                ui.data_mut(|d| d.remove::<PendingChord>(egui::Id::unique(PENDING_ID)));
                                                                                 self.rebinding_action = if is_rebinding {
                                                                                     None
                                                                                 } else {
@@ -15168,7 +15168,7 @@ impl eframe::App for Lapis {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let win_rect = ui.ctx().content_rect();
-        ui.ctx().data_mut(|d| d.remove::<(egui::LayerId, egui::Rect)>(egui::Id::new("annotation_cursor_target")));
+        ui.ctx().data_mut(|d| d.remove::<(egui::LayerId, egui::Rect)>(egui::Id::unique("annotation_cursor_target")));
 
         // Keep the egui style in step with the interface density (a theme change resets it).
         let density = self.app_state.settings.ui_density;

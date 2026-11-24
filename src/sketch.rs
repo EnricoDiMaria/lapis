@@ -1251,8 +1251,9 @@ mod tests {
             };
             self.time += 0.05;
             let (st, sketches, changed) = (&mut self.st, &mut self.sketches, &mut self.changed);
+            let draw_hold = crate::state::ShortcutsConfig::default().trackpad_draw_hold;
             let mut out = self.ctx.run_ui(raw, |ui| {
-                *changed |= show(ui, st, 1, sketches);
+                *changed |= show(ui, st, 1, sketches, &draw_hold);
             });
             out.textures_delta.clear(); // not rendered in tests
         }

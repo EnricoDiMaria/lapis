@@ -437,7 +437,7 @@ fn is_modifier_key_name(name: &str) -> bool {
 }
 
 pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
-    let id = egui::Id::new(PENDING_ID);
+    let id = egui::Id::unique(PENDING_ID);
     let mut pending: Option<PendingChord> = ui.data(|d| d.get_temp(id));
 
     let cancel = ui.input(|i| {

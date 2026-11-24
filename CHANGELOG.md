@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Drawing responsiveness:** Avoid duplicate local backup writes when finishing an annotation stroke.
 
+- **Sketch tests:** Use the configured drawing-hold binding in the test harness and replace deprecated egui IDs.
+
 - **Keybindings layout:** Enlarge Advanced Settings to fit the window and display configurable and fixed shortcuts on one line when space permits, falling back to stacked rows to prevent overlap.
 
 - **Auto-hide toolbar layout:** When both horizontal bars share an edge, the revealed topbar stays outermost and the annotation toolbar docks directly inward without leaving a gap or covering the PDF canvas, including the last page in Continuous Scroll. Notifications account for both bars at the bottom. Notes and Flashcards notification dots retain their corner overlap without clipping in auto-hide mode.
