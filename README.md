@@ -362,7 +362,7 @@ Releases are built by GitHub Actions: pushing a `v*` tag builds the Windows inst
 
 # Keyboard Shortcuts
 
-Some shortcuts are configurable through **Settings → Keybindings**. The following table lists the fixed shortcuts and the principal default navigation shortcuts visible in the application.
+Configurable shortcuts are grouped in **Settings → Keybindings**. Uncheck individual actions or use the bulk enable/disable controls; disabled bindings are retained. The following table lists fixed controls and the main default bindings.
 
 | Shortcut | Action |
 |---|---|
@@ -389,9 +389,19 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `Ctrl + Plus` | Zoom in |
 | `Ctrl + Minus` | Zoom out |
 | `Ctrl + 0` | Reset zoom to 100% |
+| `V` | Cursor / Select PDF Text |
+| `P` / `H` / `T` / `U` | Pen / Highlighter / Textbox / Underline |
+| `E` | Eraser |
+| `R` / `O` / `L` / `A` | Rectangle / Circle / Line / Arrow |
+| `S` / `B` | Snip / Occlusion tape |
+| `N` / `X` / `G` | Toggle notes / Edit–Preview / Outline |
+| `D` / `Z` | Toggle annotation toolbar / Radial tools menu |
+| `M` | Toggle PDF night mode |
+| `W` | Fit Width |
+| `F` | Fit Page without resizing the notes panel when not typing |
 | `Alt + F` | Fit PDF and right notes panel to the available workspace |
 
-The configurable shortcut system also provides global previous/next slide navigation and other application actions.
+Single-letter shortcuts operate outside text fields. Toolbar and radial-menu hints reflect the active binding; disabled shortcuts do not appear in those hints. The configurable shortcut system also provides global previous/next slide navigation and other application actions.
 
 For the complete and current shortcut assignments, open **Settings → Keybindings**.
 

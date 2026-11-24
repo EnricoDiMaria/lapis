@@ -1310,6 +1310,30 @@ impl AnnotationTool {
     }
 }
 
+fn annotation_shortcut_hint(sc: &ShortcutsConfig, tool: AnnotationTool, label: &str) -> String {
+    let binding = match tool {
+        AnnotationTool::Cursor => &sc.select_cursor,
+        AnnotationTool::Draw => &sc.select_pen,
+        AnnotationTool::Highlight => &sc.select_highlighter,
+        AnnotationTool::TextBox => &sc.select_textbox,
+        AnnotationTool::Underline => &sc.select_underline,
+        AnnotationTool::Eraser => &sc.select_eraser,
+        AnnotationTool::Snip => &sc.select_snip,
+        AnnotationTool::Tape => &sc.select_tape,
+        AnnotationTool::Shape | AnnotationTool::Laser => return label.to_owned(),
+    };
+    binding.hint(label)
+}
+
+fn shape_shortcut_hint(sc: &ShortcutsConfig, shape: ShapeKind, label: &str) -> String {
+    match shape {
+        ShapeKind::Rect => &sc.select_rectangle,
+        ShapeKind::Circle => &sc.select_circle,
+        ShapeKind::Line => &sc.select_line,
+        ShapeKind::Arrow => &sc.select_arrow,
+    }.hint(label)
+}
+
 fn annotation_kind_color_slot(kind: notes::AnnotationKind) -> Option<usize> {
     match kind {
         notes::AnnotationKind::Freehand => AnnotationTool::Draw.color_slot(),
@@ -2892,7 +2916,7 @@ impl Lapis {
                 )
                 .min_size(btn_size),
             )
-            .on_hover_text("Toggle Annotation Tools Bar")
+            .on_hover_text(self.app_state.shortcuts.toggle_tools.hint("Toggle Annotation Tools Bar"))
             .clicked()
             && self.has_pdf()
         {
@@ -2921,7 +2945,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::SinglePage,
-                    "󰈙  Single Page        [Alt+1]",
+                    self.app_state.shortcuts.view_single.hint("󰈙  Single Page"),
                 )
                 .clicked()
             {
@@ -2931,7 +2955,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::Continuous,
-                    "󰡏  Continuous Scroll  [Alt+2]",
+                    self.app_state.shortcuts.view_continuous.hint("󰡏  Continuous Scroll"),
                 )
                 .clicked()
             {
@@ -2940,9 +2964,9 @@ impl Lapis {
             }
 
             let book_menu_label = if self.book_cover_mode {
-                "󰂻  Book (2,3 Cover)   [Alt+3]"
+                self.app_state.shortcuts.view_twopage.hint("󰂻  Book (2,3 Cover)")
             } else {
-                "󰂺  Book (1,2 Pair)    [Alt+3]"
+                self.app_state.shortcuts.view_twopage.hint("󰂺  Book (1,2 Pair)")
             };
 
             if ui
@@ -2964,7 +2988,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::Slideshow,
-                    "󰐨  Slideshow          [Alt+4]",
+                    self.app_state.shortcuts.view_slideshow.hint("󰐨  Slideshow"),
                 )
                 .clicked()
             {
@@ -2979,7 +3003,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::SlideshowWithNotes,
-                    "󰠮  Slideshow + Notes  [Alt+5]",
+                    self.app_state.shortcuts.view_slideshow_notes.hint("󰠮  Slideshow + Notes"),
                 )
                 .clicked()
             {
@@ -3049,7 +3073,7 @@ impl Lapis {
                 )
                 .min_size(btn_size),
             )
-            .on_hover_text("Toggle PDF Dark / Night Mode")
+            .on_hover_text(self.app_state.shortcuts.toggle_night.hint("Toggle PDF Dark / Night Mode"))
             .clicked()
         {
             if labeled {
@@ -3084,10 +3108,7 @@ impl Lapis {
                 )
                 .min_size(btn_size),
             )
-            .on_hover_text(format!(
-                "Search in Notes [{}]",
-                self.app_state.shortcuts.search_notes.format_label()
-            ))
+            .on_hover_text(self.app_state.shortcuts.search_notes.hint("Global Search"))
             .clicked()
             && self.has_pdf()
         {
@@ -6115,7 +6136,7 @@ impl Lapis {
                                                                 ui,
                                                                 &mut self.app_state.settings.topbar_auto_hide,
                                                                 "Auto-hide topbar",
-                                                                "Hover the window edge the topbar sits on to show it. Alt+T turns auto-hide on or off.",
+                                                                "Hover the window edge the topbar sits on to show it. The auto-hide shortcut can be changed in Keybindings.",
                                                             )
                                                             .changed()
                                                             {
@@ -6190,7 +6211,7 @@ impl Lapis {
                                                     // ───────────── KEYBINDINGS ─────────────
                                                     
                                                     SettingsTab::Shortcuts => {
-                                                        settings_page_header(ui, "Keybindings", "Click a shortcut, then press the new combination. Hold a key and press another for multi-key combos (e.g. G + H). Esc cancels.");
+                                                        settings_page_header(ui, "Keybindings", "Uncheck a shortcut to disable it without losing its binding. Click a key to rebind, or press two keys in sequence for a chord. Esc cancels.");
                                                     
                                                         // Defaults and snapshots for reset and conflict detection.
                                                         let mut defaults_cfg = ShortcutsConfig::default();
@@ -6200,100 +6221,134 @@ impl Lapis {
                                                             .collect();
                                                     
                                                         let cfg = &mut self.app_state.shortcuts;
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            for (label, enabled) in [("Enable all", true), ("Disable all", false)] {
+                                                                if ui.button(label).clicked() {
+                                                                    for (_, binding) in shortcut_entries(cfg) {
+                                                                        binding.enabled = enabled;
+                                                                    }
+                                                                    self.rebinding_action = None;
+                                                                    settings_dirty = true;
+                                                                }
+                                                            }
+                                                        });
+                                                        ui.add_space(6.0);
                                                         let snapshot: Vec<(&'static str, ShortcutBinding)> = shortcut_entries(cfg)
                                                             .into_iter()
                                                             .map(|(l, b)| (l, b.clone()))
                                                             .collect();
-                                                    
-                                                        settings_section(ui, "Customizable shortcuts", "Reset one with its arrow button, or all of them below.", |ui| {
-                                                        for (label, binding) in shortcut_entries(cfg) {
-                                                            if self.rebinding_action.as_deref() == Some(label)
-                                                                && let Some(cap) = capture_shortcut(ui) {
-                                                                    if let Capture::Set(nb) = cap {
-                                                                        *binding = nb;
-                                                                        settings_dirty = true;
-                                                                    }
-                                                                    self.rebinding_action = None;
-                                                                }
-                                                    
-                                                            let is_rebinding = self.rebinding_action.as_deref() == Some(label);
-                                                            let default = defaults.iter().find(|(l, _)| *l == label).map(|(_, b)| b.clone());
-                                                    
-                                                            let conflict = snapshot
-                                                                .iter()
-                                                                .find(|(l, b)| *l != label && *b == *binding)
-                                                                .map(|(l, _)| *l);
-                                                    
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(label);
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    // Reset (rightmost)
-                                                                    if let Some(def) = &default
-                                                                        && *binding != *def
-                                                                            && ui.small_button("󰑐").on_hover_text("Reset to default").clicked()
-                                                                        {
-                                                                            *binding = def.clone();
+
+                                                        for (group, description, labels) in [
+                                                            ("Document & navigation", "Save, search and move between pages.", &[
+                                                                "Save notes", "Search in notes", "Previous slide (global)", "Next slide (global)"
+                                                            ][..]),
+                                                            ("View & zoom", "Change PDF view, zoom and appearance.", &[
+                                                                "View: Single page", "View: Continuous", "View: Book spread", "View: Slideshow", "View: Slideshow + Notes", "Toggle Continuous / Single page", "Toggle fullscreen", "Fit Page", "Fit Width", "Fit PDF and notes layout", "PDF night mode"
+                                                            ][..]),
+                                                            ("Workspace", "Show or switch panels and toolbars.", &[
+                                                                "Toggle notes panel", "Toggle edit / preview", "Toggle outline", "Toggle Sketch tab (notes panel)", "Toggle topbar auto-hide", "Toggle annotation toolbar", "Radial tools menu"
+                                                            ][..]),
+                                                            ("Annotation tools", "Choose tools without opening a toolbar.", &[
+                                                                "Cursor / Select PDF Text", "Pen", "Highlighter", "Textbox", "Underline", "Eraser", "Rectangle", "Circle", "Line", "Arrow", "Snip", "Occlusion tape", "Trackpad draw (hold)"
+                                                            ][..]),
+                                                        ] {
+                                                            settings_section(ui, group, description, |ui| {
+                                                                for (label, binding) in shortcut_entries(cfg) {
+                                                                    if !labels.contains(&label) { continue; }
+                                                                    if self.rebinding_action.as_deref() == Some(label)
+                                                                        && let Some(cap) = capture_shortcut(ui) {
+                                                                            if let Capture::Set(nb) = cap {
+                                                                                let enabled = binding.enabled;
+                                                                                *binding = nb;
+                                                                                binding.enabled = enabled;
+                                                                                settings_dirty = true;
+                                                                            }
+                                                                            self.rebinding_action = None;
+                                                                        }
+
+                                                                    let is_rebinding = self.rebinding_action.as_deref() == Some(label);
+                                                                    let default = defaults.iter().find(|(l, _)| *l == label).map(|(_, b)| b.clone());
+
+                                                                    let conflict = snapshot
+                                                                        .iter()
+                                                                        .find(|(l, b)| *l != label && binding.enabled && b.enabled && b.conflicts_with(binding))
+                                                                        .map(|(l, _)| *l);
+
+                                                                    ui.vertical(|ui| {
+                                                                        if ui.checkbox(&mut binding.enabled, label).on_hover_text("Enable this shortcut").changed() {
                                                                             settings_dirty = true;
-                                                                            if is_rebinding {
+                                                                            if !binding.enabled && is_rebinding {
                                                                                 self.rebinding_action = None;
                                                                             }
                                                                         }
-                                                    
-                                                                    let text = if is_rebinding {
-                                                                        "󰌌  Press keys…  (Esc to cancel)".to_string()
-                                                                    } else {
-                                                                        binding.format_label()
-                                                                    };
-                                                                    let btn = crate::theme::selected_button(
-                                                                        egui::RichText::new(text).monospace(),
-                                                                        is_rebinding,
-                                                                        ui.visuals(),
-                                                                    )
-                                                                        .min_size(egui::vec2(170.0, 24.0));
-                                                    
-                                                                    if ui.add(btn).clicked() {
-                                                                        ui.data_mut(|d| d.remove::<PendingChord>(ui.make_persistent_id(PENDING_ID)));
-                                                                        self.rebinding_action = if is_rebinding {
-                                                                            None
-                                                                        } else {
-                                                                            Some(label.to_string())
-                                                                        };
+                                                                        ui.horizontal(|ui| {
+                                                                            if let Some(def) = &default {
+                                                                                if ui.add_enabled(*binding != *def, egui::Button::new("󰑐").small())
+                                                                                    .on_hover_text("Reset to default and enable").clicked()
+                                                                                {
+                                                                                    *binding = def.clone();
+                                                                                    settings_dirty = true;
+                                                                                    self.rebinding_action = None;
+                                                                                }
+                                                                            }
+
+                                                                            let text = if is_rebinding {
+                                                                                "󰌌  Press keys…  (Esc to cancel)".to_string()
+                                                                            } else {
+                                                                                binding.format_label()
+                                                                            };
+                                                                            let btn = crate::theme::selected_button(
+                                                                                egui::RichText::new(text).monospace(),
+                                                                                is_rebinding,
+                                                                                ui.visuals(),
+                                                                            )
+                                                                                .min_size(egui::vec2(ui.available_width().max(0.0), 24.0))
+                                                                                .wrap();
+
+                                                                            if ui.add(btn).clicked() {
+                                                                                ui.data_mut(|d| d.remove::<PendingChord>(egui::Id::new(PENDING_ID)));
+                                                                                self.rebinding_action = if is_rebinding {
+                                                                                    None
+                                                                                } else {
+                                                                                    Some(label.to_string())
+                                                                                };
+                                                                            }
+                                                                        });
+                                                                    });
+
+                                                                    if let Some(other) = conflict {
+                                                                        ui.label(
+                                                                            egui::RichText::new(format!("⚠ Conflicts with “{}”", other))
+                                                                                .size(11.5)
+                                                                                .color(egui::Color32::from_rgb(251, 191, 36)),
+                                                                        );
                                                                     }
-                                                                });
+                                                                    ui.separator();
+                                                                }
                                                             });
-                                                    
-                                                            if let Some(other) = conflict {
-                                                                ui.label(
-                                                                    egui::RichText::new(format!("⚠ Same combination as “{}”", other))
-                                                                        .size(11.5)
-                                                                        .color(egui::Color32::from_rgb(251, 191, 36)),
-                                                                );
-                                                            }
-                                                            ui.separator();
                                                         }
-                                                        });
-                                                    
+
                                                         ui.add_space(8.0);
                                                         if ui.button("󰑐  Reset All Shortcuts to Default").clicked() {
                                                             *cfg = ShortcutsConfig::default();
                                                             self.rebinding_action = None;
                                                             settings_dirty = true;
                                                         }
-                                                    
+
                                                         ui.add_space(12.0);
-                                                        settings_section(ui, "Fixed shortcuts", "Built in; these cannot be changed.", |ui| {
-                                                        for (name, keys) in [
-                                                            ("Command Palette", "Ctrl + P / Ctrl + K"),
-                                                            ("Global Search", "Ctrl + F"),
-                                                            ("Undo / Redo Annotation", "Ctrl + Z / Ctrl + Y"),
-                                                        ] {
-                                                            ui.horizontal(|ui| {
+                                                        settings_section(ui, "Fixed shortcuts", "Built-in controls, independent of the configurable bindings above.", |ui| {
+                                                            for (name, keys) in [
+                                                                ("Command Palette", "Ctrl + P / Ctrl + K"),
+                                                                ("Undo annotations", "Ctrl + Z"),
+                                                                ("Redo annotations", "Ctrl + Y / Ctrl + Shift + Z"),
+                                                                ("Previous / next page", "Left / Right, K / J, PageUp / PageDown"),
+                                                                ("Zoom in / out / reset", "Ctrl + Plus / Minus / 0"),
+                                                                ("Exit slideshow", "Esc"),
+                                                            ] {
                                                                 ui.label(name);
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    ui.code(keys);
-                                                                });
-                                                            });
-                                                        }
+                                                                ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                ui.add_space(3.0);
+                                                            }
                                                         });
                                                     }
 
@@ -7599,7 +7654,7 @@ let state_path = crate::state::AppState::config_path();
             ("mode_single", "󰈙  Switch to Single Page Mode", "View"),
             (
                 "mode_toggle_cont_single",
-                "󰍜  Toggle Continuous / Single Page [C]",
+                "󰍜  Toggle Continuous / Single Page",
                 "View",
             ),
             (
@@ -7607,14 +7662,15 @@ let state_path = crate::state::AppState::config_path();
                 "󰐨  Enter Presentation / Slideshow Mode",
                 "View",
             ),
-            ("toggle_fullscreen", "󰊓  Toggle Fullscreen [F11]", "View"),
+            ("toggle_fullscreen", "󰊓  Toggle Fullscreen", "View"),
             (
                 "toggle_sketch",
-                "󰠱  Toggle Sketch (page scratchpad) [Alt+S]",
+                "󰠱  Toggle Sketch (page scratchpad)",
                 "View",
             ),
-            ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide [Alt+T]", "View"),
+            ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide", "View"),
             ("fit_page", "󰊓  Fit PDF and Notes Layout", "View"),
+            ("fit_pdf_page", "󰊓  Fit Page", "View"),
             ("toggle_topbar_position", "󰁝  Move Topbar to Bottom / Top", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
@@ -7688,7 +7744,29 @@ let state_path = crate::state::AppState::config_path();
                 || q.split_whitespace()
                     .all(|tok| label.to_lowercase().contains(tok))
             {
-                filtered.push((id, label.to_string(), cat));
+                let sc = &self.app_state.shortcuts;
+                let binding = match id {
+                    "mode_continuous" => Some(&sc.view_continuous),
+                    "mode_single" => Some(&sc.view_single),
+                    "mode_book" => Some(&sc.view_twopage),
+                    "mode_toggle_cont_single" => Some(&sc.toggle_continuous_single),
+                    "mode_slideshow" => Some(&sc.view_slideshow),
+                    "toggle_fullscreen" => Some(&sc.toggle_fullscreen),
+                    "toggle_sketch" => Some(&sc.toggle_sketch),
+                    "toggle_topbar" => Some(&sc.toggle_topbar),
+                    "fit_page" => Some(&sc.fit_page),
+                    "fit_pdf_page" => Some(&sc.fit_pdf_page),
+                    "toggle_dark" => Some(&sc.toggle_night),
+                    "global_search" => Some(&sc.search_notes),
+                    "tool_cursor" => Some(&sc.select_cursor),
+                    "tool_pen" => Some(&sc.select_pen),
+                    "tool_highlight" => Some(&sc.select_highlighter),
+                    "tool_tape" => Some(&sc.select_tape),
+                    "tool_snip" => Some(&sc.select_snip),
+                    "tool_eraser" => Some(&sc.select_eraser),
+                    _ => None,
+                };
+                filtered.push((id, binding.map_or_else(|| label.to_owned(), |b| b.hint(label)), cat));
             }
         }
 
@@ -7825,6 +7903,10 @@ let state_path = crate::state::AppState::config_path();
             "toggle_sketch" => self.toggle_sketch_tab(),
             "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
             "fit_page" => self.request_fit_notes_layout(ctx),
+            "fit_pdf_page" => {
+                self.zoom_mode = ZoomMode::FitPage;
+                self.zoom_anchor = None;
+            }
             "toggle_topbar_position" => self.toggle_topbar_position(),
             "toggle_fullscreen" => {
                 if !matches!(
@@ -11223,6 +11305,7 @@ let state_path = crate::state::AppState::config_path();
                         let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
                         let icon_size = m.icon;
 
+                        let shortcuts = &self.app_state.shortcuts;
                         let mut bar_btn = |ui: &mut egui::Ui,
                                            icon: &str,
                                            tool: AnnotationTool,
@@ -11237,7 +11320,7 @@ let state_path = crate::state::AppState::config_path();
                                     )
                                         .min_size(btn_sz),
                                 )
-                                .on_hover_text(tip)
+                                .on_hover_text(annotation_shortcut_hint(shortcuts, tool, tip))
                                 .clicked();
 
                             if clicked {
@@ -11343,6 +11426,7 @@ let state_path = crate::state::AppState::config_path();
                                         )
                                             .min_size(egui::vec2(52.0, m.shape_btn_h)),
                                     )
+                                    .on_hover_text(shape_shortcut_hint(&self.app_state.shortcuts, sk, lbl))
                                     .clicked()
                                 {
                                     self.shape_kind = sk;
@@ -11532,7 +11616,7 @@ let state_path = crate::state::AppState::config_path();
                             },
                         );
                         if is_hov {
-                            label_hover = Some(lbl.to_string());
+                            label_hover = Some(shape_shortcut_hint(&self.app_state.shortcuts, *sk, lbl));
                         }
                         if clicked && is_hov {
                             self.shape_kind = *sk;
@@ -11637,7 +11721,7 @@ let state_path = crate::state::AppState::config_path();
                     );
 
                     if is_hov {
-                        label_hover = Some(label.to_string());
+                        label_hover = Some(annotation_shortcut_hint(&self.app_state.shortcuts, tool, label));
                     }
 
                     if clicked && is_hov {
@@ -11759,6 +11843,7 @@ let state_path = crate::state::AppState::config_path();
 
                         let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
 
+                        let shortcuts = &self.app_state.shortcuts;
                         let mut rail_btn = |ui: &mut egui::Ui,
                                             icon: &str,
                                             tool: AnnotationTool,
@@ -11773,7 +11858,7 @@ let state_path = crate::state::AppState::config_path();
                                     )
                                         .min_size(btn_sz),
                                 )
-                                .on_hover_text(tip);
+                                .on_hover_text(annotation_shortcut_hint(shortcuts, tool, tip));
 
                             if resp.clicked() {
                                 self.annotation_tool = tool;
@@ -11787,7 +11872,7 @@ let state_path = crate::state::AppState::config_path();
                             ui,
                             "󰇀",
                             AnnotationTool::Cursor,
-                            "Cursor / Select PDF Text & Click Links",
+                            "Cursor / Select PDF Text",
                         );
 
                         rail_btn(ui, " ", AnnotationTool::Highlight, "Highlighter");
@@ -11977,7 +12062,7 @@ let state_path = crate::state::AppState::config_path();
                                             )
                                                 .min_size(egui::vec2(30.0, 28.0)),
                                         )
-                                        .on_hover_text(lbl)
+                                        .on_hover_text(shape_shortcut_hint(&self.app_state.shortcuts, sk, lbl))
                                         .clicked()
                                     {
                                         self.shape_kind = sk;
@@ -13602,8 +13687,7 @@ let state_path = crate::state::AppState::config_path();
                 let compact = full_width < 320.0;
 
                 if !use_bottom && !self.split_view_enabled {
-                    let hint = format!("Fit PDF and notes layout [{}]",
-                        self.app_state.shortcuts.fit_page.format_label());
+                    let hint = self.app_state.shortcuts.fit_page.hint("Fit PDF and notes layout");
                     if ui.add_sized([18.0, nav_h],
                         egui::Button::new(egui::RichText::new("󰊓").size(11.0))
                             .corner_radius(button_radius))
@@ -13732,11 +13816,8 @@ let state_path = crate::state::AppState::config_path();
                             egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
                         );
                     }
-                    let hover = if has_sketch {
-                        "Sketch: a separate scratchpad for this page (Alt+S)\n(This page contains a sketch)"
-                    } else {
-                        "Sketch: a separate scratchpad for this page (Alt+S)"
-                    };
+                    let mut hover = self.app_state.shortcuts.toggle_sketch.hint("Sketch: a separate scratchpad for this page");
+                    if has_sketch { hover.push_str("\n(This page contains a sketch)"); }
                     if resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(hover)
@@ -13759,7 +13840,7 @@ let state_path = crate::state::AppState::config_path();
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Edit your Markdown and LaTeX notes")
+                    .on_hover_text(self.app_state.shortcuts.toggle_edit_preview.hint("Edit your Markdown and LaTeX notes"))
                     .clicked()
                 {
                     self.note_mode = NoteMode::Edit;
@@ -13779,7 +13860,7 @@ let state_path = crate::state::AppState::config_path();
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Preview the formatted notes")
+                    .on_hover_text(self.app_state.shortcuts.toggle_edit_preview.hint("Preview the formatted notes"))
                     .clicked()
                 {
                     self.note_mode = NoteMode::Preview;
@@ -13828,7 +13909,7 @@ let state_path = crate::state::AppState::config_path();
                     ui.take_available_width();
                     if self.note_mode == NoteMode::Sketch {
                         let sketch_page = self.note_page;
-                        if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches) {
+                        if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches, &self.app_state.shortcuts.trackpad_draw_hold) {
                             self.save_sketch_data();
                         }
                         return;
@@ -13878,7 +13959,6 @@ let state_path = crate::state::AppState::config_path();
                                 let mut has_paste_event = false;
                                 let mut fallback_v_release = false;
                                 let mut has_copy_or_cut = false;
-                                let mut trigger_save = false;
 
                                 let ctrl_recent = screenshots::ctrl_recently_held(ui.ctx());
                                 ui.input(|i| {
@@ -13907,11 +13987,6 @@ let state_path = crate::state::AppState::config_path();
                                             }
                                             _ => {}
                                         }
-                                    }
-                                    if (i.modifiers.ctrl || i.modifiers.command)
-                                        && i.key_pressed(egui::Key::S)
-                                    {
-                                        trigger_save = true;
                                     }
                                 });
 
@@ -13989,22 +14064,7 @@ let state_path = crate::state::AppState::config_path();
                                     copied_or_cut_text = selected_slice;
                                 }
 
-                                if trigger_save {
-                                    self.sync_and_save();
-                                    let commit_result = if self.has_pdf() {
-                                        notes::commit_doc_data(
-                                            &self.pdf_path, &self.notes, &self.annotations,
-                                            self.blank_pages.clone(), &self.sketches,
-                                        )
-                                    } else { Ok(()) };
-                                    self.toast_message = Some((
-                                        match commit_result {
-                                            Ok(()) => "󰄬 Saved".to_string(),
-                                            Err(err) => format!("PDF save failed: {err}"),
-                                        },
-                                        std::time::Instant::now(),
-                                    ));
-                                }
+
                             }
 
                             let text_col = rgb(self.theme.fg_primary);
@@ -15190,12 +15250,19 @@ impl eframe::App for Lapis {
         let mut act_toggle_sketch = false;
         let mut act_toggle_topbar = false;
         let mut act_fit_page = false;
+        let mut act_fit_pdf_page = false;
+        let mut act_tool = None;
+        let mut act_shape = None;
+        let mut act_fit_width = false;
+        let mut act_toggle_night = false;
+        let mut act_toggle_tools = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
 
         if !self.show_settings && self.rebinding_action.is_none() {
             ui.input_mut(|i| {
+                state::track_key_presses(i);
                 // 1. Trackpad pinch or Ctrl + wheel zoom
                 let z_delta = i.zoom_delta();
                 if sketch_hover {
@@ -15247,32 +15314,60 @@ impl eframe::App for Lapis {
                     self.zoom_mode = ZoomMode::Custom;
                 }
 
-                // 3. Global Ctrl shortcuts (Ctrl+S, Ctrl+E, Ctrl+N, Ctrl+T)
+                // Configurable workspace and annotation shortcuts.
                 let sc = &self.app_state.shortcuts;
-                if sc.save_notes.consume(i) {
+                let text_context = any_focused || self.show_search || self.show_command_palette || self.show_flashcards_modal;
+                let allowed = |binding: &ShortcutBinding| !text_context || binding.ctrl || binding.alt;
+                if allowed(&sc.save_notes) && sc.save_notes.consume_once(i) {
                     act_save = true;
                 }
-                if sc.toggle_edit_preview.consume(i) {
+                if allowed(&sc.toggle_edit_preview) && sc.toggle_edit_preview.consume_once(i) {
                     act_toggle_mode = true;
                 }
-                if sc.toggle_notes.consume(i) {
+                if allowed(&sc.toggle_notes) && sc.toggle_notes.consume_once(i) {
                     act_toggle_notes = true;
                 }
-                if sc.toggle_sketch.consume(i) {
+                if allowed(&sc.toggle_sketch) && sc.toggle_sketch.consume_once(i) {
                     act_toggle_sketch = true;
                 }
-                if sc.fit_page.consume(i) {
+                if allowed(&sc.fit_page) && sc.fit_page.consume_once(i) {
                     act_fit_page = true;
                 }
-                if sc.toggle_topbar.consume(i) {
+                if !text_context && self.has_pdf() {
+                    let mut consume = |binding: &ShortcutBinding| binding.consume_once(i);
+                    act_fit_pdf_page = consume(&sc.fit_pdf_page);
+                    act_fit_width = consume(&sc.fit_width);
+                    act_toggle_night = consume(&sc.toggle_night);
+                    act_toggle_tools = consume(&sc.toggle_tools);
+                    for (binding, tool) in [
+                        (&sc.select_cursor, AnnotationTool::Cursor),
+                        (&sc.select_pen, AnnotationTool::Draw),
+                        (&sc.select_highlighter, AnnotationTool::Highlight),
+                        (&sc.select_textbox, AnnotationTool::TextBox),
+                        (&sc.select_underline, AnnotationTool::Underline),
+                        (&sc.select_eraser, AnnotationTool::Eraser),
+                        (&sc.select_snip, AnnotationTool::Snip),
+                        (&sc.select_tape, AnnotationTool::Tape),
+                    ] {
+                        if consume(binding) { act_tool = Some(tool); }
+                    }
+                    for (binding, shape) in [
+                        (&sc.select_rectangle, ShapeKind::Rect),
+                        (&sc.select_circle, ShapeKind::Circle),
+                        (&sc.select_line, ShapeKind::Line),
+                        (&sc.select_arrow, ShapeKind::Arrow),
+                    ] {
+                        if consume(binding) { act_shape = Some(shape); }
+                    }
+                }
+                if allowed(&sc.toggle_topbar) && sc.toggle_topbar.consume_once(i) {
                     act_toggle_topbar = true;
                 }
-                if sc.toggle_outline.consume(i) {
+                if allowed(&sc.toggle_outline) && sc.toggle_outline.consume_once(i) {
                     act_toggle_toc = true;
                 }
-                // 4. Slide navigation, including while editing notes.
-                //    Alt + Left/Right, Alt + K/J, Ctrl + PageUp/PageDown, or PageUp/PageDown
-                if sc.prev_slide_global.consume(i)
+                // Configured page navigation and fixed PageUp/PageDown controls.
+                if allowed(&sc.prev_slide_global) && sc.prev_slide_global.consume(i)
                     || i.consume_shortcut(&egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
                         egui::Key::PageUp,
@@ -15280,7 +15375,7 @@ impl eframe::App for Lapis {
                 {
                     act_prev_page = true;
                 }
-                if sc.next_slide_global.consume(i)
+                if allowed(&sc.next_slide_global) && sc.next_slide_global.consume(i)
                     || i.consume_shortcut(&egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
                         egui::Key::PageDown,
@@ -15290,15 +15385,17 @@ impl eframe::App for Lapis {
                 }
 
                 // 5. Standard Left/Right or K/J when not typing in a text box and annotation tools
-                if !any_focused {
-                    if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::K) {
-                        act_prev_page = true;
-                    }
-                    if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::J) {
-                        act_next_page = true;
+                if !text_context {
+                    if !i.modifiers.any() {
+                        if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::K) {
+                            act_prev_page = true;
+                        }
+                        if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::J) {
+                            act_next_page = true;
+                        }
                     }
                     if self.app_state.settings.radial_menu_enabled
-                        && self.app_state.shortcuts.radial_tools_menu.consume(i)
+                        && self.app_state.shortcuts.radial_tools_menu.consume_once(i)
                     {
                         self.radial_menu_pos = if self.radial_menu_pos.is_some() {
                             None
@@ -15309,28 +15406,25 @@ impl eframe::App for Lapis {
                         };
                     }
                 }
-                // Fullscreen: F11 always works (also while typing notes); a rebinding made of a
-                // plain key only works when no text field has the focus.
+                // F11 works while typing only when it is the configured fullscreen binding.
                 {
                     let b = &self.app_state.shortcuts.toggle_fullscreen;
-                    let plain = !b.ctrl && !b.alt && !b.shift && b.extra_key.is_none();
-                    let by_binding = (!plain || !any_focused) && b.consume(i);
-                    let by_f11 = i.consume_key(egui::Modifiers::NONE, egui::Key::F11);
-                    if by_binding || by_f11 {
+                    let by_binding = (allowed(b) || b.key == "F11") && b.consume_once(i);
+                    if by_binding {
                         act_toggle_fullscreen = true;
                     }
                 }
                 // 6. View Mode Shortcuts: Alt+1 (Single), Alt+2 (Continuous), Alt+3 (TwoPage), Alt+4 (Slideshow), Alt+4 (Slideshow+Notes), Esc (Exit Slideshow)
-                if sc.view_single.consume(i) {
+                if allowed(&sc.view_single) && sc.view_single.consume_once(i) {
                     act_view_mode = Some(ViewMode::SinglePage);
                 }
-                if sc.view_continuous.consume(i) {
+                if allowed(&sc.view_continuous) && sc.view_continuous.consume_once(i) {
                     act_view_mode = Some(ViewMode::Continuous);
                 }
-                if sc.view_twopage.consume(i) {
+                if allowed(&sc.view_twopage) && sc.view_twopage.consume_once(i) {
                     self.view_mode = ViewMode::TwoPage;
                 }
-                if sc.view_slideshow.consume(i) {
+                if allowed(&sc.view_slideshow) && sc.view_slideshow.consume_once(i) {
                     if self.view_mode != ViewMode::Slideshow
                         && self.view_mode != ViewMode::SlideshowWithNotes
                     {
@@ -15338,7 +15432,7 @@ impl eframe::App for Lapis {
                     }
                     self.view_mode = ViewMode::Slideshow;
                 }
-                if sc.view_slideshow_notes.consume(i) {
+                if allowed(&sc.view_slideshow_notes) && sc.view_slideshow_notes.consume_once(i) {
                     if self.view_mode != ViewMode::Slideshow
                         && self.view_mode != ViewMode::SlideshowWithNotes
                     {
@@ -15359,10 +15453,9 @@ impl eframe::App for Lapis {
                     self.view_mode,
                     ViewMode::Slideshow | ViewMode::SlideshowWithNotes
                 );
-                if !any_focused && !in_show && self.has_pdf() {
+                if !text_context && !in_show && self.has_pdf() {
                     let b = &self.app_state.shortcuts.toggle_continuous_single;
-                    let chord_free = b.ctrl || !i.modifiers.command;
-                    if chord_free && b.consume(i) {
+                    if b.consume_once(i) {
                         act_view_mode = Some(if self.view_mode == ViewMode::Continuous {
                             ViewMode::SinglePage
                         } else {
@@ -15413,7 +15506,7 @@ impl eframe::App for Lapis {
                     self.redo_annotation(self.current_page);
                 }
                 //10. Search
-                if self.app_state.shortcuts.search_notes.consume(i) {
+                if allowed(&self.app_state.shortcuts.search_notes) && self.app_state.shortcuts.search_notes.consume_once(i) {
                     if self.show_search {
                         self.close_search();
                     } else {
@@ -15458,11 +15551,41 @@ impl eframe::App for Lapis {
             self.show_notes = !self.show_notes;
             if self.show_notes {
                 self.note_mode = NoteMode::Edit;
-                self.focus_note_editor = true;
+                self.focus_note_editor = !self.app_state.shortcuts.toggle_notes.is_plain();
             }
         }
         if act_toggle_sketch {
             self.toggle_sketch_tab();
+        }
+        if let Some(tool) = act_tool {
+            self.annotation_tool = tool;
+        }
+        if let Some(shape) = act_shape {
+            self.shape_kind = shape;
+            self.annotation_tool = AnnotationTool::Shape;
+        }
+        if act_fit_width {
+            self.zoom_mode = ZoomMode::FitWidth;
+            self.zoom_anchor = None;
+        }
+        if act_toggle_night {
+            self.pdf_dark_mode = !self.pdf_dark_mode;
+            self.page_cache.clear();
+            self.page_scale.clear();
+            self.thumb_cache.clear();
+            self.last_page_req = None;
+            self.last_thumb_req = None;
+            self.save_session_state();
+        }
+        if act_toggle_tools {
+            self.show_tools_rail = !self.show_tools_rail;
+            if !self.show_tools_rail && self.app_state.settings.reset_tool_on_bar_close {
+                self.annotation_tool = AnnotationTool::Cursor;
+            }
+        }
+        if act_fit_pdf_page {
+            self.zoom_mode = ZoomMode::FitPage;
+            self.zoom_anchor = None;
         }
         if act_fit_page && !use_bottom_notes {
             self.request_fit_notes_layout(ui.ctx());
@@ -15600,7 +15723,7 @@ impl eframe::App for Lapis {
                         .min_size(egui::vec2(44.0, bar_h));
                     if ui
                         .add(toc_btn)
-                        .on_hover_text("Toggle Outline")
+                        .on_hover_text(self.app_state.shortcuts.toggle_outline.hint("Toggle Outline"))
                         .clicked()
                     {
                         self.show_toc = !self.show_toc;
@@ -15638,7 +15761,7 @@ impl eframe::App for Lapis {
                     }
                     ui.separator();
                     if ui
-                        .selectable_label(self.zoom_mode == ZoomMode::FitWidth, "󰤼  Fit Width")
+                        .selectable_label(self.zoom_mode == ZoomMode::FitWidth, self.app_state.shortcuts.fit_width.hint("󰤼  Fit Width"))
                         .clicked()
                     {
                         self.zoom_mode = ZoomMode::FitWidth;
@@ -15655,7 +15778,7 @@ impl eframe::App for Lapis {
                         ui.close();
                     }
                     if ui
-                        .selectable_label(self.zoom_mode == ZoomMode::FitPage, "󰊓  Fit Page")
+                        .selectable_label(self.zoom_mode == ZoomMode::FitPage, self.app_state.shortcuts.fit_pdf_page.hint("󰊓  Fit Page"))
                         .clicked()
                     {
                         self.zoom_mode = ZoomMode::FitPage;
@@ -15676,7 +15799,7 @@ impl eframe::App for Lapis {
                     }
                 });
 
-                let resp = zoom_menu.response.on_hover_text("Zoom Mode [Ctrl+Scroll] | Right Click: Fit Page");
+                let resp = zoom_menu.response.on_hover_text(format!("Zoom Mode [Ctrl+Scroll] | Right Click: {} | {}", self.app_state.shortcuts.fit_pdf_page.hint("Fit Page"), self.app_state.shortcuts.fit_width.hint("Fit Width")));
 
                 if resp.hovered() && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
                     self.zoom_mode = ZoomMode::FitPage;
@@ -15749,7 +15872,7 @@ impl eframe::App for Lapis {
                         }
  
                         let has_notes_hover = if page_has_note {"\n(This page contains notes)"} else {""};
-                        if resp.on_hover_text(format!("Toggle Notes Panel {}", has_notes_hover)).clicked() {
+                        if resp.on_hover_text(format!("{}{}", self.app_state.shortcuts.toggle_notes.hint("Toggle Notes Panel"), has_notes_hover)).clicked() {
                             self.show_notes = !self.show_notes;
                             if self.show_notes && self.note_mode == NoteMode::Edit {
                                 self.focus_note_editor = true;
@@ -15770,7 +15893,7 @@ impl eframe::App for Lapis {
  
                         if ui
                             .add(egui::Button::new("󰁔").min_size(sq_btn))
-                            .on_hover_text("Next Page [→ / J / Alt+→]")
+                            .on_hover_text(self.app_state.shortcuts.next_slide_global.hint("Next Page [→ / J / PageDown]"))
                             .clicked()
                         {
                             self.next_page(ui.ctx());
@@ -15797,7 +15920,7 @@ impl eframe::App for Lapis {
  
                         if ui
                             .add(egui::Button::new("󰁍").min_size(sq_btn))
-                            .on_hover_text("Previous Page [← / K / Alt+←]")
+                            .on_hover_text(self.app_state.shortcuts.prev_slide_global.hint("Previous Page [← / K / PageUp]"))
                             .clicked()
                         {
                             self.prev_page(ui.ctx());
@@ -16050,7 +16173,7 @@ impl eframe::App for Lapis {
                                     }
 
                                     if menu_item(ui, "󰆓  Save Notes", true)
-                                        .on_hover_text("Checkpoint locally and commit the PDF")
+                                        .on_hover_text(self.app_state.shortcuts.save_notes.hint("Checkpoint locally and commit the PDF"))
                                         .clicked()
                                     {
                                         let result = self.save_pdf_explicitly();

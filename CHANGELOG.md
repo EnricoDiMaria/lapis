@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PDF and workspace shortcuts:** Configurable single-key shortcuts for annotation tools, Fit Page (`F`), Fit Width (`W`), night mode (`M`), the annotation toolbar (`D`), notes (`N`), Edit / Preview (`X`) and outline (`G`). `Alt+F` still fits both the PDF and notes panel. Each configurable shortcut can be disabled without losing its binding. Keybindings are grouped by function, with bulk enable/disable controls and current shortcut hints in toolbars, the radial menu and the Command Palette. Former default panel bindings migrate to the new layout without replacing custom bindings.
+
 - **Unicode font fallback:** Use installed system fonts for missing characters in Markdown notes and other interface text, while preserving custom fonts and Nerd Font icons.
 
 - **Independent annotation toolbar placement:** Choose Top, Bottom, or Follow topbar under **Settings → Tools & Study → Annotation toolbar**. The vertical rail remains available.
@@ -38,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, using only the letters of each dictionary) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
 
 ### Fixed
+
+- **Keybindings layout:** Prevent overlapping action labels and key combinations in both configurable and fixed shortcuts, including narrow settings windows.
 
 - **Auto-hide toolbar layout:** When both horizontal bars share an edge, the revealed topbar stays outermost and the annotation toolbar docks directly inward without leaving a gap or covering the PDF canvas, including the last page in Continuous Scroll. Notifications account for both bars at the bottom. Notes and Flashcards notification dots retain their corner overlap without clipping in auto-hide mode.
 

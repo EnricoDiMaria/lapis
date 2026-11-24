@@ -100,7 +100,7 @@ This mode is useful when presenting or reviewing a slide while keeping its assoc
 
 ### Fit PDF and Notes Layout — `Alt + F`
 
-Click the fit icon to the left of the lock in the right notes panel header, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu still fits the PDF without moving the divider.
+Click the fit icon to the left of the lock in the right notes panel header, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu, or `F` when not typing, fits the PDF without moving the divider. Both shortcuts can be changed in **Settings → Keybindings**.
 
 ### Fullscreen — `F11`
 
@@ -185,7 +185,7 @@ You can move between pages using:
 - `PageUp` / `PageDown`.
 - The configurable global previous/next slide shortcuts.
 
-The Alt-based navigation shortcuts are also available inside the notes editor.
+The configurable Alt-based navigation shortcuts are also available inside the notes editor. Single-letter workspace and annotation shortcuts are disabled while typing.
 
 ---
 
@@ -209,7 +209,7 @@ The pen, highlighter, textboxes, underline, shapes and occlusion tape each remem
 
 ### Cursor
 
-Use the Cursor tool to interact with existing content and annotations without drawing a new mark.
+Use the Cursor tool to interact with existing content and annotations without drawing a new mark. Press `V` when not typing to return to Cursor / Select, even if the annotation toolbar is closed. The other annotation tools also have single-letter defaults; see [Keybindings](#keybindings) for the full list. All these shortcuts can be changed or disabled in **Settings → Keybindings**.
 
 ### Draw / Pen
 
@@ -731,7 +731,26 @@ Named palettes are stored in `custom_themes.json` alongside the active `theme.js
 
 Lapis supports configurable keyboard shortcuts.
 
-**Customizable shortcuts** lists every action: click a shortcut, then press the new combination. The interface identifies conflicting combinations and offers a reset for one shortcut or for all of them. **Fixed shortcuts** lists the built-in ones, which cannot be changed.
+Configurable actions are grouped into **Document & navigation**, **View & zoom**, **Workspace**, and **Annotation tools**. Click a binding and press the new combination (or two keys in sequence for a chord). Use the checkbox beside an action to disable or enable its binding without losing the assigned keys. **Enable all** and **Disable all** apply to the configurable actions; the individual reset button and **Reset All Shortcuts to Default** restore and enable the corresponding defaults. Conflicts between enabled configurable bindings are flagged. The separate **Fixed shortcuts** section lists built-in controls that are not affected by these toggles.
+
+Default single-letter bindings work when you are not typing:
+
+| Annotation tools | Workspace and view |
+|---|---|
+| `V` Cursor / Select | `N` Toggle notes panel |
+| `P` Pen | `X` Switch Edit / Preview |
+| `H` Highlighter | `G` Toggle outline |
+| `T` Textbox | `D` Toggle annotation toolbar |
+| `U` Underline | `Z` Radial tools menu |
+| `E` Eraser | `M` PDF night mode |
+| `R` Rectangle | `W` Fit Width |
+| `O` Circle | `F` Fit Page |
+| `L` Line | `C` Toggle Continuous / Single Page |
+| `A` Arrow | |
+| `S` Snip | |
+| `B` Occlusion tape | |
+
+Tooltips and radial-menu labels show the current shortcut rather than the default. Disabled shortcuts have no key hint. The drawing-hold binding (Space by default) applies to both PDF annotations and the Sketch canvas. Existing custom bindings are kept when upgrading; former default Ctrl+N, Ctrl+E and Ctrl+T bindings are migrated to N, X and G respectively if the new key is free.
 
 ### Export & PDF
 

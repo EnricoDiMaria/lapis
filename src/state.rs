@@ -184,6 +184,8 @@ impl ExportSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShortcutBinding {
+    #[serde(default = "shortcut_enabled_default")]
+    pub enabled: bool,
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
@@ -192,9 +194,14 @@ pub struct ShortcutBinding {
     pub extra_key: Option<String>,
 }
 
+fn shortcut_enabled_default() -> bool {
+    true
+}
+
 impl ShortcutBinding {
     pub fn new(ctrl: bool, alt: bool, shift: bool, key: &str) -> Self {
         Self {
+            enabled: true,
             ctrl,
             alt,
             shift,
@@ -221,32 +228,81 @@ impl ShortcutBinding {
         parts.join(" + ")
     }
 
+    pub fn hint(&self, label: &str) -> String {
+        if self.enabled {
+            format!("{label} [{}]", self.format_label())
+        } else {
+            label.to_owned()
+        }
+    }
+
+    pub fn same_combination(&self, other: &Self) -> bool {
+        self.ctrl == other.ctrl
+            && self.alt == other.alt
+            && self.shift == other.shift
+            && self.key == other.key
+            && self.extra_key == other.extra_key
+    }
+
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        if self.same_combination(other) {
+            return true;
+        }
+        if (self.ctrl, self.alt, self.shift) != (other.ctrl, other.alt, other.shift) {
+            return false;
+        }
+        // A single key must not consume either part of a configured chord.
+        match (&self.extra_key, &other.extra_key) {
+            (None, Some(prefix)) => self.key == other.key || &self.key == prefix,
+            (Some(prefix), None) => self.key == other.key || prefix == &other.key,
+            _ => false,
+        }
+    }
+
+    pub fn is_plain(&self) -> bool {
+        !self.ctrl && !self.alt && !self.shift && self.extra_key.is_none()
+    }
+
     pub fn to_egui_key(&self) -> Option<egui::Key> {
         egui::Key::from_name(&self.key)
     }
 
     pub fn consume(&self, i: &mut egui::InputState) -> bool {
-        track_key_presses(i);
+        self.consume_impl(i, true)
+    }
 
+    pub fn consume_once(&self, i: &mut egui::InputState) -> bool {
+        self.consume_impl(i, false)
+    }
+
+    fn modifiers_match(&self, mods: egui::Modifiers) -> bool {
+        self.ctrl == (mods.ctrl || mods.command)
+            && self.alt == mods.alt
+            && self.shift == mods.shift
+    }
+
+    fn consume_impl(&self, i: &mut egui::InputState, allow_repeat: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        track_key_presses(i);
         let Some(k) = self.to_egui_key() else {
             return false;
         };
-
         if let Some(ek_name) = &self.extra_key {
             return self.consume_chord(i, k, ek_name);
         }
 
-        let mut mods = egui::Modifiers::NONE;
-        if self.ctrl {
-            mods |= egui::Modifiers::COMMAND;
-        }
-        if self.alt {
-            mods |= egui::Modifiers::ALT;
-        }
-        if self.shift {
-            mods |= egui::Modifiers::SHIFT;
-        }
-        i.consume_shortcut(&egui::KeyboardShortcut::new(mods, k))
+        let mut consumed = false;
+        i.events.retain(|event| {
+            let matched = matches!(event,
+                egui::Event::Key { key, pressed: true, repeat, modifiers, .. }
+                    if *key == k && self.modifiers_match(*modifiers)
+                        && (allow_repeat || !*repeat));
+            consumed |= matched;
+            !matched
+        });
+        consumed
     }
 
     fn consume_chord(&self, i: &mut egui::InputState, k: egui::Key, ek_name: &str) -> bool {
@@ -283,9 +339,9 @@ impl ShortcutBinding {
 
             let extra_ok =
                 held_extra || t.last_press.get(&ek).map(|&ts| recent(ts)).unwrap_or(false);
-            let ctrl_ok = !self.ctrl || cur_ctrl || recent(t.last_ctrl);
-            let alt_ok = !self.alt || cur_alt || recent(t.last_alt);
-            let shift_ok = !self.shift || cur_shift || recent(t.last_shift);
+            let ctrl_ok = if self.ctrl { cur_ctrl || recent(t.last_ctrl) } else { !cur_ctrl };
+            let alt_ok = if self.alt { cur_alt || recent(t.last_alt) } else { !cur_alt };
+            let shift_ok = if self.shift { cur_shift || recent(t.last_shift) } else { !cur_shift };
             extra_ok && ctrl_ok && alt_ok && shift_ok
         };
         if !ok {
@@ -306,17 +362,20 @@ impl ShortcutBinding {
     }
 
     pub fn is_held(&self, i: &egui::InputState) -> bool {
+        if !self.enabled || !self.modifiers_match(i.modifiers) {
+            return false;
+        }
         let Some(k) = self.to_egui_key() else {
             return false;
         };
-        let ctrl_ok = !self.ctrl || i.modifiers.ctrl || i.modifiers.command;
-        let alt_ok = !self.alt || i.modifiers.alt;
-        let shift_ok = !self.shift || i.modifiers.shift;
-        ctrl_ok && alt_ok && shift_ok && i.key_down(k)
+        let extra_held = self.extra_key.as_ref().is_none_or(|name| {
+            egui::Key::from_name(name).is_some_and(|key| i.key_down(key))
+        });
+        extra_held && i.key_down(k)
     }
 }
 
-pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 19] {
+pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut ShortcutBinding); 35] {
     [
         ("Save notes", &mut cfg.save_notes),
         ("Toggle notes panel", &mut cfg.toggle_notes),
@@ -340,6 +399,22 @@ pub fn shortcut_entries(cfg: &mut ShortcutsConfig) -> [(&'static str, &mut Short
         ("Toggle Sketch tab (notes panel)", &mut cfg.toggle_sketch),
         ("Toggle topbar auto-hide", &mut cfg.toggle_topbar),
         ("Fit PDF and notes layout", &mut cfg.fit_page),
+        ("Fit Page", &mut cfg.fit_pdf_page),
+        ("Cursor / Select PDF Text", &mut cfg.select_cursor),
+        ("Pen", &mut cfg.select_pen),
+        ("Highlighter", &mut cfg.select_highlighter),
+        ("Textbox", &mut cfg.select_textbox),
+        ("Underline", &mut cfg.select_underline),
+        ("Eraser", &mut cfg.select_eraser),
+        ("Rectangle", &mut cfg.select_rectangle),
+        ("Circle", &mut cfg.select_circle),
+        ("Line", &mut cfg.select_line),
+        ("Arrow", &mut cfg.select_arrow),
+        ("Snip", &mut cfg.select_snip),
+        ("Occlusion tape", &mut cfg.select_tape),
+        ("Fit Width", &mut cfg.fit_width),
+        ("PDF night mode", &mut cfg.toggle_night),
+        ("Toggle annotation toolbar", &mut cfg.toggle_tools),
     ]
 }
 
@@ -362,7 +437,7 @@ fn is_modifier_key_name(name: &str) -> bool {
 }
 
 pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
-    let id = ui.make_persistent_id(egui::IdSalt::new(PENDING_ID));
+    let id = egui::Id::new(PENDING_ID);
     let mut pending: Option<PendingChord> = ui.data(|d| d.get_temp(id));
 
     let cancel = ui.input(|i| {
@@ -437,6 +512,8 @@ pub fn capture_shortcut(ui: &egui::Ui) -> Option<Capture> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutsConfig {
+    #[serde(default)]
+    layout_version: u8,
     pub save_notes: ShortcutBinding,
     pub toggle_notes: ShortcutBinding,
     pub toggle_edit_preview: ShortcutBinding,
@@ -456,15 +533,32 @@ pub struct ShortcutsConfig {
     pub toggle_sketch: ShortcutBinding,
     pub toggle_topbar: ShortcutBinding,
     pub fit_page: ShortcutBinding,
+    pub fit_pdf_page: ShortcutBinding,
+    pub select_cursor: ShortcutBinding,
+    pub select_pen: ShortcutBinding,
+    pub select_highlighter: ShortcutBinding,
+    pub select_textbox: ShortcutBinding,
+    pub select_underline: ShortcutBinding,
+    pub select_eraser: ShortcutBinding,
+    pub select_rectangle: ShortcutBinding,
+    pub select_circle: ShortcutBinding,
+    pub select_line: ShortcutBinding,
+    pub select_arrow: ShortcutBinding,
+    pub select_snip: ShortcutBinding,
+    pub select_tape: ShortcutBinding,
+    pub fit_width: ShortcutBinding,
+    pub toggle_night: ShortcutBinding,
+    pub toggle_tools: ShortcutBinding,
 }
 
 impl Default for ShortcutsConfig {
     fn default() -> Self {
         Self {
+            layout_version: 1,
             save_notes: ShortcutBinding::new(true, false, false, "S"),
-            toggle_notes: ShortcutBinding::new(true, false, false, "N"),
-            toggle_edit_preview: ShortcutBinding::new(true, false, false, "E"),
-            toggle_outline: ShortcutBinding::new(true, false, false, "T"),
+            toggle_notes: ShortcutBinding::new(false, false, false, "N"),
+            toggle_edit_preview: ShortcutBinding::new(false, false, false, "X"),
+            toggle_outline: ShortcutBinding::new(false, false, false, "G"),
             prev_slide_global: ShortcutBinding::new(false, true, false, "ArrowLeft"),
             next_slide_global: ShortcutBinding::new(false, true, false, "ArrowRight"),
             view_single: ShortcutBinding::new(false, true, false, "1"),
@@ -480,7 +574,58 @@ impl Default for ShortcutsConfig {
             toggle_sketch: ShortcutBinding::new(false, true, false, "S"),
             toggle_topbar: ShortcutBinding::new(false, true, false, "T"),
             fit_page: ShortcutBinding::new(false, true, false, "F"),
+            fit_pdf_page: ShortcutBinding::new(false, false, false, "F"),
+            select_cursor: ShortcutBinding::new(false, false, false, "V"),
+            select_pen: ShortcutBinding::new(false, false, false, "P"),
+            select_highlighter: ShortcutBinding::new(false, false, false, "H"),
+            select_textbox: ShortcutBinding::new(false, false, false, "T"),
+            select_underline: ShortcutBinding::new(false, false, false, "U"),
+            select_eraser: ShortcutBinding::new(false, false, false, "E"),
+            select_rectangle: ShortcutBinding::new(false, false, false, "R"),
+            select_circle: ShortcutBinding::new(false, false, false, "O"),
+            select_line: ShortcutBinding::new(false, false, false, "L"),
+            select_arrow: ShortcutBinding::new(false, false, false, "A"),
+            select_snip: ShortcutBinding::new(false, false, false, "S"),
+            select_tape: ShortcutBinding::new(false, false, false, "B"),
+            fit_width: ShortcutBinding::new(false, false, false, "W"),
+            toggle_night: ShortcutBinding::new(false, false, false, "M"),
+            toggle_tools: ShortcutBinding::new(false, false, false, "D"),
         }
+    }
+}
+
+impl ShortcutsConfig {
+    fn migrate_layout(&mut self) {
+        if self.layout_version != 0 {
+            return;
+        }
+        // Prefer existing custom bindings over newly introduced defaults.
+        let mut entries = shortcut_entries(self);
+        // The original actions precede the newly added ones in shortcut_entries.
+        let (existing, added) = entries.split_at_mut(21);
+        for (_, binding) in added {
+            if existing.iter().any(|(_, old)| old.enabled && old.conflicts_with(binding)) {
+                binding.enabled = false;
+            }
+        }
+        for (label, old_key, new_key) in [
+            ("Toggle notes panel", "N", "N"),
+            ("Toggle edit / preview", "E", "X"),
+            ("Toggle outline", "T", "G"),
+        ] {
+            let old = ShortcutBinding::new(true, false, false, old_key);
+            let new = ShortcutBinding::new(false, false, false, new_key);
+            let mut entries = shortcut_entries(self);
+            let taken = entries.iter().any(|(name, binding)| {
+                *name != label && binding.enabled && binding.conflicts_with(&new)
+            });
+            if !taken && let Some((_, binding)) = entries.iter_mut().find(|(name, _)| *name == label)
+                && **binding == old
+            {
+                **binding = new;
+            }
+        }
+        self.layout_version = 1;
     }
 }
 
@@ -852,6 +997,7 @@ impl AppState {
         if let Ok(content) = fs::read_to_string(&path)
             && let Ok(mut state) = serde_json::from_str::<Self>(&content)
         {
+            state.shortcuts.migrate_layout();
             // Filter out files that were deleted or moved from disk
             state.recent_files.retain(|entry| entry.path.exists());
             return state;
@@ -991,5 +1137,74 @@ mod topbar_position_tests {
         };
         let back: AppSettings = serde_json::from_str(&serde_json::to_string(&moved).unwrap()).unwrap();
         assert_eq!(back.topbar_position, TopbarPosition::Bottom);
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_unique_and_enabled() {
+        let mut cfg = ShortcutsConfig::default();
+        let entries = shortcut_entries(&mut cfg);
+        for (index, (name, binding)) in entries.iter().enumerate() {
+            assert!(binding.enabled, "{name}");
+            assert!(binding.to_egui_key().is_some(), "{name}");
+            for (other_name, other) in &entries[index + 1..] {
+                assert!(!binding.same_combination(other), "{name} conflicts with {other_name}");
+            }
+        }
+        assert_eq!(cfg.toggle_notes.format_label(), "N");
+        assert_eq!(cfg.toggle_edit_preview.format_label(), "X");
+        assert_eq!(cfg.toggle_outline.format_label(), "G");
+    }
+
+    #[test]
+    fn disabled_bindings_round_trip_and_hide_hints() {
+        let mut binding = ShortcutBinding::new(false, true, false, "H");
+        assert_eq!(binding.hint("Highlighter"), "Highlighter [Alt + H]");
+        binding.enabled = false;
+        let saved = serde_json::to_string(&binding).unwrap();
+        let restored: ShortcutBinding = serde_json::from_str(&saved).unwrap();
+        assert_eq!(binding, restored);
+        assert_eq!(restored.hint("Highlighter"), "Highlighter");
+        assert_eq!(restored.format_label(), "Alt + H");
+    }
+
+    #[test]
+    fn legacy_defaults_migrate_without_overwriting_custom_bindings() {
+        let mut cfg = ShortcutsConfig::default();
+        cfg.layout_version = 0;
+        cfg.toggle_notes = ShortcutBinding::new(true, false, false, "N");
+        cfg.toggle_edit_preview = ShortcutBinding::new(true, false, false, "E");
+        cfg.toggle_outline = ShortcutBinding::new(true, true, false, "G");
+        cfg.save_notes = ShortcutBinding::new(false, false, false, "P");
+        cfg.migrate_layout();
+        assert_eq!(cfg.toggle_notes.format_label(), "N");
+        assert_eq!(cfg.toggle_edit_preview.format_label(), "X");
+        assert_eq!(cfg.toggle_outline.format_label(), "Ctrl + Alt + G");
+        assert_eq!(cfg.save_notes.format_label(), "P");
+        assert!(!cfg.select_pen.enabled);
+        cfg.toggle_notes = ShortcutBinding::new(true, false, false, "N");
+        cfg.migrate_layout();
+        assert_eq!(cfg.toggle_notes.format_label(), "Ctrl + N");
+    }
+
+    #[test]
+    fn plain_keys_do_not_match_modified_keys() {
+        let binding = ShortcutBinding::new(false, false, false, "P");
+        assert!(binding.modifiers_match(egui::Modifiers::NONE));
+        assert!(!binding.modifiers_match(egui::Modifiers::COMMAND));
+        assert!(!binding.modifiers_match(egui::Modifiers::ALT));
+        assert!(!binding.modifiers_match(egui::Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn legacy_binding_is_enabled_when_flag_is_missing() {
+        let binding: ShortcutBinding = serde_json::from_str(
+            r#"{"ctrl":false,"alt":false,"shift":false,"key":"P"}"#,
+        ).unwrap();
+        assert!(binding.enabled);
     }
 }
