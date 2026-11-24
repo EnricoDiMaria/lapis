@@ -708,7 +708,7 @@ impl UiDensity {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ToolsLayoutMode {
     VerticalRail, // Floating vertical pill on the right edge
-    SubTopbar,    // Solid horizontal secondary toolbar below the main Topbar
+    SubTopbar,    // Horizontal annotation toolbar
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,6 +727,8 @@ pub struct AppSettings {
     pub disabled_dictionaries: Vec<PathBuf>,
     pub slideshow_empty_mode: SlideshowEmptyMode,
     pub tools_layout: ToolsLayoutMode,
+    /// None keeps the horizontal toolbar on the topbar edge.
+    pub annotation_bar_position: Option<TopbarPosition>,
     pub tools_button: bool,
     /// Return to Cursor / Select when the annotation bar is closed.
     pub reset_tool_on_bar_close: bool,
@@ -771,6 +773,7 @@ impl Default for AppSettings {
             disabled_dictionaries: Vec::new(),
             slideshow_empty_mode: SlideshowEmptyMode::StaticEmpty,
             tools_layout: ToolsLayoutMode::SubTopbar,
+            annotation_bar_position: None,
             tools_button: true,
             reset_tool_on_bar_close: true,
             radial_menu_enabled: true,
@@ -789,6 +792,12 @@ impl Default for AppSettings {
             wheel_scroll_speed: DEFAULT_WHEEL_SCROLL_SPEED,
             pan_scroll_speed: DEFAULT_PAN_SCROLL_SPEED,
         }
+    }
+}
+
+impl AppSettings {
+    pub fn annotation_bar_edge(&self) -> TopbarPosition {
+        self.annotation_bar_position.unwrap_or(self.topbar_position)
     }
 }
 
@@ -933,6 +942,18 @@ mod scroll_speed_tests {
 #[cfg(test)]
 mod topbar_position_tests {
     use super::*;
+
+    #[test]
+    fn annotation_bar_position_is_independent_and_saved() {
+        let mut settings: AppSettings = serde_json::from_str(r#"{"topbar_position":"Bottom"}"#).unwrap();
+        assert_eq!(settings.annotation_bar_edge(), TopbarPosition::Bottom);
+        settings.annotation_bar_position = Some(TopbarPosition::Top);
+        let mut back: AppSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(back.annotation_bar_edge(), TopbarPosition::Top);
+        back.topbar_position = TopbarPosition::Top;
+        back.annotation_bar_position = Some(TopbarPosition::Bottom);
+        assert_eq!(back.annotation_bar_edge(), TopbarPosition::Bottom);
+    }
 
     #[test]
     fn the_topbar_defaults_to_the_top_and_the_choice_is_saved() {

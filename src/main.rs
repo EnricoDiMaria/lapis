@@ -1906,9 +1906,12 @@ impl Lapis {
         };
         // A press elsewhere (drawing, dragging) must not pop the bar open.
         let at_edge = near_edge(5.0) && !button_down;
-        // The overlay floats next to the annotation sub-topbar (never over it), so the pointer
-        // path from the window edge to the bar crosses the sub-topbar.
-        let reach = self.subbar_h + self.topbar_overlay_h + 4.0;
+        // Keep the revealed bar open while using a same-edge annotation toolbar.
+        let settings = &self.app_state.settings;
+        let shared_edge = self.show_tools_rail
+            && settings.tools_layout == state::ToolsLayoutMode::SubTopbar
+            && settings.annotation_bar_edge() == settings.topbar_position;
+        let reach = self.topbar_overlay_h + if shared_edge { self.subbar_h } else { 0.0 } + 4.0;
         let over_bar = was_shown && near_edge(reach);
         // Menus and popups opened from the bar keep it visible while they are open: egui menus
         // (zoom, overflow), the file and bookmark popups, and the search popup.
@@ -1962,14 +1965,20 @@ impl Lapis {
         }
     }
 
-    /// Space taken at the bottom of the window by the docked topbar and annotation sub-topbar
-    /// when they sit at the bottom.
+    /// Space occupied by visible bars at the bottom of the window.
     fn bottom_bars_h(&self) -> f32 {
-        if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
-            self.topbar_dock_h + self.subbar_h
+        let settings = &self.app_state.settings;
+        let topbar = if settings.topbar_position == state::TopbarPosition::Bottom {
+            self.topbar_dock_h + self.topbar_overlay_h
         } else {
             0.0
-        }
+        };
+        let annotation = if settings.annotation_bar_edge() == state::TopbarPosition::Bottom {
+            self.subbar_h
+        } else {
+            0.0
+        };
+        topbar + annotation
     }
 
     /// Moves the topbar between the top and the bottom edge (saved).
@@ -3037,12 +3046,22 @@ impl Lapis {
         }
     }
 
-    /// "Has content" dot on a topbar button corner; smaller in the compact topbar so the
-    /// shorter bar does not crop it.
+    /// Allow corner badges to extend into the topbar margin.
     fn paint_topbar_dot(&self, ui: &egui::Ui, button: egui::Rect) {
         let m = self.app_state.settings.ui_density.bar();
-        ui.painter().circle(
-            egui::pos2(button.right() - m.dot_inset, button.top() + m.dot_inset),
+        let extent = m.dot_radius + 0.5;
+        let mut clip = ui.clip_rect();
+        clip.min.y -= f32::from(m.margin_y);
+        clip = clip.intersect(ui.ctx().content_rect());
+        if clip.width() < 2.0 * extent || clip.height() < 2.0 * extent {
+            return;
+        }
+        let center = egui::pos2(
+            (button.right() - m.dot_inset).clamp(clip.left() + extent, clip.right() - extent),
+            (button.top() + m.dot_inset).clamp(clip.top() + extent, clip.bottom() - extent),
+        );
+        ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(clip).circle(
+            center,
             m.dot_radius,
             rgb(self.theme.accent),
             egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
@@ -5694,7 +5713,7 @@ impl Lapis {
                                                                 ui,
                                                                 &mut layout,
                                                                 &[
-                                                                    (state::ToolsLayoutMode::SubTopbar, "󰕮  Sub-Topbar"),
+                                                                    (state::ToolsLayoutMode::SubTopbar, "󰕮  Horizontal"),
                                                                     (state::ToolsLayoutMode::VerticalRail, "󰍜  Vertical Rail"),
                                                                 ],
                                                                 150.0,
@@ -5702,7 +5721,25 @@ impl Lapis {
                                                                 self.app_state.settings.tools_layout = layout;
                                                                 settings_dirty = true;
                                                             }
-                                                            ui.weak("Sub-Topbar: a horizontal bar under the topbar. Vertical Rail: a bar on the right edge.");
+                                                            ui.weak("Horizontal bar or vertical rail on the right edge.");
+                                                            if layout == state::ToolsLayoutMode::SubTopbar {
+                                                                settings_subheading(ui, "Horizontal toolbar edge");
+                                                                let mut position = self.app_state.settings.annotation_bar_position;
+                                                                if settings_choice(
+                                                                    ui,
+                                                                    &mut position,
+                                                                    &[
+                                                                        (None, "Follow topbar"),
+                                                                        (Some(state::TopbarPosition::Top), "Top"),
+                                                                        (Some(state::TopbarPosition::Bottom), "Bottom"),
+                                                                    ],
+                                                                    100.0,
+                                                                ) {
+                                                                    self.app_state.settings.annotation_bar_position = position;
+                                                                    settings_dirty = true;
+                                                                }
+                                                                ui.weak("Choose an edge independently of the topbar. When both share an edge, the topbar stays outermost.");
+                                                            }
 
                                                             settings_subheading(ui, "Drawing");
                                                             ui.horizontal(|ui| {
@@ -6010,7 +6047,7 @@ impl Lapis {
                                                                 self.topbar_overlay_h = 0.0;
                                                                 settings_dirty = true;
                                                             }
-                                                            ui.weak("Bottom puts the topbar on the bottom edge; its menus open upwards. The annotation toolbar stays where it is.");
+                                                            ui.weak("Bottom puts the topbar on the bottom edge; its menus open upwards. The annotation toolbar has its own placement setting.");
                                                             ui.add_space(6.0);
                                                             if settings_toggle(
                                                                 ui,
@@ -11071,10 +11108,33 @@ let state_path = crate::state::AppState::config_path();
         }
     }
     fn render_sub_topbar_tools(&mut self, ui: &mut egui::Ui) {
+        let settings = &self.app_state.settings;
+        let bottom = settings.annotation_bar_edge() == state::TopbarPosition::Bottom;
+        let offset = if settings.annotation_bar_edge() == settings.topbar_position {
+            self.topbar_overlay_h
+        } else {
+            0.0
+        };
+        if offset > 0.0 {
+            // Reserve the revealed topbar before docking the annotation toolbar.
+            let panel = if bottom {
+                egui::Panel::bottom("subbar_topbar_space")
+            } else {
+                egui::Panel::top("subbar_topbar_space")
+            };
+            panel.exact_size(offset)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
+                });
+        }
+        self.draw_sub_topbar_tools(ui, bottom);
+    }
+
+    fn draw_sub_topbar_tools(&mut self, ui: &mut egui::Ui, bottom: bool) {
         let density = self.app_state.settings.ui_density;
         let m = density.sub_bar();
-        // It sits on the same edge as the topbar.
-        let panel = if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
+        let panel = if bottom {
             egui::Panel::bottom("sub_topbar_tools")
         } else {
             egui::Panel::top("sub_topbar_tools")
@@ -15437,8 +15497,8 @@ impl eframe::App for Lapis {
             // The topbar itself, drawn into whichever ui the slot provides.
             let overlay_at_bottom =
                 self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
-            // The annotation sub-topbar keeps the window edge; the overlay goes beside it.
-            let overlay_offset = self.subbar_h;
+            let bar = self.app_state.settings.ui_density.bar();
+            let overlay_height = bar.row_h + 2.0 * f32::from(bar.margin_y);
             let mut draw_topbar = |ui: &mut egui::Ui| -> f32 {
                 // Popups opened from the topbar set this again while they are open.
                 self.topbar_popup_open = false;
@@ -16041,24 +16101,27 @@ impl eframe::App for Lapis {
                     let area = egui::Area::new(ui.make_persistent_id("topbar_overlay"))
                         .order(egui::Order::Foreground)
                         .constrain(false)
-                        .default_size(egui::vec2(screen.width(), 60.0));
+                        .default_size(egui::vec2(screen.width(), overlay_height));
                     let area = if overlay_at_bottom {
-                        area.anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(0.0, -overlay_offset))
+                        area.anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
                     } else {
-                        area.fixed_pos(screen.min + egui::vec2(0.0, overlay_offset))
+                        area.fixed_pos(screen.min)
                     };
                     let area = area
                         .show(&ctx, |area_ui| {
                             area_ui.set_width(screen.width());
-                            area_ui.set_max_height(screen.height());
-                            draw_topbar(area_ui);
+                            area_ui.set_max_height(overlay_height);
+                            draw_topbar(area_ui)
                         });
-                    overlay_h = area.response.rect.height();
+                    overlay_h = area.inner;
                 }
                 TopbarSlot::Hidden => {}
             }
             self.topbar_overlay_h = overlay_h;
             self.topbar_dock_h = dock_h;
+        } else {
+            self.topbar_overlay_h = 0.0;
+            self.topbar_dock_h = 0.0;
         }
 
         // Set again by the sub-topbar when it is drawn this frame.

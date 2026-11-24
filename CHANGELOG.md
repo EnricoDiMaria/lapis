@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Independent annotation toolbar placement:** Choose Top, Bottom, or Follow topbar under **Settings → Tools & Study → Annotation toolbar**. The vertical rail remains available.
+
 - **Fit PDF and notes layout:** A button beside the notes page lock, configurable **Alt+F** shortcut and Command Palette action maximize the PDF page or book spread, then give the remaining width to the right notes panel. The panel can expand beyond its former width limit and remains manually resizable.
 
 - **Catppuccin:** Choose Latte, Frappe, Macchiato, or Mocha, then select one of the 14 accent colors.
 - **Saved custom themes:** Save a named palette, recall it from the custom-theme menu, or explicitly update an existing name. JSON import/export remains available.
-- **Topbar position:** The topbar can sit at the bottom of the window instead of the top, under **Settings → Appearance → Topbar → Position** (or **Move Topbar to Bottom / Top** in the Command Palette). Its menus, the bookmark popup and the search popup open upwards, auto-hide reveals it from the bottom edge, and notifications stay above it. The horizontal annotation toolbar moves to the same edge, and a topbar revealed by auto-hide floats next to it instead of covering it. The vertical rail is unchanged.
+- **Topbar position:** The topbar can sit at the bottom of the window instead of the top, under **Settings → Appearance → Topbar → Position** (or **Move Topbar to Bottom / Top** in the Command Palette). Its menus, the bookmark popup and the search popup open upwards, auto-hide reveals it from the bottom edge, and notifications stay above it.
 - **Auto-hide topbar:** An optional mode hides the topbar and reveals it as an overlay when the pointer reaches the edge the topbar sits on. It stays visible while a menu or popup opened from it (File menu, zoom, page and overflow menus, right-click menus, bookmarks, search) is open. **Alt+T** (also **Toggle Topbar Auto-hide** in the Command Palette) turns auto-hide on or off, and the setting is under **Settings → Appearance → Topbar**. The choice is saved.
 - **Per-file view memory:** Each document remembers its view mode and the size of its notes panel (side, bottom, and Slideshow + Notes). The view mode is saved as soon as it changes; slideshows reopen in the mode they were started from.
 - **Interface density:** Choose Standard, Compact, or Ultra-compact under **Settings → Appearance → Interface density**. The whole app follows it: the topbar (about 7 px / 11 px shorter), annotation toolbars, notes panel header, sidebar tabs, split-view header, and the global spacing, padding, menu/window margins, and default text size used by menus, dialogs, and settings. Notes text keeps its own font-size setting. Standard remains the default, and an earlier compact setting is kept as Compact.
@@ -30,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, using only the letters of each dictionary) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
 
 ### Fixed
+
+- **Auto-hide toolbar layout:** When both horizontal bars share an edge, the revealed topbar stays outermost and the annotation toolbar docks directly inward without leaving a gap or covering the PDF canvas, including the last page in Continuous Scroll. Notifications account for both bars at the bottom. Notes and Flashcards notification dots retain their corner overlap without clipping in auto-hide mode.
 
 - **Notes panel resizing:** Reuse cached PDF textures during a resize and defer automatic Continuous Scroll page changes until release, reducing rendering work and session writes while keeping the layout responsive.
 

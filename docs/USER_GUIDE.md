@@ -113,8 +113,8 @@ Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11`
 The topbar can hide itself to give the page the full window height. Turn auto-hide on or off with `Alt+T` (also **Toggle Topbar Auto-hide** in the Command Palette; the shortcut can be changed in **Settings → Keybindings**), or with **Settings → Appearance → Topbar → Auto-hide topbar**. The choice is saved, so Lapis opens the way you left it.
 
 - **Auto-hide off (default):** the topbar is always visible.
-- **Auto-hide on:** the topbar is hidden. Move the pointer to the edge of the window where the topbar sits (the top by default, or the bottom) to reveal it. It slides over the page without moving it, and stays while the pointer is over it, while a menu or popup opened from it is open (the File menu, zoom, page and overflow menus, right-click menus such as the blank-page styles, bookmarks, search), or while you are typing in its page box. It hides again shortly after you move away. Pressing a mouse button elsewhere (drawing, dragging) never reveals it.
-- A revealed topbar floats next to the annotation bar instead of covering it: below it when the bar is at the top, above it when the bar is at the bottom.
+- **Auto-hide on:** the topbar is hidden. Move the pointer to the edge of the window where the topbar sits (the top by default, or the bottom) to reveal it. It appears as an overlay (except when space is reserved for a same-edge annotation toolbar), and stays while the pointer is over it, while a menu or popup opened from it is open (the File menu, zoom, page and overflow menus, right-click menus such as the blank-page styles, bookmarks, search), or while you are typing in its page box. It hides again shortly after you move away. Pressing a mouse button elsewhere (drawing, dragging) never reveals it.
+- When both horizontal bars share an edge, the revealed topbar stays outermost. The annotation toolbar moves directly inward (below the topbar at the top, above it at the bottom) and the workspace temporarily reserves space for both bars so neither covers the PDF canvas. On opposite edges, the annotation toolbar stays in place.
 
 Fullscreen also works in tiling compositors such as Hyprland. If you leave fullscreen with a compositor
 keybinding, Lapis follows that change instead of forcing fullscreen back. In the slideshow modes `F11` has no
@@ -197,7 +197,7 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-- Select tools from the annotation toolbar, available as a horizontal sub-topbar or a vertical bar. Closing either bar returns to Cursor / Select by default; change this in **Settings → Tools & Study → Annotation toolbar** if you prefer to keep the active tool.
+- Select tools from the annotation toolbar, available as a horizontal bar at the top or bottom, or a vertical rail on the right. Choose its placement in **Settings → Tools & Study → Annotation toolbar**. Closing either bar returns to Cursor / Select by default; change this in **Settings → Tools & Study → Annotation toolbar** if you prefer to keep the active tool.
 - Right-click an unselected area of the PDF canvas to open the radial tools menu when enabled. Right-click a radial item to apply it **without closing the menu**, or left-click to apply it and close the menu. A small image-paste button appears beside the main radial menu only when a clipboard image is available.
 - Right-click selected PDF text to open a **Copy** context menu instead of the radial menu.
 
@@ -684,7 +684,7 @@ Open **Advanced Settings** to configure the application. It has seven sections, 
 
 ### Tools & Study
 
-- **Annotation toolbar:** show the Annotation Tools button, enable the radial tools menu, switch back to Cursor when closing the bar, choose horizontal (Sub-Topbar) or vertical placement, and set the stroke thickness.
+- **Annotation toolbar:** show the Annotation Tools button, enable the radial tools menu, switch back to Cursor when closing the bar, choose Horizontal or Vertical Rail, set the horizontal toolbar edge to Top, Bottom, or Follow topbar (default), and set the stroke thickness.
 - **Active recall:** cover or reveal all occlusion tapes, show the Flashcards button and its notification dot, open the Flashcards modal and export an Anki deck.
 
 ### Workspace
@@ -715,7 +715,7 @@ Named palettes are stored in `custom_themes.json` alongside the active `theme.js
 
 **Interface density** below the theme section sets how tightly the whole app is packed. **Standard** is the default. **Compact** shortens the topbar by about 7 px and the annotation sub-topbar from 36 to 28 px. **Ultra-compact** goes to about 11 px shorter and a 24 px sub-topbar, with smaller icons, swatches and buttons. Both levels also tighten the notes panel header, the sidebar tabs, the split-view header, and the spacing, padding, margins and default text size used by menus, dialogs and settings. The notes text size is not affected; it keeps its own setting. Ultra-compact suits small screens but has smaller click targets. The Notes and Flashcards dots shrink with the bar so they stay uncropped. The choice applies immediately and is remembered.
 
-**Topbar** sets where the topbar sits and when it shows. **Position** moves it to the **Top** (default) or **Bottom** edge of the window; at the bottom its menus, the bookmark popup and the search popup open upwards, and notifications move up to stay clear of it. The annotation toolbar follows it: with the topbar at the bottom, the horizontal annotation bar sits at the bottom too, just above the topbar. The vertical rail stays on the right edge. **Auto-hide topbar** is described under [Auto-hide topbar](#auto-hide-topbar--altt). The command palette also has **Move Topbar to Bottom / Top**.
+**Topbar** sets where the topbar sits and when it shows. **Position** moves it to the **Top** (default) or **Bottom** edge of the window; at the bottom its menus, the bookmark popup and the search popup open upwards, and notifications move up to stay clear of it. The annotation toolbar follows by default, but its edge can be set independently under **Tools & Study → Annotation toolbar**. The vertical rail stays on the right edge. **Auto-hide topbar** is described under [Auto-hide topbar](#auto-hide-topbar--altt). The command palette also has **Move Topbar to Bottom / Top**.
 
 **PDF & notes text** holds PDF dark mode, the notes font size and the custom notes font.
 
