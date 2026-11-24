@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Large PDF saves:** Skip unchanged commits and redundant local backup writes. Reuse the PDF revision parse and serialize incremental updates once, retaining final validation and atomic replacement. Explicit saves and document transitions run on a worker; the workspace stays visible and editable with toast-only save feedback. Closing or switching commits any newer edits before releasing the document; structural PDF changes wait until the current save ends. Added an isolated save regression suite with a generated 180-page PDF and timing output.
+
 - **Audio shutdown:** Open output devices only when playback starts and fade active audio before closing the application to reduce audible pops.
 
 - **Drawing responsiveness:** Avoid duplicate local backup writes when finishing an annotation stroke.

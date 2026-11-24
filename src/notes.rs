@@ -20,7 +20,7 @@ pub enum AnnotationKind {
     Image,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageAnnotation {
     pub kind: AnnotationKind,
     pub color: [u8; 3],
@@ -58,7 +58,7 @@ fn default_sketch_paper() -> BlankPageStyle {
 /// It is a plain background plus strokes on an unbounded canvas: coordinates are in sketch
 /// units (1 unit = 1 px at 100 % zoom), measured from the top-left corner, so the drawing does
 /// not depend on the size or position of the panel it was drawn in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchPage {
     #[serde(default = "default_sketch_paper")]
     pub paper: BlankPageStyle,
@@ -208,6 +208,32 @@ fn custom_data_stream(data: &DocData) -> io::Result<lopdf::Stream> {
         .map_err(|e| io::Error::other(format!("Lapis metadata serialization error: {e}")))?;
     payload.extend_from_slice(NOTES_END_TAG);
     Ok(lopdf::Stream::new(lopdf::Dictionary::new(), payload))
+}
+
+// JSON whitespace keeps the length field fixed-width without changing its type.
+const PDF_LEN_FIELD: &[u8] = b"\"pdf_annots_file_len\":18446744073709551615";
+
+fn pending_length_stream(data: &DocData) -> io::Result<lopdf::Stream> {
+    let mut data = data.clone();
+    data.pdf_annots_file_len = u64::MAX;
+    custom_data_stream(&data)
+}
+
+fn finalize_pdf_length(output: &mut [u8], revision_start: usize) -> io::Result<u64> {
+    let len = output.len() as u64;
+    let revision = output.get_mut(revision_start..)
+        .ok_or_else(|| io::Error::other("invalid metadata revision offset"))?;
+    let block = find_embedded_block(revision)
+        .ok_or_else(|| io::Error::other("missing Lapis metadata stream"))?;
+    let body = &mut revision[block.body_start..block.body_end];
+    let pos = body.windows(PDF_LEN_FIELD.len()).rposition(|w| w == PDF_LEN_FIELD)
+        .ok_or_else(|| io::Error::other("missing reserved PDF length field"))?;
+    let start = pos + PDF_LEN_FIELD.len() - 20;
+    let field = &mut body[start..start + 20];
+    let digits = len.to_string();
+    field.fill(b' ');
+    field[..digits.len()].copy_from_slice(digits.as_bytes());
+    Ok(len)
 }
 
 /// Strip old *unreferenced* custom-stream payloads when we are already doing a
@@ -884,7 +910,8 @@ fn known_revs() -> &'static Mutex<HashMap<PathBuf, u64>> {
 
 fn remember_rev(pdf_path: &Path, rev: u64) {
     if let Ok(mut m) = known_revs().lock() {
-        m.insert(pdf_path.to_path_buf(), rev);
+        let last = m.entry(pdf_path.to_path_buf()).or_default();
+        *last = (*last).max(rev);
     }
 }
 
@@ -901,9 +928,9 @@ fn next_rev(pdf_path: &Path) -> u64 {
 
 fn same_content(a: &DocData, b: &DocData) -> bool {
     a.blank_pages == b.blank_pages
-        && serde_json::to_value(&a.notes).ok() == serde_json::to_value(&b.notes).ok()
-        && serde_json::to_value(&a.annotations).ok() == serde_json::to_value(&b.annotations).ok()
-        && serde_json::to_value(&a.sketches).ok() == serde_json::to_value(&b.sketches).ok()
+        && a.notes == b.notes
+        && a.annotations == b.annotations
+        && a.sketches == b.sketches
 }
 
 /// When one version wins over the other, the loser is kept (if different and not empty) as
@@ -966,11 +993,31 @@ pub(crate) fn read_trailing_doc_id(pdf_path: &Path) -> Option<String> {
     serde_json::from_slice::<IdOnly>(json.trim_ascii()).ok()?.doc_id
 }
 
-/// Reads the newest Lapis metadata block, including legacy post-EOF data.
-fn read_trailing_doc_data(pdf_path: &Path) -> Option<DocData> {
-    let bytes = fs::read(pdf_path).ok()?;
-    let block = find_embedded_block(&bytes)?;
+fn embedded_doc_data(bytes: &[u8]) -> Option<DocData> {
+    let block = find_embedded_block(bytes)?;
     parse_embedded_data(&bytes[block.body_start..block.body_end])
+}
+
+#[cfg(test)]
+fn read_trailing_doc_data(pdf_path: &Path) -> Option<DocData> {
+    embedded_doc_data(&fs::read(pdf_path).ok()?)
+}
+
+// Cache only a complete terminal Lapis revision with matching file metadata.
+fn read_opened_doc_data(path: &Path) -> Option<DocData> {
+    let before = pdf_stamp(path).ok();
+    let bytes = fs::read(path).ok()?;
+    let data = embedded_doc_data(&bytes)?;
+    if let Some(stamp) = before
+        && pdf_stamp(path).ok().as_ref() == Some(&stamp)
+        && stamp.len == bytes.len() as u64
+        && data.pdf_annots_file_len == stamp.len
+        && data.pdf_annots_imported
+        && trailing_lapis_revision(&bytes).is_some()
+    {
+        remember_commit(path, stamp, &data);
+    }
+    Some(data)
 }
 
 /// Copy of the data without machine-specific fields, for embedding in the PDF.
@@ -984,7 +1031,12 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     if pdf_path.as_os_str().is_empty() { return DocData::default(); }
     let key = crate::docid::resolve_key(pdf_path);
     let backup_opt = load_local_backup(pdf_path);
-    let pdf_opt = read_trailing_doc_data(pdf_path);
+    let pdf_opt = read_opened_doc_data(pdf_path);
+    let committed_len = pdf_opt.as_ref().and_then(|p| {
+        let stamp = pdf_stamp(pdf_path).ok()?;
+        (p.doc_id.as_deref() == Some(key.as_str()) && committed_matches(pdf_path, &stamp, p))
+            .then_some(stamp.len)
+    });
     let imported_flag = backup_opt.as_ref().is_some_and(|d| d.pdf_annots_imported)
         || pdf_opt.as_ref().is_some_and(|d| d.pdf_annots_imported);
     let imported_len = backup_opt.as_ref().map(|d| d.pdf_annots_file_len).unwrap_or(0)
@@ -1011,7 +1063,7 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     // incremental revision). Autosaves keep the last observed length so an app restart does not
     // re-import the same source annotations and undo local edits/deletions.
     data.pdf_annots_imported |= imported_flag;
-    data.pdf_annots_file_len = data.pdf_annots_file_len.max(imported_len);
+    data.pdf_annots_file_len = committed_len.unwrap_or(data.pdf_annots_file_len.max(imported_len));
     let current_pdf_len = fs::metadata(pdf_path).map(|m| m.len()).unwrap_or(0);
     if !data.pdf_annots_imported || data.pdf_annots_file_len != current_pdf_len {
         import_external_annotations(pdf_path, &mut data.annotations);
@@ -1025,12 +1077,76 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     data
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PdfStamp {
+    len: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+fn pdf_stamp(path: &Path) -> io::Result<PdfStamp> {
+    let m = fs::metadata(path)?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(PdfStamp {
+        len: m.len(),
+        modified: m.modified()?,
+        created: m.created().ok(),
+        #[cfg(unix)]
+        identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+    })
+}
+
+struct CommittedPdf {
+    path: PathBuf,
+    stamp: PdfStamp,
+    data: DocData,
+}
+
+// Keep just the last matching terminal revision; never reuse it after a file change.
+static LAST_COMMIT: Mutex<Option<CommittedPdf>> = Mutex::new(None);
+
+fn remember_commit(path: &Path, stamp: PdfStamp, data: &DocData) {
+    if let Ok(mut cached) = LAST_COMMIT.lock() {
+        *cached = Some(CommittedPdf { path: path.to_path_buf(), stamp, data: data.clone() });
+    }
+}
+
+fn committed_matches(path: &Path, stamp: &PdfStamp, data: &DocData) -> bool {
+    LAST_COMMIT.lock().ok().is_some_and(|cached| {
+        cached.as_ref().is_some_and(|saved| {
+            saved.path == path && &saved.stamp == stamp
+                && saved.data.doc_id == data.doc_id && same_content(&saved.data, data)
+        })
+    })
+}
+
+fn checkpoint_matches(previous: Option<&DocData>, data: &DocData) -> bool {
+    previous.is_some_and(|old| {
+        old.doc_id == data.doc_id
+            && old.pdf_annots_imported == data.pdf_annots_imported
+            && old.pdf_annots_file_len == data.pdf_annots_file_len
+            && same_content(old, data)
+    })
+}
+
+fn checkpoint_if_changed(path: &Path, previous: Option<&DocData>, data: &DocData) -> io::Result<()> {
+    if !checkpoint_matches(previous, data) {
+        save_local_backup_checked(path, data)?;
+        remember_rev(path, data.rev);
+    }
+    Ok(())
+}
+
 fn collect_doc_data(
     pdf_path: &Path,
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
     blank_pages: HashSet<u32>,
     sketches: &HashMap<u32, SketchPage>,
+    previous_backup: Option<&DocData>,
 ) -> DocData {
     let mut clean_notes = notes.clone();
     clean_notes.retain(|_, v| !v.trim().is_empty());
@@ -1042,8 +1158,7 @@ fn collect_doc_data(
     clean_sketches.retain(|&k, s| k != 0 && !s.is_default());
     // load_doc_data establishes this flag before the app starts autosaving; reading the PDF
     // again here would turn every autosave into an unnecessary full-file scan.
-    let previous_backup = load_local_backup(pdf_path);
-    let pdf_annots_imported = previous_backup.as_ref().is_some_and(|d| d.pdf_annots_imported);
+    let pdf_annots_imported = previous_backup.is_some_and(|d| d.pdf_annots_imported);
     let pdf_annots_file_len = previous_backup.map(|d| d.pdf_annots_file_len).unwrap_or(0);
     DocData {
         notes: clean_notes,
@@ -1058,6 +1173,25 @@ fn collect_doc_data(
     }
 }
 
+// Serialize local checkpoint updates, not the expensive PDF processing.
+static CHECKPOINT_LOCK: Mutex<()> = Mutex::new(());
+
+fn checkpoint_lock() -> std::sync::MutexGuard<'static, ()> {
+    CHECKPOINT_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+// Merge only commit metadata into a newer local checkpoint, never its content.
+fn finish_pdf_checkpoint(path: &Path, committed: &DocData) -> io::Result<()> {
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(path);
+    let mut data = previous.as_ref()
+        .filter(|d| d.rev >= committed.rev && d.doc_id == committed.doc_id)
+        .cloned().unwrap_or_else(|| committed.clone());
+    data.pdf_annots_imported = committed.pdf_annots_imported;
+    data.pdf_annots_file_len = committed.pdf_annots_file_len;
+    checkpoint_if_changed(path, previous.as_ref(), &data)
+}
+
 /// Autosaves only the local backup. PDF bytes are not touched while the document is open.
 pub fn save_doc_data(
     pdf_path: &Path,
@@ -1067,15 +1201,35 @@ pub fn save_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
-    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    save_local_backup_checked(pdf_path, &data)?;
-    remember_rev(pdf_path, data.rev);
-    Ok(())
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(pdf_path);
+    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches, previous.as_ref());
+    checkpoint_if_changed(pdf_path, previous.as_ref(), &data)
 }
 
-/// Commit once when the document closes or is explicitly saved: remove only our own immediately
-/// preceding incremental revision, export PDF-standard annotations, and store custom data in
-/// an uncompressed stream object. Only a short rollback comment precedes startxref.
+/// Capture a durable, ordered snapshot before starting the save worker.
+pub fn prepare_pdf_commit(
+    pdf_path: &Path,
+    notes: &HashMap<u32, String>,
+    annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    blank_pages: HashSet<u32>,
+    sketches: &HashMap<u32, SketchPage>,
+) -> io::Result<DocData> {
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(pdf_path);
+    let mut data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches, previous.as_ref());
+    data.pdf_annots_imported = true;
+    if let Some(previous) = previous.as_ref().filter(|d| d.rev > 0 && checkpoint_matches(Some(d), &data)) {
+        data.rev = previous.rev;
+    } else {
+        // Reserve the revision durably before the worker starts.
+        save_local_backup_checked(pdf_path, &data)?;
+    }
+    remember_rev(pdf_path, data.rev);
+    Ok(data)
+}
+
+/// Synchronous fallback for exit and tests.
 pub fn commit_doc_data(
     pdf_path: &Path,
     notes: &HashMap<u32, String>,
@@ -1084,85 +1238,100 @@ pub fn commit_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
-    let mut data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    data.pdf_annots_imported = true;
-    remember_rev(pdf_path, data.rev);
-
-    commit_with_base(pdf_path, data, fs::read(pdf_path)?)
+    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
+    commit_pdf_snapshot(pdf_path, data)
 }
 
-/// Keep one physical Lapis revision when it is the file's tail. Historical
-/// revisions owned by external editors are left intact unless the user explicitly
-/// requests compaction, which rewrites PDF object offsets from scratch.
-fn commit_with_base(pdf_path: &Path, mut data: DocData, mut base: Vec<u8>) -> io::Result<()> {
-    // Do not emit a new xref/metadata block on an unchanged explicit save or OS exit.
-    // The local backup can have a newer revision due to local-only autosave.
-    if trailing_lapis_revision(&base).is_some()
-        && lopdf::Document::load_mem(&base).is_ok()
-        && read_trailing_doc_data(pdf_path).as_ref().is_some_and(|stored| {
-            same_content(stored, &data)
+/// Commit the captured revision without replacing any later local edits.
+pub fn commit_pdf_snapshot(pdf_path: &Path, mut data: DocData) -> io::Result<()> {
+    let stamp = pdf_stamp(pdf_path)?;
+    if committed_matches(pdf_path, &stamp, &data) {
+        data.pdf_annots_file_len = stamp.len;
+        return finish_pdf_checkpoint(pdf_path, &data);
+    }
+    let base = fs::read(pdf_path)?;
+    if pdf_stamp(pdf_path)? != stamp {
+        return Err(io::Error::other("PDF changed while reading; retry Save"));
+    }
+    commit_with_base(pdf_path, data, base, &stamp, false)
+}
+
+/// Keep one physical Lapis revision when it is the file's tail.
+fn commit_with_base(
+    pdf_path: &Path,
+    mut data: DocData,
+    base: Vec<u8>,
+    source_stamp: &PdfStamp,
+    force_rewrite: bool,
+) -> io::Result<()> {
+    let trailing = trailing_lapis_revision(&base);
+    // Compare the already-read metadata before parsing the PDF.
+    if !force_rewrite && trailing.is_some()
+        && embedded_doc_data(&base).is_some_and(|stored| {
+            same_content(&stored, &data)
                 && stored.doc_id == data.doc_id
                 && stored.pdf_annots_imported == data.pdf_annots_imported
                 && stored.pdf_annots_file_len == base.len() as u64
         })
+        && lopdf::Document::load_mem(&base).is_ok()
     {
         data.pdf_annots_file_len = base.len() as u64;
-        save_local_backup_checked(pdf_path, &data)?;
-        return Ok(());
+        if pdf_stamp(pdf_path)? == *source_stamp {
+            finish_pdf_checkpoint(pdf_path, &data)?;
+            remember_commit(pdf_path, source_stamp.clone(), &data);
+            return Ok(());
+        }
+        return Err(io::Error::other("PDF changed while saving; retry Save"));
     }
 
     data.pdf_annots_file_len = base.len() as u64;
-    // Keep the local model authoritative even if PDF writing fails.
-    save_local_backup_checked(pdf_path, &data)?;
 
-    // Roll back only our own immediately preceding incremental revision. If an
-    // external revision follows it, leave that revision and its xref offsets intact.
-    if let Some((_marker_pos, base_len)) = trailing_lapis_revision(&base) {
-        if base_len <= base.len() && lopdf::Document::load_mem(&base[..base_len]).is_ok() {
-            base.truncate(base_len);
-        }
-    }
-    if let Some(block) = terminal_embedded_block(&base) {
-        base.truncate(block.start);
-    }
-
-    let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(base.clone()))
-        .map_err(|e| io::Error::other(format!("cannot prepare incremental PDF update: {e}")))?;
+    // Reuse the successful prefix parse as the incremental document.
+    let clean_len = terminal_embedded_block(&base).map_or(base.len(), |block| block.start);
+    let prefix = trailing.and_then(|(_, len)| {
+        (len <= clean_len).then_some(len).and_then(|len| {
+            lopdf::IncrementalDocument::load_from(std::io::Cursor::new(&base[..len]))
+                .ok().map(|doc| (len, doc))
+        })
+    });
+    let (base_len, mut incremental) = match prefix {
+        Some(parsed) => parsed,
+        None => (clean_len, lopdf::IncrementalDocument::load_from(std::io::Cursor::new(&base[..clean_len]))
+            .map_err(|e| io::Error::other(format!("cannot prepare incremental PDF update: {e}")))?),
+    };
+    drop(base);
     export_pdf_annotations(&mut incremental, &data.annotations)
         .map_err(|e| io::Error::other(format!("cannot export PDF annotations: {e}")))?;
 
     // Always commit an incremental revision: the uncompressed, unreferenced stream
     // carries the complete custom payload and remains discoverable by find_embedded_block.
-    let metadata_id = incremental.new_document.add_object(
-        lopdf::Object::Stream(custom_data_stream(&data)?)
-    );
+    incremental.new_document.add_object(lopdf::Object::Stream(pending_length_stream(&data)?));
     let mut output = Vec::new();
-    let mut stable = false;
-    for _ in 0..12 {
-        output.clear();
-        incremental.save_to(&mut output)
-            .map_err(|e| io::Error::other(format!("cannot save incremental PDF update: {e}")))?;
-        insert_revision_marker_before_startxref(&mut output, base.len())?;
-        let actual_len = output.len() as u64;
-        if data.pdf_annots_file_len == actual_len {
-            stable = true;
-            break;
-        }
-        data.pdf_annots_file_len = actual_len;
-        replace_custom_data_stream(&mut incremental.new_document, metadata_id, &data)?;
-    }
-    if !stable {
-        return Err(io::Error::other("Lapis metadata length did not stabilize while committing PDF"));
-    }
+    incremental.save_to(&mut output)
+        .map_err(|e| io::Error::other(format!("cannot save incremental PDF update: {e}")))?;
+    insert_revision_marker_before_startxref(&mut output, base_len)?;
+    data.pdf_annots_file_len = finalize_pdf_length(&mut output, base_len)?;
 
     // Never replace a readable source PDF with an invalid incremental revision.
     // In particular, reject xref/startxref regressions before the atomic rename.
     lopdf::Document::load_mem(&output)
         .map_err(|e| io::Error::other(format!("incremental PDF validation failed: {e}")))?;
     let tmp = pdf_path.with_extension("lapis_commit_tmp.pdf");
-    fs::write(&tmp, output)?;
-    fs::rename(&tmp, pdf_path).inspect_err(|_| { let _ = fs::remove_file(&tmp); })?;
-    save_local_backup_checked(pdf_path, &data)?;
+    let result = (|| -> io::Result<()> {
+        fs::write(&tmp, output)?;
+        if pdf_stamp(pdf_path)? != *source_stamp {
+            return Err(io::Error::other("PDF changed while saving; retry Save"));
+        }
+        fs::rename(&tmp, pdf_path)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&tmp); }
+    result?;
+    finish_pdf_checkpoint(pdf_path, &data)?;
+    if let Ok(stamp) = pdf_stamp(pdf_path)
+        && stamp.len == data.pdf_annots_file_len
+    {
+        remember_commit(pdf_path, stamp, &data);
+    }
     Ok(())
 }
 
@@ -1178,6 +1347,7 @@ pub fn compact_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
+    let stamp = pdf_stamp(pdf_path)?;
     let original = fs::read(pdf_path)?;
     // When Lapis was the last writer, undo its known incremental tail first.
     // This removes its metadata stream and annotation objects before lopdf's full
@@ -1225,8 +1395,8 @@ pub fn compact_doc_data(
     // Preserve the exact bytes of the original on disk so compaction can be undone.
     let backup = pdf_path.with_extension("lapis_before_compaction.pdf");
     if !backup.exists() { fs::write(&backup, &original)?; }
-    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    commit_with_base(pdf_path, data, compacted)
+    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
+    commit_with_base(pdf_path, data, compacted, &stamp, true)
 }
 
 /// If a Lapis marker is the final trailer, return its position and the byte length of the
@@ -3970,6 +4140,286 @@ mod tests {
         assert_eq!(update_embedded_notes(b"garbage", |_| {}), b"garbage".to_vec());
     }
 
+    // Isolate document IDs and backups from the user's installation.
+    struct SaveTestDir {
+        root: PathBuf,
+        env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl SaveTestDir {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("lapis_save_pipeline_{name}_{}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
+            let env = ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"]
+                .into_iter().map(|key| (key, std::env::var_os(key))).collect();
+            // SAFETY: callers hold the docid test lock; run the suite with one test thread.
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", root.join("data"));
+                std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+                std::env::set_var("LOCALAPPDATA", root.join("data"));
+                std::env::set_var("APPDATA", root.join("config"));
+            }
+            Self { root, env }
+        }
+    }
+
+    impl Drop for SaveTestDir {
+        fn drop(&mut self) {
+            for (key, value) in &self.env {
+                // SAFETY: the test lock remains held until after this fixture is dropped.
+                unsafe {
+                    if let Some(value) = value { std::env::set_var(key, value); }
+                    else { std::env::remove_var(key); }
+                }
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn save_test_pdf(path: &Path, count: u32) {
+        use lopdf::{dictionary, Object, Stream};
+        let mut doc = lopdf::Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut kids = Vec::new();
+        for page in 1..=count {
+            let mut content = format!("q\n0 0 m\n1 1 l\nS\nQ\n% page {page}\n").into_bytes();
+            // Valid uncompressed page content; exercise a multi-megabyte PDF.
+            content.extend_from_slice("% synthetic page payload for save performance\n".repeat(320).as_bytes());
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => Object::Reference(pages_id),
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! {}, "Contents" => Object::Reference(content_id),
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count as i64),
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages_id) });
+        doc.trailer.set("Root", catalog);
+        doc.save(path).unwrap();
+    }
+
+    fn save_fixture(path: &Path, data: &DocData) {
+        commit_doc_data(path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+    }
+
+    fn verify_save_fixture(path: &Path, expected: &DocData, pages: usize) {
+        let bytes = fs::read(path).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(pdf.get_pages().len(), pages);
+        let embedded = embedded_doc_data(&bytes).expect("missing embedded Lapis data");
+        assert!(same_content(&embedded, expected), "embedded content differs");
+        assert_eq!(embedded.pdf_annots_file_len, bytes.len() as u64);
+        assert!(same_content(&load_local_backup(path).unwrap(), expected));
+        assert!(trailing_lapis_revision(&bytes).is_some());
+    }
+
+    #[test]
+    fn save_pipeline_large_document() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("large");
+        let path = fixture.root.join("large.pdf");
+        save_test_pdf(&path, 180);
+        let mut data = load_doc_data(&path);
+        for page in (1..=180).step_by(3) {
+            data.notes.insert(page, format!("# Page {page}\n{}", "Example notes. ".repeat(32)));
+        }
+        let mut pen = sample_textbox("", vec![(0.1, 0.1), (0.2, 0.3), (0.4, 0.2)]);
+        pen.kind = AnnotationKind::Freehand;
+        let mut highlight = pen.clone();
+        highlight.kind = AnnotationKind::Highlight;
+        highlight.points.truncate(2);
+        highlight.color = [250, 204, 21];
+        data.annotations.insert(1, vec![pen.clone(), highlight, sample_textbox("Test textbox", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        let mut sketch = SketchPage::new(BlankPageStyle::Grid);
+        pen.points = vec![(12.0, 20.0), (40.0, 70.0)];
+        sketch.strokes.push(pen);
+        data.sketches.insert(80, sketch);
+        println!("Fixture: 180 pages, {} bytes", fs::metadata(&path).unwrap().len());
+
+        let start = std::time::Instant::now();
+        save_fixture(&path, &data);
+        println!("Initial modified save: {:?}", start.elapsed());
+        verify_save_fixture(&path, &data, 180);
+        let first = fs::read(&path).unwrap();
+        let stamp = pdf_stamp(&path).unwrap();
+        let backup = fs::read(get_backup_path(&path)).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..3 { save_fixture(&path, &data); }
+        println!("Three unchanged saves: {:?}", start.elapsed());
+        assert_eq!(pdf_stamp(&path).unwrap(), stamp, "unchanged save replaced the file");
+        assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup);
+
+        // Simulate a new process without the in-memory commit cache.
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert!(same_content(&reopened, &data));
+        let start = std::time::Instant::now();
+        save_fixture(&path, &reopened);
+        println!("Commit on closing a reopened, unchanged PDF: {:?}", start.elapsed());
+        assert_eq!(pdf_stamp(&path).unwrap(), stamp);
+
+        data.notes.remove(&1);
+        data.annotations.remove(&1);
+        data.sketches.remove(&80);
+        data.notes.insert(180, "Replacement note".into());
+        let start = std::time::Instant::now();
+        save_fixture(&path, &data);
+        println!("Modified save after deletions: {:?}", start.elapsed());
+        verify_save_fixture(&path, &data, 180);
+        let updated = fs::read(&path).unwrap();
+        assert_eq!(count_custom_sections(&updated), 1);
+        assert_eq!(updated.windows(LAPIS_INCREMENTAL_MARKER.len()).filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
+        assert!(same_content(&load_doc_data(&path), &data));
+
+        if let Ok(output) = std::process::Command::new("qpdf").arg("--check").arg(&path).output() {
+            assert!(output.status.success(), "qpdf: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            println!("qpdf --check: passed");
+        } else {
+            println!("qpdf not installed; lopdf validation passed");
+        }
+    }
+
+    #[test]
+    fn save_pipeline_newer_edits_survive_worker_and_reopen() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("worker");
+        let path = fixture.root.join("worker.pdf");
+        save_test_pdf(&path, 3);
+        let mut old = load_doc_data(&path);
+        old.notes.insert(1, "Before background save".into());
+        old.annotations.insert(1, vec![sample_textbox("Delete me", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        let snapshot = prepare_pdf_commit(&path, &old.notes, &old.annotations, old.blank_pages.clone(), &old.sketches).unwrap();
+        let snapshot_rev = snapshot.rev;
+        let original_bytes = fs::read(&path).unwrap();
+        let mut latest = old.clone();
+        latest.notes.insert(1, "Typed while saving".into());
+        latest.annotations.clear();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            worker_gate.wait();
+            commit_pdf_snapshot(&worker_path, snapshot)
+        });
+        // Keep the worker waiting until a newer checkpoint exists.
+        let saved = save_doc_data(&path, &latest.notes, &latest.annotations, latest.blank_pages.clone(), &latest.sketches);
+        gate.wait();
+        worker.join().unwrap().unwrap();
+        saved.unwrap();
+        let embedded = read_trailing_doc_data(&path).unwrap();
+        assert!(same_content(&embedded, &old));
+        let backup = load_local_backup(&path).unwrap();
+        assert!(backup.rev > snapshot_rev);
+        assert!(same_content(&backup, &latest));
+        assert_eq!(backup.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+
+        // Simulate interruption after PDF replacement but before backup metadata reconciliation.
+        let mut interrupted = backup;
+        interrupted.pdf_annots_file_len = original_bytes.len() as u64;
+        save_local_backup_checked(&path, &interrupted).unwrap();
+        *LAST_COMMIT.lock().unwrap() = None;
+        let recovered = load_doc_data(&path);
+        assert!(same_content(&recovered, &latest));
+        assert!(recovered.annotations.is_empty(), "deleted annotation returned");
+        // Closing or another explicit save must commit the newer content, not the old snapshot.
+        save_fixture(&path, &recovered);
+        verify_save_fixture(&path, &latest, 3);
+    }
+
+    #[test]
+    fn save_pipeline_failed_replacement_preserves_backup_and_pdf() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("failure");
+        let path = fixture.root.join("failure.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        let original = fs::read(&path).unwrap();
+        data.notes.insert(1, "Recover after failed commit".into());
+        let snapshot = prepare_pdf_commit(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        // A directory at the temporary output path forces a write error even as root.
+        let blocked = path.with_extension("lapis_commit_tmp.pdf");
+        fs::create_dir(&blocked).unwrap();
+        let worker_path = path.clone();
+        let result = std::thread::spawn(move || commit_pdf_snapshot(&worker_path, snapshot)).join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(same_content(&load_local_backup(&path).unwrap(), &data));
+        assert!(same_content(&load_doc_data(&path), &data));
+        fs::remove_dir(&blocked).unwrap();
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+    }
+
+    #[test]
+    fn save_pipeline_external_revision_is_retained() {
+        use lopdf::{dictionary, Object};
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("external");
+        let path = fixture.root.join("external.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "Original note".into());
+        save_fixture(&path, &data);
+        let saved = fs::read(&path).unwrap();
+        let stamp = pdf_stamp(&path).unwrap();
+        let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
+        let page_id = incremental.get_prev_documents().get_pages()[&2];
+        incremental.opt_clone_object_to_new_document(page_id).unwrap();
+        let annotation_id = incremental.new_document.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+            "Contents" => Object::string_literal(b"External edit".to_vec()),
+            "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
+        });
+        incremental.new_document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
+            .set("Annots", vec![Object::Reference(annotation_id)]);
+        let mut output = Vec::new();
+        incremental.save_to(&mut output).unwrap();
+        fs::write(&path, &output).unwrap();
+        assert_ne!(pdf_stamp(&path).unwrap(), stamp);
+        assert!(!committed_matches(&path, &pdf_stamp(&path).unwrap(), &data));
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Original note");
+        assert!(reopened.annotations[&2].iter().any(|a| a.text == "External edit"));
+        save_fixture(&path, &reopened);
+        verify_save_fixture(&path, &reopened, 3);
+        assert!(fs::read(&path).unwrap().starts_with(&output), "external revision was truncated");
+    }
+
+    #[test]
+    fn save_pipeline_page_structure_roundtrip() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure");
+        let path = fixture.root.join("structure.pdf");
+        save_test_pdf(&path, 4);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "Move with page".into());
+        data.sketches.insert(2, SketchPage::new(BlankPageStyle::Dotted));
+        data.annotations.insert(2, vec![sample_textbox("Move too", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        save_fixture(&path, &data);
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).unwrap();
+        assert_eq!(inserted, 2);
+        shift_doc_data_on_insert(&mut data.notes, &mut data.annotations, &mut data.blank_pages, &mut data.sketches, inserted);
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 5);
+        assert_eq!(data.notes[&3], "Move with page");
+        reorder_pages_in_pdf(&path, 3, 1).unwrap();
+        remap_doc_data_pages(&mut data, &|p| Some(match p { 3 => 1, 1 | 2 => p + 1, _ => p }));
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 5);
+        delete_page_from_pdf(&path, 1).unwrap();
+        remap_doc_data_pages(&mut data, &|p| p.checked_sub(1).filter(|p| *p > 0));
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 4);
+        assert!(data.notes.is_empty() && data.annotations.is_empty() && data.sketches.is_empty());
+        assert!(same_content(&load_doc_data(&path), &data));
+    }
+
     #[test]
     fn repeated_commits_keep_one_custom_block_and_one_rollback_marker() {
         let _guard = crate::docid::test_lock();
@@ -3991,9 +4441,23 @@ mod tests {
         assert_eq!(count_custom_sections(&first), 1);
         assert_eq!(first.windows(LAPIS_INCREMENTAL_MARKER.len())
             .filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
+        assert_eq!(read_trailing_doc_data(&path).unwrap().pdf_annots_file_len, first.len() as u64);
+        let backup_before = fs::read(get_backup_path(&path)).unwrap();
         // An explicit save immediately followed by an OS close is a no-op.
+        save_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup_before);
         commit_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup_before);
+        // A changed on-disk file must invalidate the fast path, even with the same notes.
+        let stamp = pdf_stamp(&path).unwrap();
+        let data = read_trailing_doc_data(&path).unwrap();
+        assert!(committed_matches(&path, &stamp, &data));
+        let mut changed = first.clone();
+        changed.push(b'\n');
+        fs::write(&path, &changed).unwrap();
+        assert!(!committed_matches(&path, &pdf_stamp(&path).unwrap(), &data));
+        fs::write(&path, &first).unwrap();
         notes.insert(1, "updated".to_owned());
         commit_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         let updated = fs::read(&path).unwrap();
@@ -4003,6 +4467,18 @@ mod tests {
         assert_eq!(read_trailing_doc_data(&path).unwrap().notes[&1], "updated");
         assert!(lopdf::Document::load_mem(&updated).is_ok());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reserved_pdf_length_preserves_stream_size_and_numeric_format() {
+        let data = DocData::default();
+        let mut payload = pending_length_stream(&data).unwrap().content;
+        let before = payload.len();
+        assert_eq!(finalize_pdf_length(&mut payload, 0).unwrap(), before as u64);
+        assert_eq!(payload.len(), before);
+        let block = find_embedded_block(&payload).unwrap();
+        assert_eq!(parse_embedded_data(&payload[block.body_start..block.body_end])
+            .unwrap().pdf_annots_file_len, before as u64);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 /target
 /dist
+/scripts
 *.tar.gz
 *.zip
 *.exe

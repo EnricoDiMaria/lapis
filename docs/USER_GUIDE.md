@@ -38,7 +38,7 @@ The current document is the context for your work: notes, annotations, bookmarks
 
 ### Saving your work
 
-Use the Save action or its keyboard shortcut to save notes and annotations.
+Use the Save action or its keyboard shortcut to save notes and annotations. PDF commits run on a background worker. The workspace stays visible and editable while saving, with toast-only feedback. Closing or switching waits for all current edits to be committed. Inserting, deleting, reordering or compacting PDF pages is temporarily unavailable during the commit. If a PDF commit fails, retry, keep working, or continue with the local backup only when the backup was successfully written.
 
 Lapis stores document data locally and associates it with the PDF. A local backup is also maintained by the document-data storage system.
 
