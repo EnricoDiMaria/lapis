@@ -557,7 +557,7 @@ impl Default for ShortcutsConfig {
             layout_version: 1,
             save_notes: ShortcutBinding::new(true, false, false, "S"),
             toggle_notes: ShortcutBinding::new(false, false, false, "N"),
-            toggle_edit_preview: ShortcutBinding::new(false, false, false, "X"),
+            toggle_edit_preview: ShortcutBinding::new(true, false, false, "E"),
             toggle_outline: ShortcutBinding::new(false, false, false, "G"),
             prev_slide_global: ShortcutBinding::new(false, true, false, "ArrowLeft"),
             next_slide_global: ShortcutBinding::new(false, true, false, "ArrowRight"),
