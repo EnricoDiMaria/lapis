@@ -1461,6 +1461,10 @@ struct Lapis {
     note_is_dirty: bool,
     /// Last successful local checkpoint; detects edits from every UI tool, not just notes.
     last_local_checkpoint_hash: Option<u64>,
+    /// Set while local checkpoints fail; throttles the per-frame retry.
+    checkpoint_failed_at: Option<std::time::Instant>,
+    /// Guards against a merge/retry loop when an external change cannot be acknowledged.
+    last_external_merge: Option<std::time::Instant>,
     queued_pdf_save: Option<AfterPdfSave>,
     pdf_save_job: Option<PdfSaveJob>,
     pdf_save_failure: Option<PdfSaveFailure>,
@@ -1702,6 +1706,8 @@ impl Lapis {
             notes: HashMap::new(),
             note_is_dirty: false,
             last_local_checkpoint_hash: None,
+            checkpoint_failed_at: None,
+            last_external_merge: None,
             queued_pdf_save: None,
             pdf_save_job: None,
             pdf_save_failure: None,
@@ -2522,9 +2528,42 @@ impl Lapis {
     }
 
     fn sync_and_save(&mut self) {
-        if let Err(err) = self.sync_local_checkpoint() {
-            eprintln!("Lapis: failed to checkpoint document locally: {err}");
+        match self.sync_local_checkpoint() {
+            Ok(()) => self.checkpoint_failed_at = None,
+            Err(err) => {
+                eprintln!("Lapis: failed to checkpoint document locally: {err}");
+                if self.checkpoint_failed_at.is_none() {
+                    self.toast_message = Some((
+                        format!("󰀪 Local backup failed: {err}"),
+                        std::time::Instant::now(),
+                    ));
+                }
+                self.checkpoint_failed_at = Some(std::time::Instant::now());
+            }
         }
+    }
+
+    /// Page edits rebuild the PDF from the local backup, so it must be current first.
+    fn checkpoint_before_structure_change(&mut self) -> bool {
+        match self.sync_local_checkpoint() {
+            Ok(()) => true,
+            Err(err) => {
+                self.toast_message = Some((
+                    format!("󰅚 Page change cancelled: local backup failed ({err})"),
+                    std::time::Instant::now(),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Another program appended to the PDF: import its annotations into the live model,
+    /// checkpoint them, then record the new length so the next commit may proceed.
+    fn merge_external_into_model(&mut self) -> std::io::Result<()> {
+        self.finish_sketch_edit();
+        notes::merge_external_annotations(&self.pdf_path, &mut self.annotations);
+        self.sync_local_checkpoint()?;
+        notes::mark_pdf_observed(&self.pdf_path)
     }
 
     fn sync_local_checkpoint(&mut self) -> std::io::Result<()> {
@@ -2661,6 +2700,22 @@ impl Lapis {
                         if newer_edits {
                             self.toast_message = Some(("󰄬 PDF saved; newer edits are local".into(), std::time::Instant::now()));
                         }
+                    }
+                }
+                Ok(Err(err)) if notes::is_external_modification(&err) => {
+                    let repeated = self.last_external_merge
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5));
+                    self.last_external_merge = Some(std::time::Instant::now());
+                    match self.merge_external_into_model() {
+                        Ok(()) if !repeated => {
+                            self.toast_message = Some((
+                                "PDF changed outside Lapis; its annotations were merged".into(),
+                                std::time::Instant::now(),
+                            ));
+                            self.request_pdf_save(job.after, &ctx);
+                        }
+                        Ok(()) => self.pdf_save_failed(job.after, err.to_string(), true),
+                        Err(merge_err) => self.pdf_save_failed(job.after, merge_err.to_string(), false),
                     }
                 }
                 Ok(Err(err)) => self.pdf_save_failed(job.after, err.to_string(), true),
@@ -3772,6 +3827,8 @@ impl Lapis {
         self.last_thumb_req = None;
         self.visible_pages = (0, 0);
         self.last_local_checkpoint_hash = None;
+        self.checkpoint_failed_at = None;
+        self.last_external_merge = None;
         self.pdf_path = path.clone();
         self.pdf_name = name;
         self.total_pages = total_pages;
@@ -7040,6 +7097,12 @@ impl Lapis {
                                                             self.toast_message = Some((
                                                                 match result {
                                                                     Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
+                                                                    Err(err) if notes::is_external_modification(&err) => {
+                                                                        match self.merge_external_into_model() {
+                                                                            Ok(()) => "PDF changed outside Lapis; its annotations were merged. Compact again to continue".to_string(),
+                                                                            Err(err) => format!("PDF compaction failed: {err}"),
+                                                                        }
+                                                                    }
                                                                     Err(err) => format!("PDF compaction failed: {err}"),
                                                                 },
                                                                 std::time::Instant::now(),
@@ -11098,7 +11161,7 @@ let state_path = crate::state::AppState::config_path();
             return;
         }
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         // Release worker file handles before rewriting the PDF.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
@@ -11244,7 +11307,7 @@ let state_path = crate::state::AppState::config_path();
         }
 
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         // Close worker channels that may still hold the PDF open.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
@@ -11372,7 +11435,7 @@ let state_path = crate::state::AppState::config_path();
         }
 
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
         let old_anchor_page = self.continuous_anchor_page;
@@ -19349,7 +19412,13 @@ impl eframe::App for Lapis {
         if self.has_pdf() {
             let snapshot = self.local_checkpoint_hash();
             if snapshot.is_some() && snapshot != self.last_local_checkpoint_hash {
-                self.sync_and_save();
+                let backing_off = self.checkpoint_failed_at
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+                if backing_off {
+                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
+                } else {
+                    self.sync_and_save();
+                }
             }
         }
     }
