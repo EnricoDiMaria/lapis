@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **External annotations are no longer dropped on save:** If another program adds annotations to a PDF while it is open in Lapis, the next save now merges them into the document first (with a notice) instead of silently removing them from the page. Compacting the PDF history applies the same check.
-- **Safer page insert, delete and reorder:** The rewritten PDF now embeds the latest local data, so an interruption right after a page change can no longer attach notes and annotations to the wrong pages. The change is cancelled if the local backup cannot be written, and signed PDFs are refused instead of having their signatures invalidated.
+- **Safer page insert, delete and reorder:** The rewritten PDF now embeds the latest local data, so an interruption right after a page change can no longer attach notes and annotations to the wrong pages. The change is cancelled if the local backup cannot be written, and Lapis now asks before a page change on a digitally signed PDF, because the rewrite invalidates the signature (empty signature fields are ignored).
 - **Durable PDF and backup writes:** The new PDF is flushed to disk before it replaces the original. On Windows, a briefly locked file (antivirus, indexer) is retried before a save is reported as failed.
 - **Local backup failures are visible:** A failing local checkpoint now shows a notice and retries every few seconds instead of every frame.
 

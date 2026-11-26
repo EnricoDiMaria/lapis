@@ -1427,6 +1427,14 @@ struct ImageDrag {
 
 use save_intent::{AfterPdfSave, Completion};
 
+/// A page change that would invalidate a digital signature, waiting for the user's decision.
+#[derive(Clone, Copy)]
+enum SignedPageOp {
+    Insert { after_page: u32, style: notes::BlankPageStyle },
+    Delete { page: u32 },
+    Reorder { from: u32, to: u32 },
+}
+
 struct PdfSaveJob {
     worker: thread::JoinHandle<std::io::Result<()>>,
     after: AfterPdfSave,
@@ -1448,6 +1456,9 @@ struct Lapis {
     note_is_dirty: bool,
     /// Last successful local checkpoint; detects edits from every UI tool, not just notes.
     last_local_checkpoint_hash: Option<u64>,
+    pending_signed_page_op: Option<SignedPageOp>,
+    /// True only while a confirmed page change is replayed on a signed PDF.
+    allow_signature_loss: bool,
     /// Set while local checkpoints fail; throttles the per-frame retry.
     checkpoint_failed_at: Option<std::time::Instant>,
     /// Guards against a merge/retry loop when an external change cannot be acknowledged.
@@ -1693,6 +1704,8 @@ impl Lapis {
             notes: HashMap::new(),
             note_is_dirty: false,
             last_local_checkpoint_hash: None,
+            pending_signed_page_op: None,
+            allow_signature_loss: false,
             checkpoint_failed_at: None,
             last_external_merge: None,
             queued_pdf_save: None,
@@ -2751,6 +2764,43 @@ impl Lapis {
         false
     }
 
+    /// Page changes rewrite the whole file, which invalidates a digital signature. Ask first;
+    /// nothing was written when this is shown.
+    fn show_signed_page_modal(&mut self, ui: &mut egui::Ui) {
+        let Some(op) = self.pending_signed_page_op else { return; };
+        if !self.has_pdf() {
+            self.pending_signed_page_op = None;
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let mut proceed = false;
+        let mut cancel = false;
+        egui::Modal::new(ui.make_persistent_id("signed_page_change"))
+            .frame(self.modal_glass_frame(242))
+            .show(&ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.heading("This PDF is digitally signed");
+                ui.label("Inserting, deleting or reordering pages rewrites the file and invalidates its signature. Other viewers will report the signature as broken.");
+                ui.weak("Your notes and annotations are not affected. Lapis keeps a copy of the original file in its data folder, but keep your own copy if you need the signature.");
+                ui.add_space(10.0);
+                proceed = ui.button("Change pages anyway").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        if proceed || cancel {
+            self.pending_signed_page_op = None;
+            ctx.request_repaint();
+        }
+        if proceed {
+            self.allow_signature_loss = true;
+            match op {
+                SignedPageOp::Insert { after_page, style } => self.insert_blank_page_after(after_page, style, &ctx),
+                SignedPageOp::Delete { page } => self.delete_pdf_page_and_shift_data(page, &ctx),
+                SignedPageOp::Reorder { from, to } => self.reorder_pdf_page(from, to, &ctx),
+            }
+            self.allow_signature_loss = false;
+        }
+    }
+
     fn pdf_structure_busy(&mut self) -> bool {
         if self.pdf_save_job.is_some() || self.queued_pdf_save.is_some() || self.pdf_save_failure.is_some() {
             self.toast_message = Some(("PDF is saving; retry the page action shortly".into(), std::time::Instant::now()));
@@ -3804,6 +3854,7 @@ impl Lapis {
         self.last_local_checkpoint_hash = None;
         self.checkpoint_failed_at = None;
         self.last_external_merge = None;
+        self.pending_signed_page_op = None;
         self.pdf_path = path.clone();
         self.pdf_name = name;
         self.total_pages = total_pages;
@@ -11141,7 +11192,9 @@ let state_path = crate::state::AppState::config_path();
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
 
-        match notes::insert_blank_page_with_style_into_pdf(&self.pdf_path, after_page, style) {
+        match notes::insert_blank_page_with_style_into_pdf(
+            &self.pdf_path, after_page, style, self.allow_signature_loss,
+        ) {
             Ok(new_page_num) => {
                 notes::shift_doc_data_on_insert(
                     &mut self.notes,
@@ -11234,10 +11287,14 @@ let state_path = crate::state::AppState::config_path();
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Insert page error: {}", e),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Insert { after_page, style });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Insert page error: {}", e),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -11292,7 +11349,7 @@ let state_path = crate::state::AppState::config_path();
         let old_note_page = self.note_page;
         let old_split_secondary = self.split_secondary_page;
 
-        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del) {
+        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del, self.allow_signature_loss) {
             Ok(()) => {
                 let shift = |p: u32| -> Option<u32> {
                     if p < page_to_del {
@@ -11389,10 +11446,14 @@ let state_path = crate::state::AppState::config_path();
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Delete page failed: {e}"),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Delete { page: page_to_del });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Delete page failed: {e}"),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -11415,7 +11476,7 @@ let state_path = crate::state::AppState::config_path();
         self.thumb_tx = channel::<RenderRequest>().0;
         let old_anchor_page = self.continuous_anchor_page;
         let old_anchor_frac = self.continuous_anchor_frac;
-        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page) {
+        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page, self.allow_signature_loss) {
             Ok(()) => {
                 let remap = |page: u32| -> u32 {
                     if page == from_page {
@@ -11491,10 +11552,14 @@ let state_path = crate::state::AppState::config_path();
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Page reorder failed: {e}"),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Reorder { from: from_page, to: to_page });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Page reorder failed: {e}"),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -15416,6 +15481,7 @@ impl eframe::App for Lapis {
         }
 
         if self.service_pdf_save(ui) { return; }
+        self.show_signed_page_modal(ui);
 
         // Persist view mode and panel sizes once the pointer is released.
         let pointer_down = ui.input(|i| i.pointer.any_down());

@@ -408,7 +408,6 @@ fn save_pdf_with_notes(
     tag: &str,
     notes: &[u8],
 ) -> io::Result<()> {
-    ensure_not_signed(doc)?;
     let tmp_path = pdf_path.with_extension(format!("{tag}_tmp.pdf"));
     let mut adopted: Option<DocData> = None;
     let res = (|| -> io::Result<()> {
@@ -455,6 +454,7 @@ pub fn insert_blank_page_with_style_into_pdf(
     pdf_path: &Path,
     after_page: u32,
     style: BlankPageStyle,
+    allow_signature_loss: bool,
 ) -> io::Result<u32> {
     use lopdf::{Object, ObjectId, Stream, dictionary};
     use std::fmt::Write as _;
@@ -527,7 +527,7 @@ pub fn insert_blank_page_with_style_into_pdf(
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "ins").map_err(|e| io::Error::other(e))?;
     drop(clean);
-    ensure_not_signed(&doc)?;
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages = doc.get_pages();
     let total = pages.len() as u32;
@@ -714,13 +714,13 @@ pub fn insert_blank_page_with_style_into_pdf(
     Ok(actual_new_page_num)
 }
 
-pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<()> {
+pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32, allow_signature_loss: bool) -> io::Result<()> {
     ensure_original_pdf_backup(pdf_path)?;
 
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "del").map_err(|e| io::Error::other(e))?;
     drop(clean);
-    ensure_not_signed(&doc)?;
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages = doc.get_pages();
     if pages.len() <= 1 {
@@ -751,7 +751,7 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
 /// page objects and their PDF links and destinations.
 /// Flatten the /Pages tree and copy inherited attributes
 /// to each page before reordering.
-pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io::Result<()> {
+pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32, allow_signature_loss: bool) -> io::Result<()> {
     use lopdf::{Object, ObjectId};
 
     if from_page == to_page {
@@ -761,7 +761,7 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "reorder").map_err(|e| io::Error::other(e))?;
     drop(clean);
-    ensure_not_signed(&doc)?;
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages_map = doc.get_pages();
     let total = pages_map.len() as u32;
@@ -1069,11 +1069,41 @@ fn pdf_has_signature(doc: &lopdf::Document) -> bool {
     })
 }
 
-/// Page edits rewrite the whole file, which would invalidate any signature. Checked on the
-/// freshly loaded document: pruning a deleted page can drop the signature objects.
-fn ensure_not_signed(doc: &lopdf::Document) -> io::Result<()> {
-    if pdf_has_signature(doc) {
-        return Err(io::Error::other("signed PDFs cannot be restructured without invalidating signatures"));
+/// The PDF carries a digital signature that a page change would invalidate.
+#[derive(Debug)]
+struct SignedPdf;
+
+impl std::fmt::Display for SignedPdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this PDF is digitally signed; changing its pages invalidates the signature")
+    }
+}
+
+impl std::error::Error for SignedPdf {}
+
+pub fn is_signed_pdf_error(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<SignedPdf>())
+}
+
+/// A signature value covers byte ranges of the file (`/ByteRange`); an empty signature field
+/// does not, so it never blocks page edits.
+fn pdf_has_signed_value(doc: &lopdf::Document) -> bool {
+    doc.objects.values().any(|object| {
+        let dictionary = match object {
+            lopdf::Object::Dictionary(d) => Some(d),
+            lopdf::Object::Stream(s) => Some(&s.dict),
+            _ => None,
+        };
+        dictionary.is_some_and(|d| d.get(b"ByteRange").is_ok())
+    })
+}
+
+/// Page edits rewrite the whole file, which invalidates signatures. Checked on the freshly
+/// loaded document: pruning a deleted page can drop the signature objects. The caller decides
+/// (after asking the user) whether to proceed.
+fn ensure_not_signed(doc: &lopdf::Document, allow_signature_loss: bool) -> io::Result<()> {
+    if !allow_signature_loss && pdf_has_signed_value(doc) {
+        return Err(io::Error::other(SignedPdf));
     }
     Ok(())
 }
@@ -4549,17 +4579,17 @@ mod tests {
         data.sketches.insert(2, SketchPage::new(BlankPageStyle::Dotted));
         data.annotations.insert(2, vec![sample_textbox("Move too", vec![(0.1, 0.1), (0.5, 0.3)])]);
         save_fixture(&path, &data);
-        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).unwrap();
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
         assert_eq!(inserted, 2);
         shift_doc_data_on_insert(&mut data.notes, &mut data.annotations, &mut data.blank_pages, &mut data.sketches, inserted);
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 5);
         assert_eq!(data.notes[&3], "Move with page");
-        reorder_pages_in_pdf(&path, 3, 1).unwrap();
+        reorder_pages_in_pdf(&path, 3, 1, false).unwrap();
         remap_doc_data_pages(&mut data, &|p| Some(match p { 3 => 1, 1 | 2 => p + 1, _ => p }));
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 5);
-        delete_page_from_pdf(&path, 1).unwrap();
+        delete_page_from_pdf(&path, 1, false).unwrap();
         remap_doc_data_pages(&mut data, &|p| p.checked_sub(1).filter(|p| *p > 0));
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 4);
@@ -4692,7 +4722,7 @@ mod tests {
         let before = fs::read(get_backup_path(&path)).unwrap();
         let rev_before = load_local_backup(&path).unwrap().rev;
 
-        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).unwrap();
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
         assert_eq!(inserted, 2);
         let after = load_local_backup(&path).unwrap();
         assert!(after.rev > rev_before, "backup revision must advance");
@@ -4710,24 +4740,51 @@ mod tests {
         assert!(reopened.blank_pages.contains(&2));
     }
 
+    fn add_test_object(path: &Path, dict: lopdf::Dictionary) {
+        let mut doc = lopdf::Document::load(path).unwrap();
+        doc.add_object(dict);
+        doc.save(path).unwrap();
+    }
+
     #[test]
-    fn page_structure_ops_refuse_signed_pdfs_without_touching_them() {
+    fn page_structure_ops_ask_before_invalidating_a_signature() {
         use lopdf::dictionary;
         let _guard = crate::docid::test_lock();
         let fixture = SaveTestDir::new("structure_signed");
         let path = fixture.root.join("structure_signed.pdf");
         save_test_pdf(&path, 3);
-        let mut doc = lopdf::Document::load(&path).unwrap();
-        doc.add_object(dictionary! {
+        add_test_object(&path, dictionary! {
             "Type" => "Sig", "Filter" => "Adobe.PPKLite",
             "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
         });
-        doc.save(&path).unwrap();
         let original = fs::read(&path).unwrap();
-        assert!(insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).is_err());
-        assert!(delete_page_from_pdf(&path, 1).is_err());
-        assert!(reorder_pages_in_pdf(&path, 1, 2).is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
+        let insert = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap_err();
+        let delete = delete_page_from_pdf(&path, 1, false).unwrap_err();
+        let reorder = reorder_pages_in_pdf(&path, 1, 2, false).unwrap_err();
+        assert!(is_signed_pdf_error(&insert) && is_signed_pdf_error(&delete) && is_signed_pdf_error(&reorder));
+        assert_eq!(fs::read(&path).unwrap(), original, "a refused edit modified the PDF");
+        assert!(!path.with_extension("ins_tmp.pdf").exists());
+
+        // Once the user has confirmed, the edit proceeds and the file stays valid.
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, true).unwrap();
+        assert_eq!(inserted, 2);
+        assert_eq!(lopdf::Document::load(&path).unwrap().get_pages().len(), 4);
+        delete_page_from_pdf(&path, 1, true).unwrap();
+        reorder_pages_in_pdf(&path, 1, 2, true).unwrap();
+        assert_eq!(lopdf::Document::load(&path).unwrap().get_pages().len(), 3);
+    }
+
+    #[test]
+    fn an_empty_signature_field_does_not_block_page_edits() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_sigfield");
+        let path = fixture.root.join("structure_sigfield.pdf");
+        save_test_pdf(&path, 3);
+        add_test_object(&path, dictionary! { "FT" => "Sig", "T" => lopdf::Object::string_literal("Signature1") });
+        insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
+        delete_page_from_pdf(&path, 1, false).unwrap();
+        reorder_pages_in_pdf(&path, 1, 2, false).unwrap();
     }
 
     #[test]
@@ -4760,7 +4817,7 @@ mod tests {
         let mut data = load_doc_data(&path);
         data.notes.insert(2, "keep".into());
         save_fixture(&path, &data);
-        delete_page_from_pdf(&path, 1).unwrap();
+        delete_page_from_pdf(&path, 1, false).unwrap();
         let bytes = fs::read(&path).unwrap();
         let embedded = embedded_doc_data(&bytes).unwrap();
         assert_eq!(embedded.pdf_annots_file_len, bytes.len() as u64);
