@@ -387,6 +387,32 @@ fn update_embedded_notes(notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec
     out
 }
 
+/// Like [`update_embedded_notes`], but starts from the newest of the local backup and the
+/// embedded payload. The rewritten PDF then carries the model on screen, with a revision
+/// above the (not yet remapped) backup, so a stop before the backup is rewritten loses nothing.
+fn rebase_embedded_notes(pdf_path: &Path, notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec<u8> {
+    let embedded = find_embedded_block(notes)
+        .and_then(|block| parse_embedded_data(&notes[block.body_start..block.body_end]));
+    let key = crate::docid::resolve_key(pdf_path);
+    let backup = load_local_backup(pdf_path)
+        .filter(|d| d.doc_id.as_deref().is_none_or(|id| id == key));
+    let mut data = match (backup, embedded) {
+        (Some(b), Some(e)) => if b.rev >= e.rev { b } else { e },
+        (Some(d), None) | (None, Some(d)) => d,
+        (None, None) => return notes.to_vec(),
+    };
+    change(&mut data);
+    data.rev = next_rev(pdf_path);
+    data.doc_id.get_or_insert(key);
+    let mut out = Vec::new();
+    out.extend_from_slice(NOTES_START_TAG);
+    if serde_json::to_writer(&mut out, &portable(&data)).is_err() {
+        return notes.to_vec();
+    }
+    out.extend_from_slice(NOTES_END_TAG);
+    out
+}
+
 /// Write the PDF and note data to a temporary file, then replace the original atomically.
 fn save_pdf_with_notes(
     doc: &mut lopdf::Document,
@@ -394,7 +420,9 @@ fn save_pdf_with_notes(
     tag: &str,
     notes: &[u8],
 ) -> io::Result<()> {
+    ensure_not_signed(doc)?;
     let tmp_path = pdf_path.with_extension(format!("{tag}_tmp.pdf"));
+    let mut adopted: Option<DocData> = None;
     let res = (|| -> io::Result<()> {
         // A structural rewrite is already non-incremental: do not carry forward
         // obsolete custom streams from previous revisions.
@@ -419,10 +447,19 @@ fn save_pdf_with_notes(
         output.clear();
         doc.save_to(&mut output)
             .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
-        fs::write(&tmp_path, output)
+        adopted = metadata;
+        write_synced(&tmp_path, &output)
     })();
-    res.and_then(|_| fs::rename(&tmp_path, pdf_path))
-        .inspect_err(|_| { let _ = fs::remove_file(&tmp_path); })
+    res.and_then(|_| replace_file(&tmp_path, pdf_path))
+        .inspect_err(|_| { let _ = fs::remove_file(&tmp_path); })?;
+    // The embedded payload already wins on its revision; this brings the backup in line.
+    if let Some(mut data) = adopted {
+        let _guard = checkpoint_lock();
+        data.pdf_annots_imported = true;
+        remember_rev(pdf_path, data.rev);
+        save_local_backup(pdf_path, &data);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -510,6 +547,7 @@ pub fn insert_blank_page_with_style_into_pdf(
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "ins").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc)?;
 
     let pages = doc.get_pages();
     let total = pages.len() as u32;
@@ -683,7 +721,7 @@ pub fn insert_blank_page_with_style_into_pdf(
         })
         .unwrap_or(ref_page_num + 1);
 
-    let notes = update_embedded_notes(&notes, |data| {
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
         shift_doc_data_on_insert(
             &mut data.notes,
             &mut data.annotations,
@@ -702,6 +740,7 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "del").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc)?;
 
     let pages = doc.get_pages();
     if pages.len() <= 1 {
@@ -718,7 +757,7 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
     doc.delete_pages(&[page_to_delete]);
     let _ = doc.prune_objects(); // Remove orphaned objects and resources.
 
-    let notes = update_embedded_notes(&notes, |data| {
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
         remap_doc_data_pages(data, &|page| match page.cmp(&page_to_delete) {
             std::cmp::Ordering::Less => Some(page),
             std::cmp::Ordering::Equal => None,
@@ -742,6 +781,7 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "reorder").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc)?;
 
     let pages_map = doc.get_pages();
     let total = pages_map.len() as u32;
@@ -821,7 +861,7 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     );
     root.set("Count", Object::Integer(total as i64));
 
-    let notes = update_embedded_notes(&notes, |data| {
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
         remap_doc_data_pages(data, &|page| {
             Some(if page == from_page {
                 to_page
@@ -875,7 +915,7 @@ fn save_local_backup_checked(pdf_path: &Path, data: &DocData) -> io::Result<()> 
         file.write_all(&json)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, &backup_path)
+        replace_file(&tmp, &backup_path)
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
     result
@@ -924,6 +964,107 @@ fn next_rev(pdf_path: &Path) -> u64 {
         .and_then(|m| m.get(pdf_path).copied())
         .unwrap_or_else(|| load_local_backup(pdf_path).map(|d| d.rev).unwrap_or(0));
     now_ms().max(last + 1)
+}
+
+/// The PDF gained a revision Lapis has not merged yet; writing now would drop it.
+#[derive(Debug)]
+struct ExternalModification;
+
+impl std::fmt::Display for ExternalModification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the PDF was modified outside Lapis; merge its annotations before saving")
+    }
+}
+
+impl std::error::Error for ExternalModification {}
+
+pub fn is_external_modification(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<ExternalModification>())
+}
+
+/// True when `base` has bytes Lapis neither wrote nor imported. `watermark` is the PDF length
+/// recorded at the last import or commit; a Lapis tail that records the current length is ours.
+fn externally_modified(base: &[u8], watermark: u64) -> bool {
+    let len = base.len() as u64;
+    watermark != 0
+        && watermark != len
+        && !(trailing_lapis_revision(base).is_some()
+            && embedded_doc_data(base).is_some_and(|stored| stored.pdf_annots_file_len == len))
+}
+
+/// Imports annotations added by other programs into the live model (idempotent).
+pub fn merge_external_annotations(
+    pdf_path: &Path,
+    annotations: &mut HashMap<u32, Vec<PageAnnotation>>,
+) {
+    import_external_annotations(pdf_path, annotations);
+}
+
+/// Records the current PDF length as seen. Call only after the merged model is checkpointed.
+pub fn mark_pdf_observed(pdf_path: &Path) -> io::Result<()> {
+    let _guard = checkpoint_lock();
+    let Some(mut data) = load_local_backup(pdf_path) else { return Ok(()); };
+    let len = fs::metadata(pdf_path)?.len();
+    if data.pdf_annots_imported && data.pdf_annots_file_len == len { return Ok(()); }
+    data.pdf_annots_imported = true;
+    data.pdf_annots_file_len = len;
+    save_local_backup_checked(pdf_path, &data)
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Atomic replace. Windows may briefly deny the rename (viewer, indexer or antivirus handle),
+/// so retry a few times there; the directory is synced on Unix to persist the rename.
+fn replace_file(tmp: &Path, dest: &Path) -> io::Result<()> {
+    let mut attempt = 0u64;
+    loop {
+        match fs::rename(tmp, dest) {
+            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+            }
+            result => {
+                #[cfg(unix)]
+                if result.is_ok()
+                    && let Some(dir) = dest.parent().filter(|d| !d.as_os_str().is_empty())
+                    && let Ok(dir) = File::open(dir)
+                {
+                    let _ = dir.sync_all();
+                }
+                return result;
+            }
+        }
+    }
+}
+
+fn pdf_has_signature(doc: &lopdf::Document) -> bool {
+    // /ByteRange, /FT /Sig and /Type /Sig can represent signed PDF objects.
+    doc.objects.values().any(|object| {
+        let dictionary = match object {
+            lopdf::Object::Dictionary(d) => Some(d),
+            lopdf::Object::Stream(s) => Some(&s.dict),
+            _ => None,
+        };
+        dictionary.is_some_and(|d| {
+            d.get(b"ByteRange").is_ok()
+                || [b"Type".as_slice(), b"FT".as_slice()].iter().any(|key| {
+                    d.get(key).ok().and_then(|o| o.as_name().ok()) == Some(b"Sig".as_slice())
+                })
+        })
+    })
+}
+
+/// Page edits rewrite the whole file, which would invalidate any signature. Checked on the
+/// freshly loaded document: pruning a deleted page can drop the signature objects.
+fn ensure_not_signed(doc: &lopdf::Document) -> io::Result<()> {
+    if pdf_has_signature(doc) {
+        return Err(io::Error::other("signed PDFs cannot be restructured without invalidating signatures"));
+    }
+    Ok(())
 }
 
 fn same_content(a: &DocData, b: &DocData) -> bool {
@@ -1264,6 +1405,7 @@ fn commit_with_base(
     source_stamp: &PdfStamp,
     force_rewrite: bool,
 ) -> io::Result<()> {
+    let watermark = data.pdf_annots_file_len;
     let trailing = trailing_lapis_revision(&base);
     // Compare the already-read metadata before parsing the PDF.
     if !force_rewrite && trailing.is_some()
@@ -1284,6 +1426,9 @@ fn commit_with_base(
         return Err(io::Error::other("PDF changed while saving; retry Save"));
     }
 
+    if !force_rewrite && externally_modified(&base, watermark) {
+        return Err(io::Error::other(ExternalModification));
+    }
     data.pdf_annots_file_len = base.len() as u64;
 
     // Reuse the successful prefix parse as the incremental document.
@@ -1318,11 +1463,11 @@ fn commit_with_base(
         .map_err(|e| io::Error::other(format!("incremental PDF validation failed: {e}")))?;
     let tmp = pdf_path.with_extension("lapis_commit_tmp.pdf");
     let result = (|| -> io::Result<()> {
-        fs::write(&tmp, output)?;
+        write_synced(&tmp, &output)?;
         if pdf_stamp(pdf_path)? != *source_stamp {
             return Err(io::Error::other("PDF changed while saving; retry Save"));
         }
-        fs::rename(&tmp, pdf_path)
+        replace_file(&tmp, pdf_path)
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
     result?;
@@ -1361,21 +1506,8 @@ pub fn compact_doc_data(
     if doc.trailer.get(b"Encrypt").is_ok() {
         return Err(io::Error::other("encrypted PDFs are not eligible for compaction"));
     }
-    // /ByteRange, /FT /Sig and /Type /Sig can represent signed PDF objects.
     // Compaction invalidates signatures even when their appearance survives.
-    let signed = doc.objects.values().any(|object| {
-        let dictionary = match object {
-            lopdf::Object::Dictionary(d) => Some(d),
-            lopdf::Object::Stream(s) => Some(&s.dict),
-            _ => None,
-        };
-        dictionary.is_some_and(|d| {
-            d.get(b"ByteRange").is_ok()
-                || [b"Type".as_slice(), b"FT".as_slice()].iter().any(|key| {
-                    d.get(key).ok().and_then(|o| o.as_name().ok()) == Some(b"Sig".as_slice())
-                })
-        })
-    });
+    let signed = pdf_has_signature(&doc);
     if signed {
         return Err(io::Error::other("signed PDFs cannot be compacted without invalidating signatures"));
     }
@@ -1392,10 +1524,14 @@ pub fn compact_doc_data(
         return Err(io::Error::other("PDF page count changed during compaction"));
     }
 
+    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
+    // Flattening would export a model that lacks the external revision's annotations.
+    if externally_modified(&original, data.pdf_annots_file_len) {
+        return Err(io::Error::other(ExternalModification));
+    }
     // Preserve the exact bytes of the original on disk so compaction can be undone.
     let backup = pdf_path.with_extension("lapis_before_compaction.pdf");
     if !backup.exists() { fs::write(&backup, &original)?; }
-    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
     commit_with_base(pdf_path, data, compacted, &stamp, true)
 }
 
@@ -4420,6 +4556,169 @@ mod tests {
         assert!(same_content(&load_doc_data(&path), &data));
     }
 
+    fn append_external_freetext(path: &Path, page: u32, text: &str) {
+        use lopdf::{dictionary, Object};
+        let saved = fs::read(path).unwrap();
+        let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
+        let page_id = incremental.get_prev_documents().get_pages()[&page];
+        incremental.opt_clone_object_to_new_document(page_id).unwrap();
+        let annotation_id = incremental.new_document.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+            "Contents" => Object::string_literal(text.as_bytes().to_vec()),
+            "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
+        });
+        incremental.new_document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
+            .set("Annots", vec![Object::Reference(annotation_id)]);
+        let mut output = Vec::new();
+        incremental.save_to(&mut output).unwrap();
+        fs::write(path, &output).unwrap();
+    }
+
+    fn save_model(path: &Path, data: &DocData) {
+        save_doc_data(path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+    }
+
+    #[test]
+    fn save_pipeline_external_annotation_is_merged_never_dropped() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("external_merge");
+        let path = fixture.root.join("external_merge.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "Original note".into());
+        save_fixture(&path, &data);
+        append_external_freetext(&path, 2, "External edit");
+        let external = fs::read(&path).unwrap();
+
+        // The live model has not seen the external revision: refuse and write nothing.
+        data.notes.insert(1, "Edited note".into());
+        let err = commit_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches)
+            .unwrap_err();
+        assert!(is_external_modification(&err), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), external, "refused commit modified the PDF");
+        assert!(!path.with_extension("lapis_commit_tmp.pdf").exists());
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "Edited note", "local edit lost");
+
+        // Merge, checkpoint, acknowledge, retry.
+        merge_external_annotations(&path, &mut data.annotations);
+        save_model(&path, &data);
+        mark_pdf_observed(&path).unwrap();
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 3);
+        assert!(data.annotations[&2].iter().any(|a| a.text == "External edit"));
+        assert!(fs::read(&path).unwrap().starts_with(&external), "external revision was truncated");
+
+        // A second commit and a reopen keep it.
+        data.notes.insert(1, "Edited again".into());
+        save_fixture(&path, &data);
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Edited again");
+        assert!(reopened.annotations[&2].iter().any(|a| a.text == "External edit"));
+    }
+
+    #[test]
+    fn save_pipeline_own_tail_after_interrupted_checkpoint_is_not_external() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("own_tail");
+        let path = fixture.root.join("own_tail.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "One".into());
+        save_fixture(&path, &data);
+        // Simulate a stop between the rename and the backup update: stale watermark.
+        let mut backup = load_local_backup(&path).unwrap();
+        backup.pdf_annots_file_len = 1;
+        save_local_backup_checked(&path, &backup).unwrap();
+        data.notes.insert(1, "Two".into());
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+    }
+
+    #[test]
+    fn save_pipeline_compaction_refuses_unmerged_external_revision() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("compact_external");
+        let path = fixture.root.join("compact_external.pdf");
+        save_test_pdf(&path, 3);
+        let data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        append_external_freetext(&path, 2, "External edit");
+        let external = fs::read(&path).unwrap();
+        let err = compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches)
+            .unwrap_err();
+        assert!(is_external_modification(&err), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), external);
+        assert!(!path.with_extension("lapis_before_compaction.pdf").exists());
+    }
+
+    #[test]
+    fn save_pipeline_stale_commit_tmp_does_not_block_a_commit() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("stale_tmp");
+        let path = fixture.root.join("stale_tmp.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        fs::write(path.with_extension("lapis_commit_tmp.pdf"), b"killed mid-write").unwrap();
+        data.notes.insert(1, "After crash".into());
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+        assert!(!path.with_extension("lapis_commit_tmp.pdf").exists());
+    }
+
+    #[test]
+    fn page_structure_rewrite_survives_a_lost_backup_update() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_crash");
+        let path = fixture.root.join("structure_crash.pdf");
+        save_test_pdf(&path, 4);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "Move with page".into());
+        save_fixture(&path, &data);
+        // An edit that exists only in the local backup (never committed to the PDF).
+        data.notes.insert(1, "Latest local edit".into());
+        save_model(&path, &data);
+        let before = fs::read(get_backup_path(&path)).unwrap();
+        let rev_before = load_local_backup(&path).unwrap().rev;
+
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).unwrap();
+        assert_eq!(inserted, 2);
+        let after = load_local_backup(&path).unwrap();
+        assert!(after.rev > rev_before, "backup revision must advance");
+        assert_eq!(after.notes[&3], "Move with page");
+        assert_eq!(after.notes[&1], "Latest local edit");
+        assert_eq!(after.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+
+        // Stop before the backup was rewritten: the PDF's payload must win and be complete.
+        fs::write(get_backup_path(&path), &before).unwrap();
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Latest local edit");
+        assert_eq!(reopened.notes[&3], "Move with page");
+        assert!(!reopened.notes.contains_key(&2));
+        assert!(reopened.blank_pages.contains(&2));
+    }
+
+    #[test]
+    fn page_structure_ops_refuse_signed_pdfs_without_touching_them() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_signed");
+        let path = fixture.root.join("structure_signed.pdf");
+        save_test_pdf(&path, 3);
+        let mut doc = lopdf::Document::load(&path).unwrap();
+        doc.add_object(dictionary! {
+            "Type" => "Sig", "Filter" => "Adobe.PPKLite",
+            "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
+        });
+        doc.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank).is_err());
+        assert!(delete_page_from_pdf(&path, 1).is_err());
+        assert!(reorder_pages_in_pdf(&path, 1, 2).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
     #[test]
     fn repeated_commits_keep_one_custom_block_and_one_rollback_marker() {
         let _guard = crate::docid::test_lock();
@@ -4562,6 +4861,8 @@ mod tests {
         doc.add_object(lopdf::Object::Stream(custom_data_stream(&old).unwrap()));
         doc.save(&path).unwrap();
         assert_eq!(count_custom_sections(&fs::read(&path).unwrap()), 2);
+        // The rewrite changed the length; the app acknowledges it after merging.
+        mark_pdf_observed(&path).unwrap();
         notes.insert(1, "after".to_owned());
         compact_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         let output = fs::read(&path).unwrap();

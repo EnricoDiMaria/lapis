@@ -1156,7 +1156,7 @@ mod shortcut_tests {
             }
         }
         assert_eq!(cfg.toggle_notes.format_label(), "N");
-        assert_eq!(cfg.toggle_edit_preview.format_label(), "X");
+        assert_eq!(cfg.toggle_edit_preview.format_label(), "Ctrl + E");
         assert_eq!(cfg.toggle_outline.format_label(), "G");
     }
 
