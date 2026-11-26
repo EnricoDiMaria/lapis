@@ -298,6 +298,7 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 |---|---|
 | `src/main.rs` | Application state, UI, viewing modes, annotation tools, search, flashcards |
 | `src/notes.rs` | Notes and annotation data model, storage inside the PDF, local backups, page operations |
+| `src/save_intent.rs` | Pure rules of the background PDF save: queueing, close/switch ordering, follow-up commits |
 | `src/export.rs` | PDF export (vector pipeline and rasterised fallback) and note layout |
 | `src/docid.rs` | Stable document identity and migration of legacy data |
 | `src/audio.rs` | Audio workspace, recording, voice memos, transcription |
@@ -308,7 +309,7 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 ## Where your work is stored
 
 - **Hybrid PDF & standard annotation storage:** While you work, periodic autosaves update a fast **local backup** without bloating the PDF file. When you explicitly save (`Ctrl + S`), switch documents, or close the app, Lapis commits a single **PDF Incremental Update** containing both standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText` with appearance streams for external viewers) and Lapis's own metadata stream (notes, sketches, flashcards, and custom properties).
-- **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open, without truncating external PDF revisions.
+- **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open (or merged before the next save if they appear while the document is open), without truncating external PDF revisions.
 - **Portable Lapis metadata is stored inside a PDF stream object**, delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END`, rather than appended after `%%EOF`. Standard PDF annotations are stored separately as native annotation objects. Both travel with the PDF.
 - **Per-document view state** (page, zoom, view mode, notes-panel size) is kept in `state.json` in the settings folder, not in the PDF.
 - **Autosaves update the local backup** without modifying the PDF. Explicit Save (`Ctrl + S`), document switches and exit commit document changes to the PDF on a background worker; the workspace remains editable and save feedback appears as a toast. Closing or switching waits for any newer edits to be committed. The local backup also protects against an interrupted or unavailable PDF write.

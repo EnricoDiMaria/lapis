@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Faster local checkpoints on large documents:** Autosaves reuse the last backup in memory, write compact JSON, and no longer reserialize the whole PDF three times after a page change. Heavily annotated documents checkpoint several times faster (unchanged checkpoints in about a tenth of the time).
+
 - **Annotation colors:** Pen, highlighter, textboxes, underline, shapes and occlusion tape remember their own last-used colors. The pen defaults to blue and the highlighter to yellow. Palette selections apply to the next annotation, even when selected before switching tools.
 
 - **Radial annotation menu:** Reduced shadow spread and opacity, refined translucent surfaces, subtle accent-colored ring borders, tool selection, color swatches and hover labels.
@@ -42,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, using only the letters of each dictionary) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
 
 ### Fixed
+
+- **External annotations are no longer dropped on save:** If another program adds annotations to a PDF while it is open in Lapis, the next save now merges them into the document first (with a notice) instead of silently removing them from the page. Compacting the PDF history applies the same check.
+- **Safer page insert, delete and reorder:** The rewritten PDF now embeds the latest local data, so an interruption right after a page change can no longer attach notes and annotations to the wrong pages. The change is cancelled if the local backup cannot be written, and signed PDFs are refused instead of having their signatures invalidated.
+- **Durable PDF and backup writes:** The new PDF is flushed to disk before it replaces the original. On Windows, a briefly locked file (antivirus, indexer) is retried before a save is reported as failed.
+- **Local backup failures are visible:** A failing local checkpoint now shows a notice and retries every few seconds instead of every frame.
 
 - **Large PDF saves:** Skip unchanged commits and redundant local backup writes. Reuse the PDF revision parse and serialize incremental updates once, retaining final validation and atomic replacement. Explicit saves and document transitions run on a worker; the workspace stays visible and editable with toast-only save feedback. Closing or switching commits any newer edits before releasing the document; structural PDF changes wait until the current save ends. Added an isolated save regression suite with a generated 180-page PDF and timing output.
 
