@@ -18,6 +18,7 @@ mod dialogs;
 use dialogs::{AsrRetry, DialogKind, DialogSpec, Dialogs};
 mod export;
 mod notes;
+mod save_intent;
 mod sketch;
 mod theme;
 mod theme_picker;
@@ -1424,21 +1425,7 @@ struct ImageDrag {
     mode: ImageDragMode,
 }
 
-enum AfterPdfSave {
-    Stay,
-    Home,
-    Open(PathBuf),
-    Exit,
-}
-
-fn save_needs_followup(
-    after: &AfterPdfSave,
-    queued: bool,
-    saved: Option<u64>,
-    current: Option<u64>,
-) -> bool {
-    (!matches!(after, AfterPdfSave::Stay) || queued) && (saved.is_none() || saved != current)
-}
+use save_intent::{AfterPdfSave, Completion};
 
 struct PdfSaveJob {
     worker: thread::JoinHandle<std::io::Result<()>>,
@@ -2586,22 +2573,11 @@ impl Lapis {
     fn request_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) {
         if !self.has_pdf() { return; }
         if let Some(failure) = &mut self.pdf_save_failure {
-            if !matches!(&after, AfterPdfSave::Stay) && !matches!(&failure.after, AfterPdfSave::Exit) {
-                failure.after = after;
-            }
+            save_intent::request_during_failure(&mut failure.after, after);
         } else if let Some(job) = &mut self.pdf_save_job {
-            if matches!(&after, AfterPdfSave::Stay) {
-                if matches!(&job.after, AfterPdfSave::Stay) {
-                    self.queued_pdf_save = Some(AfterPdfSave::Stay);
-                }
-            } else if !matches!(&job.after, AfterPdfSave::Exit) {
-                job.after = after;
-                self.queued_pdf_save = None;
-            }
-        } else if !matches!(&self.queued_pdf_save, Some(AfterPdfSave::Exit)) {
-            if !matches!(&after, AfterPdfSave::Stay) || self.queued_pdf_save.is_none() {
-                self.queued_pdf_save = Some(after);
-            }
+            save_intent::request_during_job(&mut job.after, &mut self.queued_pdf_save, after);
+        } else {
+            save_intent::request_when_idle(&mut self.queued_pdf_save, after);
         }
         ctx.request_repaint();
     }
@@ -2691,14 +2667,13 @@ impl Lapis {
                         self.finish_sketch_edit();
                     }
                     let current_hash = self.local_checkpoint_hash();
-                    if save_needs_followup(&job.after, queued, job.snapshot_hash, current_hash) {
-                        self.request_pdf_save(job.after, &ctx);
-                    } else {
-                        let newer_edits = matches!(&job.after, AfterPdfSave::Stay)
-                            && job.snapshot_hash != current_hash;
-                        self.complete_pdf_save(job.after, &ctx);
-                        if newer_edits {
-                            self.toast_message = Some(("󰄬 PDF saved; newer edits are local".into(), std::time::Instant::now()));
+                    match save_intent::on_commit_success(&job.after, queued, job.snapshot_hash, current_hash) {
+                        Completion::Followup => self.request_pdf_save(job.after, &ctx),
+                        Completion::Done { newer_edits } => {
+                            self.complete_pdf_save(job.after, &ctx);
+                            if newer_edits {
+                                self.toast_message = Some(("󰄬 PDF saved; newer edits are local".into(), std::time::Instant::now()));
+                            }
                         }
                     }
                 }
@@ -19484,23 +19459,5 @@ mod fit_notes_layout_tests {
     #[test]
     fn accounts_for_book_spine() {
         assert_eq!(Lapis::fitted_notes_width(1800.0, 802.0, 0.75, 2, 250.0, 1700.0), 596.0);
-    }
-}
-
-#[cfg(test)]
-mod save_pipeline_tests {
-    use super::{AfterPdfSave, save_needs_followup};
-
-    #[test]
-    fn save_pipeline_close_switch_and_repeated_save_coordination() {
-        let saved = Some(10);
-        let edited = Some(11);
-        for action in [AfterPdfSave::Exit, AfterPdfSave::Home, AfterPdfSave::Open("other.pdf".into())] {
-            assert!(!save_needs_followup(&action, false, saved, saved));
-            assert!(save_needs_followup(&action, false, saved, edited));
-        }
-        assert!(!save_needs_followup(&AfterPdfSave::Stay, false, saved, edited));
-        assert!(save_needs_followup(&AfterPdfSave::Stay, true, saved, edited));
-        assert!(!save_needs_followup(&AfterPdfSave::Stay, true, saved, saved));
     }
 }
