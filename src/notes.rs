@@ -357,27 +357,10 @@ fn remap_doc_data_pages(data: &mut DocData, map: &dyn Fn(u32) -> Option<u32>) {
     data.blank_pages = data.blank_pages.iter().filter_map(|&page| map(page)).collect();
 }
 
-/// Applies a page change to the Lapis payload read by [`read_pdf_and_notes`], so the copy
-/// embedded in a structurally rewritten PDF matches its new page numbering even if the app
-/// stops before the next commit (or the file is opened on another machine).
-fn update_embedded_notes(notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec<u8> {
-    let Some(block) = find_embedded_block(notes) else { return notes.to_vec(); };
-    let Some(mut data) = parse_embedded_data(&notes[block.body_start..block.body_end]) else {
-        return notes.to_vec();
-    };
-    change(&mut data);
-    let mut out = Vec::new();
-    out.extend_from_slice(NOTES_START_TAG);
-    if serde_json::to_writer(&mut out, &portable(&data)).is_err() {
-        return notes.to_vec();
-    }
-    out.extend_from_slice(NOTES_END_TAG);
-    out
-}
-
-/// Like [`update_embedded_notes`], but starts from the newest of the local backup and the
-/// embedded payload. The rewritten PDF then carries the model on screen, with a revision
-/// above the (not yet remapped) backup, so a stop before the backup is rewritten loses nothing.
+/// Applies a page change to the Lapis payload of a structurally rewritten PDF. It starts from
+/// the newest of the local backup and the payload read by [`read_pdf_and_notes`], so the PDF
+/// carries the model on screen with its new page numbering, at a revision above the (not yet
+/// remapped) backup. A stop before the backup is rewritten then loses nothing.
 fn rebase_embedded_notes(pdf_path: &Path, notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec<u8> {
     let embedded = find_embedded_block(notes)
         .and_then(|block| parse_embedded_data(&notes[block.body_start..block.body_end]));
@@ -4304,7 +4287,10 @@ mod tests {
         serde_json::to_writer(&mut payload, &data).unwrap();
         payload.extend_from_slice(NOTES_END_TAG);
 
-        let updated = update_embedded_notes(&payload, |d| {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("embedded_payload");
+        let path = fixture.root.join("embedded_payload.pdf");
+        let updated = rebase_embedded_notes(&path, &payload, |d| {
             shift_doc_data_on_insert(&mut d.notes, &mut d.annotations, &mut d.blank_pages, &mut d.sketches, 2);
         });
         let block = find_embedded_block(&updated).unwrap();
@@ -4314,7 +4300,7 @@ mod tests {
         assert!(!back.notes.contains_key(&2));
         assert!(back.blank_pages.contains(&2));
         // A payload that cannot be parsed is returned untouched.
-        assert_eq!(update_embedded_notes(b"garbage", |_| {}), b"garbage".to_vec());
+        assert_eq!(rebase_embedded_notes(&path, b"garbage", |_| {}), b"garbage".to_vec());
     }
 
     // Isolate document IDs and backups from the user's installation.
