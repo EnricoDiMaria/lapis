@@ -255,18 +255,6 @@ fn remove_custom_data_streams(doc: &mut lopdf::Document) {
     });
 }
 
-fn replace_custom_data_stream(
-    doc: &mut lopdf::Document,
-    object_id: lopdf::ObjectId,
-    data: &DocData,
-) -> io::Result<()> {
-    let stream = custom_data_stream(data)?;
-    *doc.get_object_mut(object_id)
-        .map_err(|e| io::Error::other(format!("cannot update Lapis metadata stream: {e}")))? =
-        lopdf::Object::Stream(stream);
-    Ok(())
-}
-
 /// Put the rollback comment just before the final `startxref` keyword, not
 /// between the xref offset and `%%EOF`. lopdf's reader (and other strict PDF
 /// readers) expects the latter pair to form the unbroken final PDF trailer.
@@ -429,24 +417,16 @@ fn save_pdf_with_notes(
         remove_custom_data_streams(doc);
         let mut metadata = find_embedded_block(notes)
             .and_then(|block| parse_embedded_data(&notes[block.body_start..block.body_end]));
-        let metadata_id = if let Some(data) = metadata.as_ref() {
-            Some(doc.add_object(lopdf::Object::Stream(custom_data_stream(data)?)))
-        } else { None };
-
-        let mut output = Vec::new();
-        for _ in 0..8 {
-            output.clear();
-            doc.save_to(&mut output)
-                .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
-            let (Some(object_id), Some(data)) = (metadata_id, metadata.as_mut()) else { break; };
-            let actual_len = output.len() as u64;
-            if data.pdf_annots_file_len == actual_len { break; }
-            data.pdf_annots_file_len = actual_len;
-            replace_custom_data_stream(doc, object_id, data)?;
+        // The reserved fixed-width length field is patched in place: one serialization.
+        if let Some(data) = metadata.as_ref() {
+            doc.add_object(lopdf::Object::Stream(pending_length_stream(data)?));
         }
-        output.clear();
+        let mut output = Vec::new();
         doc.save_to(&mut output)
             .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
+        if let Some(data) = metadata.as_mut() {
+            data.pdf_annots_file_len = finalize_pdf_length(&mut output, 0)?;
+        }
         adopted = metadata;
         write_synced(&tmp_path, &output)
     })();
@@ -907,7 +887,7 @@ fn save_local_backup_checked(pdf_path: &Path, data: &DocData) -> io::Result<()> 
     let mut portable_backup = data.clone();
     portable_backup.source_path =
         Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
-    let json = serde_json::to_vec_pretty(&portable_backup)
+    let json = serde_json::to_vec(&portable_backup)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let tmp = backup_path.with_extension("json.tmp");
     let result = (|| -> io::Result<()> {
@@ -918,6 +898,7 @@ fn save_local_backup_checked(pdf_path: &Path, data: &DocData) -> io::Result<()> 
         replace_file(&tmp, &backup_path)
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
+    if result.is_ok() { remember_backup(&backup_path, portable_backup); }
     result
 }
 
@@ -927,13 +908,43 @@ fn save_local_backup(pdf_path: &Path, data: &DocData) {
     }
 }
 
+struct CachedBackup {
+    path: PathBuf,
+    stamp: PdfStamp,
+    data: DocData,
+}
+
+// The last backup this process read or wrote. It is reused only while the file's stamp (length,
+// mtime, and inode/ctime on Unix) is unchanged, so any outside change falls back to the disk.
+static BACKUP_CACHE: Mutex<Option<CachedBackup>> = Mutex::new(None);
+
+fn remember_backup(path: &Path, data: DocData) {
+    let Ok(stamp) = pdf_stamp(path) else { return; };
+    if let Ok(mut cache) = BACKUP_CACHE.lock() {
+        *cache = Some(CachedBackup { path: path.to_path_buf(), stamp, data });
+    }
+}
+
 fn load_local_backup(pdf_path: &Path) -> Option<DocData> {
     if pdf_path.as_os_str().is_empty() {
         return None;
     }
     let backup_path = get_backup_path(pdf_path);
-    let bytes = fs::read(backup_path).ok()?;
-    parse_doc_data_bytes(&bytes)
+    let stamp = pdf_stamp(&backup_path).ok()?;
+    if let Ok(cache) = BACKUP_CACHE.lock()
+        && let Some(hit) = cache.as_ref().filter(|c| c.path == backup_path && c.stamp == stamp)
+    {
+        return Some(hit.data.clone());
+    }
+    let bytes = fs::read(&backup_path).ok()?;
+    let data = parse_doc_data_bytes(&bytes)?;
+    // Cache only if the file did not change while it was being read.
+    if pdf_stamp(&backup_path).is_ok_and(|after| after == stamp)
+        && let Ok(mut cache) = BACKUP_CACHE.lock()
+    {
+        *cache = Some(CachedBackup { path: backup_path, stamp, data: data.clone() });
+    }
+    Some(data)
 }
 
 fn now_ms() -> u64 {
@@ -4717,6 +4728,45 @@ mod tests {
         assert!(delete_page_from_pdf(&path, 1).is_err());
         assert!(reorder_pages_in_pdf(&path, 1, 2).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn backup_cache_never_hides_an_outside_change() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("backup_cache");
+        let path = fixture.root.join("backup_cache.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "alpha".into());
+        save_model(&path, &data);
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "alpha");
+        // Another writer replaces the file in place with a same-length value.
+        let backup = get_backup_path(&path);
+        let json = fs::read_to_string(&backup).unwrap();
+        assert!(json.contains("alpha"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&backup, json.replace("alpha", "omega")).unwrap();
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "omega", "stale cached backup");
+        fs::remove_file(&backup).unwrap();
+        assert!(load_local_backup(&path).is_none());
+    }
+
+    #[test]
+    fn structural_rewrite_embeds_the_final_length_after_one_serialization() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_len");
+        let path = fixture.root.join("structure_len.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "keep".into());
+        save_fixture(&path, &data);
+        delete_page_from_pdf(&path, 1).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let embedded = embedded_doc_data(&bytes).unwrap();
+        assert_eq!(embedded.pdf_annots_file_len, bytes.len() as u64);
+        assert_eq!(embedded.notes[&1], "keep");
+        assert_eq!(lopdf::Document::load_mem(&bytes).unwrap().get_pages().len(), 2);
+        assert_eq!(count_custom_sections(&bytes), 1);
     }
 
     #[test]
