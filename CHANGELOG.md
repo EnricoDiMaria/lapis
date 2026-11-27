@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Much faster PDF saving and opening on large documents:** Updated the PDF library (lopdf 0.40 → 0.45). Parsing a 48 MiB, 100-page PDF with thousands of objects took seconds before and now takes milliseconds, so a save that changes the file went from about 8 s to about 0.3 s in testing, and the first open of a PDF from about 5 s to about 0.5 s. Saved files are unchanged in layout and pass `qpdf --check`.
+- **Faster metadata search in large PDFs:** Finding Lapis data inside a large PDF now uses a vectorized byte search instead of a naive scan, cutting the remaining save time on a 48 MiB file by about a quarter.
 - **Faster local checkpoints on large documents:** Autosaves reuse the last backup in memory, write compact JSON, and no longer reserialize the whole PDF three times after a page change. Heavily annotated documents checkpoint several times faster (unchanged checkpoints in about a tenth of the time).
 
 - **Annotation colors:** Pen, highlighter, textboxes, underline, shapes and occlusion tape remember their own last-used colors. The pen defaults to blue and the highlighter to yellow. Palette selections apply to the next annotation, even when selected before switching tools.

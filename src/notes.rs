@@ -160,10 +160,10 @@ fn find_embedded_block(bytes: &[u8]) -> Option<EmbeddedBlock> {
     for (start_tag, end_tag) in candidates {
         let mut from = 0;
         while from < bytes.len() {
-            let Some(rel) = bytes[from..].windows(start_tag.len()).position(|w| w == start_tag) else { break };
+            let Some(rel) = memchr::memmem::find(&bytes[from..], start_tag) else { break };
             let start = from + rel;
             let body_start = start + start_tag.len();
-            let Some(end_rel) = bytes[body_start..].windows(end_tag.len()).position(|w| w == end_tag) else {
+            let Some(end_rel) = memchr::memmem::find(&bytes[body_start..], end_tag) else {
                 from = start + start_tag.len();
                 continue;
             };
@@ -226,7 +226,7 @@ fn finalize_pdf_length(output: &mut [u8], revision_start: usize) -> io::Result<u
     let block = find_embedded_block(revision)
         .ok_or_else(|| io::Error::other("missing Lapis metadata stream"))?;
     let body = &mut revision[block.body_start..block.body_end];
-    let pos = body.windows(PDF_LEN_FIELD.len()).rposition(|w| w == PDF_LEN_FIELD)
+    let pos = memchr::memmem::rfind(body, PDF_LEN_FIELD)
         .ok_or_else(|| io::Error::other("missing reserved PDF length field"))?;
     let start = pos + PDF_LEN_FIELD.len() - 20;
     let field = &mut body[start..start + 20];
@@ -261,8 +261,7 @@ fn remove_custom_data_streams(doc: &mut lopdf::Document) {
 /// The xref table/stream is earlier in the file, so inserting here does not
 /// change a single object or xref offset.
 fn insert_revision_marker_before_startxref(pdf: &mut Vec<u8>, base_len: usize) -> io::Result<()> {
-    let start = pdf.windows(b"startxref".len())
-        .rposition(|w| w == b"startxref")
+    let start = memchr::memmem::rfind(pdf, b"startxref")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PDF has no startxref"))?;
     let tail = &pdf[start + b"startxref".len()..];
     let mut lines = tail.split(|b| *b == b'\n');
@@ -1562,8 +1561,7 @@ pub fn compact_doc_data(
 /// If a Lapis marker is the final trailer, return its position and the byte length of the
 /// PDF prefix that existed before that Lapis incremental revision.
 fn trailing_lapis_revision(bytes: &[u8]) -> Option<(usize, usize)> {
-    let pos = bytes.windows(LAPIS_INCREMENTAL_MARKER.len())
-        .rposition(|w| w == LAPIS_INCREMENTAL_MARKER)?;
+    let pos = memchr::memmem::rfind(bytes, LAPIS_INCREMENTAL_MARKER)?;
     let digits_start = pos + LAPIS_INCREMENTAL_MARKER.len();
     let digits_end = bytes[digits_start..].iter().position(|b| *b == b'\n')? + digits_start;
     let base_len = std::str::from_utf8(&bytes[digits_start..digits_end])
@@ -4810,6 +4808,59 @@ mod tests {
         assert_eq!(embedded.notes[&1], "keep");
         assert_eq!(lopdf::Document::load_mem(&bytes).unwrap().get_pages().len(), 2);
         assert_eq!(count_custom_sections(&bytes), 1);
+    }
+
+    /// The scan used before `memchr`, kept as the oracle for the differential test.
+    fn naive_find_embedded_block(bytes: &[u8]) -> Option<EmbeddedBlock> {
+        let candidates = [
+            (NOTES_START_TAG, NOTES_END_TAG),
+            (LEGACY_NOTES_START_TAG, LEGACY_NOTES_END_TAG),
+        ];
+        let mut found: Option<EmbeddedBlock> = None;
+        for (start_tag, end_tag) in candidates {
+            let mut from = 0;
+            while from < bytes.len() {
+                let Some(rel) = bytes[from..].windows(start_tag.len()).position(|w| w == start_tag) else { break };
+                let start = from + rel;
+                let body_start = start + start_tag.len();
+                let Some(end_rel) = bytes[body_start..].windows(end_tag.len()).position(|w| w == end_tag) else {
+                    from = start + start_tag.len();
+                    continue;
+                };
+                let body_end = body_start + end_rel;
+                let end = body_end + end_tag.len();
+                let candidate = EmbeddedBlock { start, body_start, body_end, end };
+                if found.is_none_or(|old| candidate.start > old.start) { found = Some(candidate); }
+                from = end;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn fast_scans_match_the_naive_scans_on_adversarial_input() {
+        // Deterministic pseudo-random streams built from tag fragments, whole tags and noise.
+        let pieces: Vec<&[u8]> = vec![
+            NOTES_START_TAG, NOTES_END_TAG, LEGACY_NOTES_START_TAG, LEGACY_NOTES_END_TAG,
+            LAPIS_INCREMENTAL_MARKER, b"startxref\n", b"%%EOF\n", PDF_LEN_FIELD,
+            &NOTES_START_TAG[..NOTES_START_TAG.len() / 2], &NOTES_END_TAG[1..],
+            &LEGACY_NOTES_START_TAG[2..], b"\n", b"{}", b"xxxx",
+        ];
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        for _ in 0..4000 {
+            let mut bytes = Vec::new();
+            for _ in 0..(next() % 14) { bytes.extend_from_slice(pieces[(next() % pieces.len() as u64) as usize]); }
+            let (fast, slow) = (find_embedded_block(&bytes), naive_find_embedded_block(&bytes));
+            assert_eq!(
+                fast.map(|b| (b.start, b.body_start, b.body_end, b.end)),
+                slow.map(|b| (b.start, b.body_start, b.body_end, b.end)),
+                "diverged on {:?}", String::from_utf8_lossy(&bytes)
+            );
+            let naive_rfind = |needle: &[u8]| bytes.windows(needle.len()).rposition(|w| w == needle);
+            assert_eq!(memchr::memmem::rfind(&bytes, b"startxref"), naive_rfind(b"startxref"));
+            assert_eq!(memchr::memmem::rfind(&bytes, LAPIS_INCREMENTAL_MARKER), naive_rfind(LAPIS_INCREMENTAL_MARKER));
+        }
     }
 
     #[test]

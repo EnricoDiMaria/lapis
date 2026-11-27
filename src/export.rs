@@ -2354,7 +2354,7 @@ fn make_slide_form(
     page_id: ObjectId,
     geo: &PageGeo,
 ) -> Result<ObjectId, String> {
-    let content = pdf.get_page_content(page_id).map_err(es)?;
+    let content = pdf.get_page_content(page_id);
     let resources = match crate::notes::page_inherited(pdf, page_id, b"Resources")
         .map(|o| crate::notes::resolve_obj(pdf, o))
     {
