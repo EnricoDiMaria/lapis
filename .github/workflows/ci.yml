@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: ${{ matrix.os == 'windows-2022' && 'C:\t' || 'target' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # qpdf lets the save tests validate written PDFs with an independent reader
+          sudo apt-get install -y build-essential cmake libclang-dev pkg-config libasound2-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig1-dev qpdf
+
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        run: cargo test --locked
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        # Match MuPDF's MSVC runtime to the prebuilt release ONNX Runtime.
+        run: cargo test --release --locked

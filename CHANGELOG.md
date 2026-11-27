@@ -3,6 +3,100 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Single Page wheel navigation:** Scroll over the PDF to turn pages when fitted or at the corresponding vertical edge of a zoomed page. Accumulated wheel and trackpad distance supports multi-page jumps without a cooldown.
+
+- **Credits:** A dedicated page pinned to the bottom of the Advanced Settings sidebar shows the application version, license, project links and open-source acknowledgements.
+- **Annotation cursors:** Tool-specific PDF cursors with a thin pen ring, chisel-tip highlighter cursor and stable, unframed tool glyphs; the topbar tools button shows the active tool.
+- **PDF and workspace shortcuts:** Configurable single-key shortcuts for annotation tools, Fit Page (`F`), Fit Width (`W`), night mode (`M`), the annotation toolbar (`D`), notes (`N`), Edit / Preview (`X`) and outline (`G`). `Alt+F` still fits both the PDF and notes panel. Each configurable shortcut can be disabled without losing its binding. Keybindings are grouped by function, with bulk enable/disable controls and current shortcut hints in toolbars, the radial menu and the Command Palette. Former default panel bindings migrate to the new layout without replacing custom bindings.
+
+- **Unicode font fallback:** Use installed system fonts for missing characters in Markdown notes and other interface text, while preserving custom fonts and Nerd Font icons.
+
+- **Independent annotation toolbar placement:** Choose Top, Bottom, or Follow topbar under **Settings → Tools & Study → Annotation toolbar**. The vertical rail remains available.
+
+- **Fit PDF and notes layout:** Double-clicking the notes divider, the configurable **Alt+F** shortcut and Command Palette action maximize the PDF page or book spread, then give the remaining width to the right notes panel. The panel can expand beyond its former width limit and remains manually resizable.
+
+- **Catppuccin:** Choose Latte, Frappe, Macchiato, or Mocha, then select one of the 14 accent colors.
+- **Saved custom themes:** Save a named palette, recall it from the custom-theme menu, or explicitly update an existing name. JSON import/export remains available.
+- **Topbar position:** The topbar can sit at the bottom of the window instead of the top, under **Settings → Appearance → Topbar → Position** (or **Move Topbar to Bottom / Top** in the Command Palette). Its menus, the bookmark popup and the search popup open upwards, auto-hide reveals it from the bottom edge, and notifications stay above it.
+- **Auto-hide topbar:** An optional mode hides the topbar and reveals it as an overlay when the pointer reaches the edge the topbar sits on. It stays visible while a menu or popup opened from it (File menu, zoom, page and overflow menus, right-click menus, bookmarks, search) is open. **Alt+T** (also **Toggle Topbar Auto-hide** in the Command Palette) turns auto-hide on or off, and the setting is under **Settings → Appearance → Topbar**. The choice is saved.
+- **Per-file view memory:** Each document remembers its view mode and the size of its notes panel (side, bottom, and Slideshow + Notes). The view mode is saved as soon as it changes; slideshows reopen in the mode they were started from.
+- **Interface density:** Choose Standard, Compact, or Ultra-compact under **Settings → Appearance → Interface density**. The whole app follows it: the topbar (about 7 px / 11 px shorter), annotation toolbars, notes panel header, sidebar tabs, split-view header, and the global spacing, padding, menu/window margins, and default text size used by menus, dialogs, and settings. Notes text keeps its own font-size setting. Standard remains the default, and an earlier compact setting is kept as Compact.
+- **Sketch indicator:** The Sketch tab of the notes panel shows the same dot as Notes and Flashcards when the page has a sketch.
+- **Exclusive theme sources:** Select Presets, Catppuccin, or Custom; only the active source’s controls are shown. Preset entries retain their original accent colors and background previews. Palette editing switches to Custom.
+
+### Changed
+
+- **Much faster PDF saving and opening on large documents:** Updated the PDF library (lopdf 0.40 → 0.45). Parsing a 48 MiB, 100-page PDF with thousands of objects took seconds before and now takes milliseconds, so a save that changes the file went from about 8 s to about 0.3 s in testing, and the first open of a PDF from about 5 s to about 0.5 s. Saved files are unchanged in layout and pass `qpdf --check`.
+- **Faster metadata search in large PDFs:** Finding Lapis data inside a large PDF now uses a vectorized byte search instead of a naive scan, cutting the remaining save time on a 48 MiB file by about a quarter.
+- **Faster local checkpoints on large documents:** Autosaves reuse the last backup in memory, write compact JSON, and no longer reserialize the whole PDF three times after a page change. Heavily annotated documents checkpoint several times faster (unchanged checkpoints in about a tenth of the time).
+
+- **Annotation colors:** Pen, highlighter, textboxes, underline, shapes and occlusion tape remember their own last-used colors. The pen defaults to blue and the highlighter to yellow. Palette selections apply to the next annotation, even when selected before switching tools.
+
+- **Radial annotation menu:** Reduced shadow spread and opacity, refined translucent surfaces, subtle accent-colored ring borders, tool selection, color swatches and hover labels.
+
+- **Consistent page scrolling:** The mouse wheel and middle-button drag now move the page the same way in every view mode. Before, Continuous Scroll used a faster wheel and drag than Single Page, and the two-page book view and the Split-View pane ignored middle-button dragging. Both speeds are adjustable under **Settings → Workspace → Page scrolling** (defaults: wheel 2.2×, drag 4.0×).
+- **Advanced Settings layout:** The navigation sidebar blends into the dialog background, with frameless inactive categories, including the bottom-pinned Credits button. Every page now uses the same structure: a title with a description, titled cards for related options, and a short explanation under each option. Options are regrouped into seven sections (Appearance, Tools & Study, Workspace, Keybindings, Export & PDF, Storage & Data, Dictionaries); no option was removed. The Study & Canvas options are split into Tools & Study and Workspace, choices such as toolbar position, density and page style use the same button style, and the audio option label now reads "recording" instead of "registation".
+- **Textbox controls:** Compact translucent toolbar with glass formatting and color popups, a fixed-width Edit/Done action at the right edge, reliable formatting-control focus, and consistent text positioning while editing and viewing. An icon toolbar action copies the whole textbox.
+
+- **Readable theme controls:** Selected controls throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars, use contrasting palette tones even with emphasized labels. Active radial tools use the same palette-based contrast; hover/pressed widget text adapts without altering Catppuccin’s surface colors.
+
+- **Code and math in notes:** Spellchecking no longer underlines words inside code (fenced blocks and inline code) or LaTeX (`$…$`, `$$…$$`), and flashcards are no longer extracted from them (for example `std::vector` is not a `::` card). Code blocks inside a flashcard answer are kept intact.
+- **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, using only the letters of each dictionary) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
+
+### Fixed
+
+- **Audio recording and transcription:** Recordings use unique filenames and voice memos stay on their original page. Closing, switching or exiting finalizes recordings and saves their index; failed conversion retains the raw WAV. Isolate background transcription/alignment jobs by document session, and apply memo results by recording filename rather than list position. Stop old playback and cancel obsolete work on document transitions.
+
+- **PDF opening and navigation:** Reject unreadable, non-PDF, password-protected and empty documents without replacing the open document. Prefer the destination thumbnail or keep the last rendered page visible while rendering, without permitting annotation interactions on the fallback image.
+- **Notes and presentation:** Import notes into the correct editor page when the notes panel is locked; treat pages with sketches or voice memos as study content in Slideshow + Notes. Show the Notes toolbar dot for sketch-only pages and respect the locked note page when checking the current page.
+
+- **Flashcard preview:** Use the same parser as the trainer, including inline code and LaTeX in titles, and preserve fenced code and display math in answers.
+- **Slideshow HUD:** Center the floating Exit control in both slideshow modes.
+
+- **External annotations are no longer dropped on save:** If another program adds annotations to a PDF while it is open in Lapis, the next save now merges them into the document first (with a notice) instead of silently removing them from the page. Compacting the PDF history applies the same check.
+- **Safer page insert, delete and reorder:** The rewritten PDF now embeds the latest local data, so an interruption right after a page change can no longer attach notes and annotations to the wrong pages. The change is cancelled if the local backup cannot be written, and Lapis now asks before a page change on a digitally signed PDF, because the rewrite invalidates the signature (empty signature fields are ignored, and compacting history is only blocked by real signatures).
+- **Durable PDF and backup writes:** The new PDF is flushed to disk before it replaces the original. On Windows, a briefly locked file (antivirus, indexer) is retried before a save is reported as failed.
+- **Settings and index files can no longer be left half-written:** The settings file, recording index, document index, custom themes, user dictionary and the pre-compaction copy of the PDF are now written to a temporary file, flushed, and swapped in atomically. If the settings file ever turns out to be unreadable, Lapis keeps it as `state.json.corrupt` instead of silently resetting your settings and overwriting it.
+- **Local backup failures are visible:** A failing local checkpoint now shows a notice and retries every few seconds instead of every frame.
+
+- **Large PDF saves:** Skip unchanged commits and redundant local backup writes. Reuse the PDF revision parse and serialize incremental updates once, retaining final validation and atomic replacement. Explicit saves and document transitions run on a worker; the workspace stays visible and editable with toast-only save feedback. Closing or switching commits any newer edits before releasing the document; structural PDF changes wait until the current save ends. Added an isolated save regression suite with a generated 180-page PDF and timing output.
+
+- **Audio shutdown:** Open output devices only when playback starts and fade active audio before closing the application to reduce audible pops.
+
+- **Drawing responsiveness:** Avoid duplicate local backup writes when finishing an annotation stroke.
+
+- **Sketch tests:** Use the configured drawing-hold binding in the test harness and replace deprecated egui IDs.
+
+- **Keybindings layout:** Enlarge Advanced Settings to fit the window and display configurable and fixed shortcuts on one line when space permits, falling back to stacked rows to prevent overlap.
+
+- **Auto-hide toolbar layout:** When both horizontal bars share an edge, the revealed topbar stays outermost and the annotation toolbar docks directly inward without leaving a gap or covering the PDF canvas, including the last page in Continuous Scroll. Notifications account for both bars at the bottom. Notes and Flashcards notification dots retain their corner overlap without clipping in auto-hide mode.
+
+- **Notes panel resizing:** Reuse cached PDF textures during a resize and defer automatic Continuous Scroll page changes until release, reducing rendering work and session writes while keeping the layout responsive.
+
+- **Slideshow:** Keep the notes panel width stable when interacting with code blocks, and refresh PDF rendering at the fullscreen viewport resolution.
+- **Markdown preview:** Preserve shell arguments such as `$@` and dollar signs inside inline and fenced code instead of interpreting them as LaTeX.
+
+- **Textboxes after an external edit:** Saving a PDF in another viewer no longer resets the background, bold and italic of Lapis textboxes. The textbox signature now ignores the box height (grown on export) and the Lapis-only markers; older signatures are still recognized.
+- **Textbox size in other viewers:** Text boxes are exported and imported relative to the page height (800-unit convention, like the slides export), so they look the same in Lapis and in other viewers on 16:9 slides and other non-800 pt pages. Older files keep their size.
+- **Textbox height in other viewers:** The exported box is fitted to its text instead of keeping a taller stored height, so no empty band (or extra background) appears below the text.
+- **Textbox appearance:** The background fill (dark or light) is exported, so light text stays readable elsewhere; typographic characters (’ “ ” – • …) no longer turn into `?`; `__`/`~~` delimiters are hidden and `- ` shows as a bullet, as in Lapis.
+- **Imported annotation text:** Text without a byte-order mark is decoded as UTF-8 or PDFDocEncoding, so accented characters from other editors are no longer corrupted.
+- **Circle export:** A circle is exported inscribed in its box, as drawn in Lapis, instead of as a stretched ellipse.
+- **Page edits:** Deleting, moving or inserting a page now rewrites the embedded Lapis data with the new page numbers immediately, not only at the next save.
+- **Eraser cursor:** The circle now scales with the page zoom and sits halfway between the old fixed size and the real erase radius, instead of being much smaller than the area it erases.
+- **Sidebar tab sync:** Switching between Thumbnails and Outline/Bookmarks now scrolls the new tab to the current page, even if the page changed while the other tab was open.
+- **View switching:** Switching between Single Page and Continuous Scroll keeps your vertical (and horizontal) position instead of jumping to the top of the page.
+- **Notes Preview scroll arrow:** The "more below" arrow now disappears at the bottom of the Preview, as in Edit, including when the floating audio buttons are enabled.
+- **Zoomed page edges:** The shadow-like fade along the canvas borders is much weaker and narrower when the page is zoomed beyond the window.
+- **Settings color picker:** Color popups now appear above Advanced Settings and accept input. Escape dismisses an open popup before closing settings, and document shortcuts remain inactive while settings are open.
+- **Textbox export:** Automatically wrapped text is included in the saved PDF appearance, with enough height to display every line. Internal background markers no longer appear as visible characters in external PDF viewers.
+- **Textbox outline:** The editing outline and resize handle follow wrapped text immediately while typing or deleting.
+- **Textbox layout:** Editing and Done mode use consistent word wrapping. Textboxes automatically fit their text height, growing and shrinking without unused vertical space.
+
 ## [1.4.0] - 2026/11/10
 
 ### Added

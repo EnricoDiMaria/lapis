@@ -276,6 +276,7 @@ pub fn show(
     st: &mut SketchState,
     page: u32,
     sketches: &mut HashMap<u32, SketchPage>,
+    draw_hold: &crate::state::ShortcutBinding,
 ) -> bool {
     let mut changed = false;
 
@@ -323,7 +324,7 @@ pub fn show(
             scroll.floating_width = 4.0;
             scroll.dormant_background_opacity = 0.0;
             scroll.dormant_handle_opacity = 0.6;
-            canvas_area(ui, st, page, sketches)
+            canvas_area(ui, st, page, sketches, draw_hold)
         })
         .inner;
     changed
@@ -340,8 +341,7 @@ fn icon_button(
     enabled: bool,
     tip: &str,
 ) -> egui::Response {
-    let button = egui::Button::new(egui::RichText::new(icon).size(13.0))
-        .selected(selected)
+    let button = crate::theme::selected_button(egui::RichText::new(icon).size(13.0), selected, ui.visuals())
         .min_size(vec2(24.0, 22.0));
     ui.add_enabled(enabled, button).on_hover_text(tip)
 }
@@ -787,6 +787,7 @@ fn canvas_area(
     st: &mut SketchState,
     page: u32,
     sketches: &mut HashMap<u32, SketchPage>,
+    draw_hold: &crate::state::ShortcutBinding,
 ) -> bool {
     let paper = sketches.get(&page).map(|s| s.paper).unwrap_or(st.new_paper);
     let extent = sketches
@@ -953,7 +954,7 @@ fn canvas_area(
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
 
-        changed |= handle_input(ui, st, page, sketches, &resp, origin, zoom, &painter);
+        changed |= handle_input(ui, st, page, sketches, &resp, origin, zoom, &painter, draw_hold);
         changed
     });
     st.scroll_offset = output.state.clamped_offset();
@@ -970,15 +971,16 @@ fn handle_input(
     origin: Pos2,
     zoom: f32,
     painter: &egui::Painter,
+    draw_hold: &crate::state::ShortcutBinding,
 ) -> bool {
     let mut changed = false;
     let primary = PointerButton::Primary;
     let pos = resp.interact_pointer_pos().or(resp.hover_pos());
-    // No mouse button is pressed during a Space gesture, so press_origin() is
+    // No mouse button is pressed during a hold-key gesture, so press_origin() is
     // None. Start at the hovered pointer position instead of requiring a drag.
-    // Ignore Space only while editing a text box inside the sketch itself:
+    // Ignore the hold key while editing a text box inside the sketch itself:
     // the Markdown editor may retain keyboard focus after switching tabs.
-    let space_down = ui.input(|i| i.key_down(egui::Key::Space))
+    let space_down = ui.input(|i| draw_hold.is_held(i))
         && st.edit.is_none()
         && (resp.hovered() || st.active.is_some());
     let space_start = space_down && st.active.is_none();
@@ -1249,8 +1251,9 @@ mod tests {
             };
             self.time += 0.05;
             let (st, sketches, changed) = (&mut self.st, &mut self.sketches, &mut self.changed);
+            let draw_hold = crate::state::ShortcutsConfig::default().trackpad_draw_hold;
             let mut out = self.ctx.run_ui(raw, |ui| {
-                *changed |= show(ui, st, 1, sketches);
+                *changed |= show(ui, st, 1, sketches, &draw_hold);
             });
             out.textures_delta.clear(); // not rendered in tests
         }

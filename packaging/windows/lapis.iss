@@ -1,7 +1,7 @@
-; Inno Setup 6.3+  ->  iscc packaging\windows\lapis.iss /DAppVersion=1.2.0
+; Inno Setup 6.3+  ->  iscc packaging\windows\lapis.iss /DAppVersion=1.5.0
 #define AppName "Lapis"
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "1.5.0"
 #endif
 #define AppExe "lapis.exe"
 

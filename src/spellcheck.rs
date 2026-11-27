@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ pub fn write_user_words(words: &[String]) -> io::Result<()> {
     if !out.is_empty() {
         out.push('\n');
     }
-    fs::write(user_words_path(), out)
+    crate::paths::write_atomic(&user_words_path(), out.as_bytes())
 }
 
 pub struct SpellChecker {
@@ -46,6 +47,8 @@ pub struct SpellChecker {
     pub loaded_languages: Vec<String>,
     dictionaries: Vec<spellbook::Dictionary>,
     dictionary_codes: Vec<String>,
+    /// Letters each dictionary uses; the single-edit search only tries these.
+    dictionary_alphabets: Vec<BTreeSet<char>>,
 }
 
 impl SpellChecker {
@@ -63,6 +66,7 @@ impl SpellChecker {
             loaded_languages: Vec::new(),
             dictionaries: Vec::new(),
             dictionary_codes: Vec::new(),
+            dictionary_alphabets: Vec::new(),
         };
 
         if english_enabled {
@@ -98,6 +102,8 @@ impl SpellChecker {
             Ok(d) => {
                 self.dictionaries.push(d);
                 self.dictionary_codes.push("EN".to_string());
+                self.dictionary_alphabets
+                    .push(alphabet_from(aff, dic, &read_user_words()));
                 self.loaded_languages.push("English (built-in)".to_string());
             }
             Err(e) => {
@@ -140,6 +146,8 @@ impl SpellChecker {
         }
         self.dictionaries.push(dictionary);
         self.dictionary_codes.push(language_code(&name));
+        self.dictionary_alphabets
+            .push(alphabet_from(&aff, &dic, &read_user_words()));
         self.loaded_languages.push(name.clone());
         Ok(name)
     }
@@ -160,6 +168,9 @@ impl SpellChecker {
         }
         for dict in &mut self.dictionaries {
             let _ = dict.add(&clean);
+        }
+        for alphabet in &mut self.dictionary_alphabets {
+            add_letters(alphabet, &clean);
         }
         if let Ok(mut f) = fs::OpenOptions::new()
             .create(true)
@@ -196,10 +207,29 @@ impl SpellChecker {
             return Vec::new();
         }
         let mut candidates = Vec::new();
-        for (dict, code) in self.dictionaries.iter().zip(&self.dictionary_codes) {
+        for ((dict, code), alphabet) in self
+            .dictionaries
+            .iter()
+            .zip(&self.dictionary_codes)
+            .zip(&self.dictionary_alphabets)
+        {
             let mut local = Vec::new();
             dict.suggest(misspelled, &mut local);
-            candidates.extend(local.into_iter().map(|word| (word, code.clone())));
+            let hunspell_count = local.len();
+            // Keep Hunspell's own order (phonetic/n-gram aware) as a tie-breaker.
+            candidates.extend(
+                local
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, word)| (word, code.clone(), rank)),
+            );
+            // Hunspell can miss close words (`goin` -> `going`): add every valid single edit.
+            candidates.extend(
+                valid_edits(dict, &single_edits(misspelled, alphabet))
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, word)| (word, code.clone(), hunspell_count + i)),
+            );
         }
         rank_suggestions(misspelled, candidates, max_suggestions)
     }
@@ -305,42 +335,215 @@ fn spelling_distance(a: &str, b: &str) -> usize {
     distances[a.len()][b.len()]
 }
 
+/// Adds the letters of `text` (lowercased, plus `'` and `-`) to `alphabet`.
+fn add_letters(alphabet: &mut BTreeSet<char>, text: &str) {
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            alphabet.extend(c.to_lowercase());
+        } else if c == '\'' || c == '-' {
+            alphabet.insert(c);
+        }
+    }
+}
+
+/// Letters a Hunspell dictionary uses: word stems (`.dic`), affix strings and `TRY` (`.aff`),
+/// and the user's custom words.
+fn alphabet_from(aff: &str, dic: &str, user_words: &[String]) -> BTreeSet<char> {
+    let mut alphabet = BTreeSet::new();
+    // First `.dic` line is the entry count; flags and morphology follow `/` and spaces.
+    for line in dic.lines().skip(1) {
+        let stem = line.split(['/', ' ', '\t']).next().unwrap_or("");
+        add_letters(&mut alphabet, stem);
+    }
+    for line in aff.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            ["TRY", chars] => add_letters(&mut alphabet, chars),
+            // `SFX flag strip add[/flags] condition ...` (the header has only 4 fields).
+            ["SFX" | "PFX", _, strip, add, _, ..] => {
+                add_letters(&mut alphabet, strip);
+                add_letters(&mut alphabet, add.split('/').next().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    for word in user_words {
+        add_letters(&mut alphabet, word);
+    }
+    alphabet
+}
+
+/// Words one deletion, transposition, replacement or insertion away from `word`, trying only
+/// the letters of `alphabet`.
+fn single_edits(word: &str, alphabet: &BTreeSet<char>) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let n = chars.len();
+    // Long tokens are rarely typos of one letter and would make the search slow.
+    if n == 0 || n > 24 {
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut push = |c: Vec<char>| {
+        let s: String = c.into_iter().collect();
+        if s != word && seen.insert(s.clone()) {
+            out.push(s);
+        }
+    };
+    for i in 0..n {
+        let mut c = chars.clone();
+        c.remove(i);
+        push(c);
+    }
+    for i in 0..n - 1 {
+        let mut c = chars.clone();
+        c.swap(i, i + 1);
+        push(c);
+    }
+    for i in 0..n {
+        for &a in alphabet {
+            let mut c = chars.clone();
+            c[i] = a;
+            push(c);
+        }
+    }
+    for i in 0..=n {
+        for &a in alphabet {
+            let mut c = chars.clone();
+            c.insert(i, a);
+            push(c);
+        }
+    }
+    out
+}
+
+/// The `edits` that `dict` accepts as correct words.
+fn valid_edits(dict: &spellbook::Dictionary, edits: &[String]) -> Vec<String> {
+    edits
+        .iter()
+        .filter(|w| dict.check(w.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Lowercases and strips common Latin diacritics, so a missing accent is a small error.
+fn fold_accents(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => 'a',
+            'ç' | 'ć' | 'č' => 'c',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' => 'e',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' => 'i',
+            'ł' => 'l',
+            'ñ' | 'ń' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => 'o',
+            'ś' | 'š' => 's',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ź' | 'ż' | 'ž' => 'z',
+            other => other,
+        })
+        .collect()
+}
+
+/// Ranks candidates `(word, language, hunspell_rank)` gathered from all dictionaries.
 fn rank_suggestions(
     misspelled: &str,
-    candidates: Vec<(String, String)>,
+    candidates: Vec<(String, String, usize)>,
     limit: usize,
 ) -> Vec<(String, String)> {
     use std::collections::BTreeMap;
 
-    // Keep one entry per case-insensitive spelling, regardless of dictionary.
-    let mut unique = BTreeMap::new();
-    for (word, language) in candidates {
-        unique.entry(word.to_lowercase()).or_insert((word, language));
+    let first_upper = |s: &str| s.chars().next().is_some_and(char::is_uppercase);
+    let case_penalty = |w: &str| usize::from(first_upper(w) != first_upper(misspelled));
+
+    // One entry per case-insensitive spelling: prefer the variant that matches the typed
+    // capitalization, then Hunspell's order. A suggestion identical to the input is useless.
+    let mut unique: BTreeMap<String, (String, String, usize)> = BTreeMap::new();
+    for (word, language, rank) in candidates {
+        if word == misspelled {
+            continue;
+        }
+        let key = word.to_lowercase();
+        let better = unique
+            .get(&key)
+            .is_none_or(|(w, _, r)| (case_penalty(&word), rank) < (case_penalty(w), *r));
+        if better {
+            unique.insert(key, (word, language, rank));
+        }
     }
+
+    let folded_input = fold_accents(misspelled);
+    let input_first = folded_input.chars().next();
+    let input_len = folded_input.chars().count();
     let target_len = misspelled.chars().count();
     let source_spaces = misspelled.chars().filter(|c| c.is_whitespace()).count();
-    let mut ranked: Vec<_> = unique.into_iter().map(|(key, (word, language))| {
-        // Hunspell can propose two valid words separated by a space. That is useful,
-        // but a simple letter correction should rank ahead of splitting one word.
-        // Charge two extra edits for each new word boundary, including hyphens.
-        // Existing hyphens are not penalized when correcting hyphenated words.
-        let added_spaces = word.chars().filter(|c| c.is_whitespace()).count()
-            .saturating_sub(source_spaces);
-        let added_hyphens = word.chars().filter(|&c| c == '-').count()
-            .saturating_sub(misspelled.chars().filter(|&c| c == '-').count());
-        let distance = spelling_distance(misspelled, &word)
-            + 2 * (added_spaces + added_hyphens);
-        let length_delta = target_len.abs_diff(word.chars().count());
-        (distance, length_delta, key, word, language)
-    }).collect();
-    // Alphabetical tie-breaking is independent of dictionary load order.
-    ranked.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    ranked.into_iter().take(limit).map(|(_, _, _, word, language)| (word, language)).collect()
+    let source_hyphens = misspelled.chars().filter(|&c| c == '-').count();
+
+    let mut ranked: Vec<_> = unique
+        .into_iter()
+        .map(|(key, (word, language, rank))| {
+            let folded = fold_accents(&word);
+            let exact = spelling_distance(misspelled, &word);
+            let base = spelling_distance(&folded_input, &folded);
+            // Scored in half-edits: a letter edit costs 2, an accent-only difference 1.
+            let mut score = 2 * base + exact.saturating_sub(base);
+            // A cut-off word (`goin` -> `going`) is likelier than an internal change.
+            if exact == 1 && folded.chars().count() == input_len + 1 && folded.starts_with(&folded_input) {
+                score = 1;
+            }
+            // Typos rarely change the first letter.
+            score += usize::from(folded.chars().next() != input_first);
+            // Prefer the typed capitalization (avoids proper nouns for lowercase input).
+            score += case_penalty(&word);
+            // A new word boundary (space or hyphen) costs two extra edits. Hunspell proposes
+            // splits, but a simple letter fix must rank ahead of them.
+            let added_spaces = word
+                .chars()
+                .filter(|c| c.is_whitespace())
+                .count()
+                .saturating_sub(source_spaces);
+            let added_hyphens = word
+                .chars()
+                .filter(|&c| c == '-')
+                .count()
+                .saturating_sub(source_hyphens);
+            score += 4 * (added_spaces + added_hyphens);
+            let length_delta = target_len.abs_diff(word.chars().count());
+            (score, rank, length_delta, key, word, language)
+        })
+        .collect();
+    // Ties fall back to Hunspell's order, then length, then spelling; all independent of
+    // dictionary load order.
+    ranked.sort_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, _, _, word, language)| (word, language))
+        .collect()
 }
 
 #[cfg(test)]
 mod suggestion_ranking_tests {
-    use super::{rank_suggestions, spelling_distance};
+    use super::{
+        alphabet_from, fold_accents, rank_suggestions, single_edits, spelling_distance,
+        valid_edits,
+    };
+    use std::collections::BTreeSet;
+
+    /// Builds candidates, using the list position as Hunspell's rank.
+    fn cands(items: &[(&str, &str)]) -> Vec<(String, String, usize)> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(rank, (w, l))| (w.to_string(), l.to_string(), rank))
+            .collect()
+    }
+
+    fn words(ranked: &[(String, String)]) -> Vec<&str> {
+        ranked.iter().map(|(w, _)| w.as_str()).collect()
+    }
 
     #[test]
     fn transpositions_and_case_are_handled() {
@@ -351,68 +554,155 @@ mod suggestion_ranking_tests {
 
     #[test]
     fn best_candidates_win_regardless_of_dictionary_order() {
-        let candidates = vec![
-            ("castle".into(), "EN".into()),
-            ("costume".into(), "EN".into()),
-            ("cattle".into(), "EN".into()),
-            ("canister".into(), "EN".into()),
-            ("casual".into(), "EN".into()),
-            ("casa".into(), "IT".into()),
-        ];
-        let first = rank_suggestions("casa", candidates.clone(), 5);
+        let candidates = cands(&[
+            ("castle", "EN"),
+            ("costume", "EN"),
+            ("cattle", "EN"),
+            ("canister", "EN"),
+            ("casual", "EN"),
+            ("casa", "IT"),
+        ]);
+        let first = rank_suggestions("casaa", candidates.clone(), 5);
         let mut reversed = candidates;
         reversed.reverse();
-        assert_eq!(first, rank_suggestions("casa", reversed, 5));
+        assert_eq!(first, rank_suggestions("casaa", reversed, 5));
         assert_eq!(first[0], ("casa".into(), "IT".into()));
     }
 
     #[test]
     fn simple_edits_beat_splits_but_splits_remain_available() {
-        let candidates = vec![
-            ("in the".into(), "EN".into()),
-            ("int he".into(), "EN".into()),
-            ("intoe".into(), "EN".into()),
-            ("into".into(), "EN".into()),
-        ];
-        let ranked = rank_suggestions("inthe", candidates, 4);
-        assert_eq!(ranked[0].0, "intoe");
-        assert!(ranked.iter().any(|(word, _)| word == "in the"));
-        assert!(ranked.iter().position(|(word, _)| word == "intoe")
-            < ranked.iter().position(|(word, _)| word == "in the"));
+        let ranked = rank_suggestions(
+            "inthe",
+            cands(&[("in the", "EN"), ("int he", "EN"), ("intoe", "EN"), ("into", "EN")]),
+            4,
+        );
+        let w = words(&ranked);
+        assert_eq!(w[0], "intoe");
+        assert!(w.iter().position(|x| *x == "intoe") < w.iter().position(|x| *x == "in the"));
+        assert!(w.contains(&"in the"));
     }
 
     #[test]
     fn simple_edits_beat_new_hyphens_but_hyphenated_suggestions_remain() {
-        let candidates = vec![
-            ("in-the".into(), "EN".into()),
-            ("intoe".into(), "EN".into()),
-            ("into".into(), "EN".into()),
-        ];
-        let ranked = rank_suggestions("inthe", candidates, 3);
-        assert_eq!(ranked[0].0, "intoe");
-        assert!(ranked.iter().any(|(word, _)| word == "in-the"));
-        assert!(ranked.iter().position(|(word, _)| word == "intoe")
-            < ranked.iter().position(|(word, _)| word == "in-the"));
+        let ranked = rank_suggestions(
+            "inthe",
+            cands(&[("in-the", "EN"), ("intoe", "EN"), ("into", "EN")]),
+            3,
+        );
+        let w = words(&ranked);
+        assert_eq!(w[0], "intoe");
+        assert!(w.contains(&"in-the"));
     }
 
     #[test]
     fn existing_hyphen_is_not_penalized() {
-        let ranked = rank_suggestions("re-enter", vec![
-            ("re-enter".into(), "EN".into()),
-            ("reenter".into(), "EN".into()),
-        ], 2);
+        let ranked = rank_suggestions("re-entr", cands(&[("reenter", "EN"), ("re-enter", "EN")]), 2);
         assert_eq!(ranked[0].0, "re-enter");
     }
 
     #[test]
     fn duplicates_and_limit() {
-        let candidates = vec![
-            ("ciao".into(), "IT".into()),
-            ("CIAO".into(), "EN".into()),
-            ("cia".into(), "IT".into()),
-        ];
-        let results = rank_suggestions("ciao", candidates, 2);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0.to_lowercase(), "ciao");
+        let ranked = rank_suggestions(
+            "ciaoo",
+            cands(&[("ciao", "IT"), ("CIAO", "EN"), ("cia", "IT")]),
+            2,
+        );
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].0, "ciao");
+    }
+
+    fn letters(chars: &str) -> BTreeSet<char> {
+        chars.chars().collect()
+    }
+
+    #[test]
+    fn single_edits_cover_all_edit_kinds() {
+        let edits = single_edits("goin", &letters("abcdefghijklmnopqrstuvwxyz-"));
+        for expected in ["going", "gon", "gion", "gain", "go-in"] {
+            assert!(edits.iter().any(|e| e == expected), "missing {expected}");
+        }
+        assert!(!edits.iter().any(|e| e == "goin"));
+        assert!(single_edits("", &letters("abc")).is_empty());
+        assert!(single_edits(&"a".repeat(30), &letters("abc")).is_empty());
+    }
+
+    #[test]
+    fn single_edits_only_try_the_given_letters() {
+        let edits = single_edits("ab", &letters("xy"));
+        // Deletions and the transposition always apply; replacements/insertions use only x, y.
+        assert!(edits.iter().all(|e| e.chars().all(|c| "abxy".contains(c))));
+        assert!(edits.contains(&"xb".to_string()) && edits.contains(&"abx".to_string()));
+        assert!(!edits.iter().any(|e| e.contains('z')));
+        // Fewer letters means far fewer candidates than the 55-letter alphabet.
+        assert!(edits.len() < 20);
+    }
+
+    #[test]
+    fn alphabet_comes_from_dic_aff_and_user_words() {
+        let dic = "3\nwörd/AB po:noun\ncafé\ndon't\n";
+        let aff = "SET UTF-8\nTRY ñ\nSFX A Y 1\nSFX A 0 ïng/X .\n";
+        let a = alphabet_from(aff, dic, &["Zed-x".to_string()]);
+        for c in ['w', 'ö', 'r', 'd', 'c', 'a', 'f', 'é', 'o', 'n', 't', '\'', 'ñ', 'ï', 'g', 'z', 'e', 'x', '-'] {
+            assert!(a.contains(&c), "missing {c}");
+        }
+        // Flags (`AB`), morphology (`noun` after the space) and the entry count are ignored.
+        assert!(!a.contains(&'b') && !a.contains(&'u') && !a.contains(&'3'));
+    }
+
+    #[test]
+    fn bundled_english_accepts_the_edit_going() {
+        let aff = std::str::from_utf8(super::BUNDLED_AFF).unwrap();
+        let dic = std::str::from_utf8(super::BUNDLED_DIC).unwrap();
+        let dict = spellbook::Dictionary::new(aff, dic).unwrap();
+        let alphabet = alphabet_from(aff, dic, &[]);
+        assert!(alphabet.contains(&'g') && alphabet.contains(&'\''));
+        let valid = valid_edits(&dict, &single_edits("goin", &alphabet));
+        assert!(valid.iter().any(|w| w == "going"));
+    }
+
+    #[test]
+    fn cut_off_word_completion_ranks_first() {
+        let ranked = rank_suggestions(
+            "goin",
+            cands(&[("gin", "EN"), ("gain", "EN"), ("goon", "EN"), ("coin", "EN"), ("going", "EN")]),
+            5,
+        );
+        assert_eq!(ranked[0].0, "going");
+        // Only a single appended letter counts as a completion.
+        let ranked = rank_suggestions("goin", cands(&[("gin", "EN"), ("goings", "EN")]), 2);
+        assert_eq!(ranked[0].0, "gin");
+    }
+
+    #[test]
+    fn missing_accent_ranks_first() {
+        assert_eq!(fold_accents("Perché"), "perche");
+        let ranked = rank_suggestions("perche", cands(&[("perché", "IT"), ("perce", "IT")]), 2);
+        assert_eq!(ranked[0].0, "perché");
+    }
+
+    #[test]
+    fn same_first_letter_is_preferred() {
+        // Equal edit distance: the one keeping the first letter wins over Hunspell's order.
+        let ranked = rank_suggestions("wrod", cands(&[("prod", "EN"), ("word", "EN")]), 2);
+        assert_eq!(ranked[0].0, "word");
+    }
+
+    #[test]
+    fn hunspell_order_breaks_ties() {
+        let ranked = rank_suggestions("hte", cands(&[("the", "EN"), ("hot", "EN")]), 2);
+        assert_eq!(ranked[0].0, "the");
+        let ranked = rank_suggestions("hte", cands(&[("hot", "EN"), ("the", "EN")]), 2);
+        assert_eq!(ranked[0].0, "the"); // transposition (1 edit) still beats a substitution+insert
+    }
+
+    #[test]
+    fn typed_case_is_preferred_and_identical_input_is_dropped() {
+        // Lowercase input prefers common words over proper nouns at equal distance.
+        let ranked = rank_suggestions("bred", cands(&[("Brad", "EN"), ("bed", "EN")]), 2);
+        assert_eq!(ranked[0].0, "bed");
+        let ranked = rank_suggestions("teh", cands(&[("teh", "EN"), ("the", "EN")]), 5);
+        assert_eq!(words(&ranked), vec!["the"]);
+        let ranked = rank_suggestions("Romee", cands(&[("rome", "IT"), ("Rome", "EN")]), 5);
+        assert_eq!(ranked, vec![("Rome".to_string(), "EN".to_string())]);
     }
 }

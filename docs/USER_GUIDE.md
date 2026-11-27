@@ -32,17 +32,25 @@ Start by opening a PDF through the **Open PDF** action or by dragging a PDF into
   <img src="images/01-open-document.png" alt="Opening a PDF document in Lapis" width="85%">
 </p>
 
+Invalid, empty, or password-protected PDFs are rejected without closing the current document. Unlock password-protected PDFs before opening them.
+
 Once a document is loaded, Lapis provides a workspace containing the PDF viewer, navigation controls, annotation tools, notes, and study features.
 
 The current document is the context for your work: notes, annotations, bookmarks, and associated audio information are organized around its pages.
 
 ### Saving your work
 
-Use the Save action or its keyboard shortcut to save notes and annotations.
+Use the Save action or its keyboard shortcut to save notes and annotations. PDF commits run on a background worker. The workspace stays visible and editable while saving, with toast-only feedback. Closing or switching waits for all current edits to be committed. Inserting, deleting, reordering or compacting PDF pages is temporarily unavailable during the commit. Page insertion, deletion and reordering also wait until audio recording or transcription has finished. If a PDF commit fails, retry, keep working, or continue with the local backup only when the backup was successfully written.
+
+If another program added annotations to the PDF while it was open, Lapis merges them into your document before saving and shows a notice; nothing is removed from the page. Compacting the PDF history does the same and asks you to compact again. Inserting, deleting or reordering pages is cancelled if the local backup cannot be written, and asks for confirmation on digitally signed PDFs, because rewriting the pages invalidates the signature. Choose **Cancel** to leave the file untouched.
 
 Lapis stores document data locally and associates it with the PDF. A local backup is also maintained by the document-data storage system.
 
 When moving a PDF to another computer, remember to consider its associated Lapis data as well.
+
+### Per-document layout
+
+Lapis remembers, for each document, the page, zoom, view mode, and the size of the notes panel (side, bottom, or Slideshow + Notes). Reopening a file restores them. Slideshow modes are not restored; the document reopens in the mode you started the slideshow from.
 
 ---
 
@@ -56,7 +64,7 @@ The View Mode menu offers five ways to work with a document.
 
 ### Single Page — `Alt + 1`
 
-Displays one page at a time.
+Displays one page at a time. Scroll up or down over the PDF to move to previous or next pages. Larger wheel movements or trackpad swipes advance multiple pages, including native scroll momentum. The mouse-wheel speed in Settings → Workspace → Page scrolling also adjusts page-turn sensitivity. If the page is taller than the viewport, scroll within it first, then scroll again at the corresponding edge to turn the page. A new page opens at its top. Ctrl + wheel still zooms, and scrolling over the notes panel does not turn the PDF page.
 
 Use this mode when you want to concentrate on a single slide, annotate it, or read its associated notes.
 
@@ -67,7 +75,7 @@ Displays pages in a vertical sequence.
 This is useful for reading longer documents without manually changing pages.
 
 Press `C` (when not typing) to toggle between Continuous Scroll and Single Page. The key can be changed in
-**Settings → Keybindings**.
+**Settings → Keybindings**. Switching keeps your scroll position within the page.
 
 ### Two-Page Book View — `Alt + 3`
 
@@ -94,11 +102,23 @@ Combines the presentation view with the notes workspace.
 
 This mode is useful when presenting or reviewing a slide while keeping its associated notes available. Its notes header uses compact, frameless controls consistent with the application topbar.
 
+### Fit PDF and Notes Layout — `Alt + F`
+
+Double-click the divider between the PDF and the right notes panel, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu, or `F` when not typing, fits the PDF without moving the divider. Both shortcuts can be changed in **Settings → Keybindings**.
+
 ### Fullscreen — `F11`
 
 Any view mode can be shown fullscreen, not only the slideshow modes. Press `F11` (or use
 **Toggle Fullscreen** in the Command Palette) to enter or leave fullscreen. The shortcut can be changed in
 **Settings → Keybindings**.
+
+### Auto-hide topbar — `Alt+T`
+
+The topbar can hide itself to give the page the full window height. Turn auto-hide on or off with `Alt+T` (also **Toggle Topbar Auto-hide** in the Command Palette; the shortcut can be changed in **Settings → Keybindings**), or with **Settings → Appearance → Topbar → Auto-hide topbar**. The choice is saved, so Lapis opens the way you left it.
+
+- **Auto-hide off (default):** the topbar is always visible.
+- **Auto-hide on:** the topbar is hidden. Move the pointer to the edge of the window where the topbar sits (the top by default, or the bottom) to reveal it. It appears as an overlay (except when space is reserved for a same-edge annotation toolbar), and stays while the pointer is over it, while a menu or popup opened from it is open (the File menu, zoom, page and overflow menus, right-click menus such as the blank-page styles, bookmarks, search), or while you are typing in its page box. It hides again shortly after you move away. Pressing a mouse button elsewhere (drawing, dragging) never reveals it.
+- When both horizontal bars share an edge, the revealed topbar stays outermost. The annotation toolbar moves directly inward (below the topbar at the top, above it at the bottom) and the workspace temporarily reserves space for both bars so neither covers the PDF canvas. On opposite edges, the annotation toolbar stays in place.
 
 Fullscreen also works in tiling compositors such as Hyprland. If you leave fullscreen with a compositor
 keybinding, Lapis follows that change instead of forcing fullscreen back. In the slideshow modes `F11` has no
@@ -148,7 +168,7 @@ Lapis provides several ways to navigate through a document.
 
 Use the thumbnails sidebar to navigate visually.
 
-Selecting a thumbnail takes you to the corresponding page.
+Selecting a thumbnail takes you to the corresponding page. In Single Page mode, Lapis prefers the destination thumbnail while a full render is pending, or keeps the last page image visible until the destination is ready. The retained image is not an annotation target.
 
 ### Document outline
 
@@ -169,7 +189,7 @@ You can move between pages using:
 - `PageUp` / `PageDown`.
 - The configurable global previous/next slide shortcuts.
 
-The Alt-based navigation shortcuts are also available inside the notes editor.
+The configurable Alt-based navigation shortcuts are also available inside the notes editor. Single-letter workspace and annotation shortcuts are disabled while typing.
 
 ---
 
@@ -181,15 +201,21 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
   <img src="images/06-annotation-tools.png" alt="Annotation toolbar and tools" width="85%">
 </p>
 
-- Select tools from the annotation toolbar, available as a horizontal sub-topbar or a vertical bar. Closing either bar returns to Cursor / Select by default; change this in **Settings → Study & Canvas → Annotation toolbar** if you prefer to keep the active tool.
+- Select tools from the annotation toolbar, available as a horizontal bar at the top or bottom, or a vertical rail on the right. Choose its placement in **Settings → Tools & Study → Annotation toolbar**. Closing either bar returns to Cursor / Select by default; change this in **Settings → Tools & Study → Annotation toolbar** if you prefer to keep the active tool.
 - Right-click an unselected area of the PDF canvas to open the radial tools menu when enabled. Right-click a radial item to apply it **without closing the menu**, or left-click to apply it and close the menu. A small image-paste button appears beside the main radial menu only when a clipboard image is available.
 - Right-click selected PDF text to open a **Copy** context menu instead of the radial menu.
 
 > Hold Spacebar and move the pointer to draw without clicking on the PDF canvas. On laptops, you may need to disable your OS’s “Disable touchpad while typing” setting.
 
+### Annotation colors
+
+The pen, highlighter, textboxes, underline, shapes and occlusion tape each remember their last-used color across restarts. The default pen color is blue and the default highlighter color is yellow. Choose a swatch in any annotation toolbar or the radial menu before or after choosing a tool. The chosen color stays pending until you create an annotation; only that tool then remembers it. Switching tools without drawing does not change their remembered colors. To recolor an existing textbox, use its own color popup instead of the global palette.
+
+The PDF canvas shows a thin hollow ring for the pen, a small chisel-tip mark for the highlighter, and a thin crosshair with a tool glyph for other drawing tools. Colored cursors reflect the selected annotation color. The topbar annotation tools icon also reflects the active tool. Native text, link and resize cursors remain available.
+
 ### Cursor
 
-Use the Cursor tool to interact with existing content and annotations without drawing a new mark.
+Use the Cursor tool to interact with existing content and annotations without drawing a new mark. Press `V` when not typing to return to Cursor / Select, even if the annotation toolbar is closed. The other annotation tools also have single-letter defaults; see [Keybindings](#keybindings) for the full list. All these shortcuts can be changed or disabled in **Settings → Keybindings**.
 
 ### Draw / Pen
 
@@ -223,6 +249,8 @@ Use these to highlight regions, connect concepts, or explain diagrams.
 Place text annotations directly on a PDF page.
 
 This is useful for short explanations, labels, and reminders that should remain visually attached to the slide.
+
+In other PDF viewers a text box is fitted to its text and keeps its background, color and size relative to the page. Underline and strikethrough markers are not shown there and a leading `- ` appears as a bullet. If you edit only its text in another viewer, the box keeps its background, bold and italic when you reopen the PDF in Lapis.
 
 ### Eraser
 
@@ -262,6 +290,11 @@ The Laser tool provides a temporary visual pointer for presentations.
 
 Use it to draw attention to a particular area of the current slide without creating a permanent annotation.
 
+### Textbox controls
+
+Select a textbox to show its compact glass toolbar. Use **Edit** / **Done** at the right edge to start or finish typing, drag the grip to move the box, and drag its corner handle to resize it. Click **Aa** for bold, italic, underline, strikethrough, and list controls in a glass popup. Click the color circle to open the same swatch palette as the vertical annotation toolbar. Both popups use the toolbar’s glass style. Choosing a swatch applies the color and closes the palette. Font-size and formatting controls can receive focus while editing. Press `Esc` to close an open color palette, finish editing, or deselect the box.
+The copy icon between Delete and Edit/Done copies the whole textbox, including its inline formatting markers but excluding its internal background marker.
+
 ---
 
 ## 7. Custom Study Pages
@@ -287,7 +320,7 @@ Right-click the button to choose a different style:
 
 The current default style is marked in the page-style menu.
 
-You can also change the default style in **Settings → Study & Canvas**.
+You can also change the default style in **Settings → Workspace → Pages & presentation**.
 
 Custom pages are useful for adding handwritten-style notes, calculations, diagrams, or additional explanations between existing PDF slides.
 
@@ -295,7 +328,7 @@ Custom pages are useful for adding handwritten-style notes, calculations, diagra
 
 ## 8. Markdown Notes
 
-Each PDF page can have its own Markdown notes.
+Each PDF page can have its own Markdown notes. The Notes toolbar button shows a notification dot when the current PDF page contains text notes or a non-empty sketch.
 
 Use the notes panel to write explanations, summaries, formulas, and study material associated with the current slide.
 
@@ -354,8 +387,12 @@ Sketches are saved with the document and move with their page when you insert, d
 included in the PDF export together with the notes: to the right of the slide if the page has no notes, under the
 notes if these are short, otherwise on a page right after the slide and its notes.
 
-If you do not need them, turn the tab off in **Settings → Advanced Settings → Enable Sketch**; your sketches are
+If you do not need them, turn the tab off in **Settings → Workspace → Notes panel → Enable Sketch**; your sketches are
 kept and the tab (and the sketches in exports) come back when you turn it on again.
+
+### Unicode and multilingual text
+
+Edit and Preview use installed system fonts as fallbacks for missing characters, including non-Latin scripts, symbols and emoji. Your selected font and the built-in icon font retain priority. Install fonts for any missing script and restart Lapis. Emoji may appear monochrome; complex script shaping, bidirectional layout and combined emoji sequences are limited by the text renderer. This does not change PDF export fonts.
 
 ### Mathematical notation
 
@@ -389,7 +426,7 @@ This allows you to combine explanatory text with selected visual content from th
 
 Lapis includes offline spellchecking in the notes editor.
 
-When spellchecking is enabled, words that are not recognized by the active dictionaries are underlined.
+When spellchecking is enabled, words that are not recognized by the active dictionaries are underlined. Code (fenced blocks and `inline code`) and LaTeX (`$…$`, `$$…$$`) are never checked.
 
 ### Correcting a word
 
@@ -422,7 +459,7 @@ The Dictionaries settings section lets you install full Hunspell dictionaries, i
 
 2. Save the pair in the same folder, then open **Settings → Dictionaries → Add dictionary**, selecting both `.dic` and `.aff` files at once (multi-select). You can also select only one file now and add the missing partner later; Lapis warns about incomplete pairs and activates the language only after both files are present.
 
-3. Lapis copies both files into its local dictionary directory and shows the full path to each `.aff` and `.dic` file in the installed dictionaries list. Use the checkbox beside each dictionary, including **English (built-in)**, to enable or disable that language without deleting its files. A word is accepted if any enabled dictionary recognizes it; the five suggestions are ranked across all enabled languages rather than favoring English, with source labels (such as **IT** or **EN**) at the right. Single-letter edits are favored over inserted spaces or hyphens, although split suggestions remain available.
+3. Lapis copies both files into its local dictionary directory and shows the full path to each `.aff` and `.dic` file in the installed dictionaries list. Use the checkbox beside each dictionary, including **English (built-in)**, to enable or disable that language without deleting its files. A word is accepted if any enabled dictionary recognizes it; the five suggestions are ranked across all enabled languages rather than favoring English, with source labels (such as **IT** or **EN**) at the right. Missing accents (for example, `perche` → `perché`) and completions of a cut-off word (`goin` → `going`) come first, then single-letter edits that keep the first letter and your capitalization; inserted spaces or hyphens rank lower, although split suggestions remain available.
 
 
 A legacy `.txt` word list can still be loaded without affix rules. Dictionaries work offline after installation.
@@ -453,7 +490,7 @@ Loading a new lecture recording replaces the previous lecture track context and 
 
 Use the recording controls to capture a lecture directly from the application.
 
-Once recorded, the audio becomes available for playback and transcription.
+Once recorded, the audio becomes available for playback and transcription. Closing, switching documents or exiting finalizes an active recording. If conversion fails, the original WAV is retained. Transcription and alignment are cancelled on document changes; partial lecture transcripts already received are kept.
 
 ### Playback
 
@@ -543,7 +580,7 @@ They are useful for:
 - Questions to revisit later.
 - Short spoken summaries.
 
-Voice memos are managed in the audio workspace and are associated with their respective pages.
+Voice memos are managed in the audio workspace and remain associated with the page where recording started, even if you navigate before stopping.
 
 ### Transcribing a voice memo
 
@@ -565,7 +602,7 @@ Open it using the **Flashcards** toolbar button or the corresponding Command Pal
   <img src="images/13-flashcards-trainer.png" alt="Flashcards active recall trainer" width="85%">
 </p>
 
-The trainer allows you to review cards, reveal answers, and track your study progress. The Flashcards toolbar button can show a notification dot when the document contains flashcards; **Settings → Study & Canvas → Active Recall** lets you hide the dot without hiding the button.
+The trainer allows you to review cards, reveal answers, and track your study progress. The Flashcards toolbar button can show a notification dot when the document contains flashcards; **Settings → Tools & Study → Active recall** lets you hide the dot without hiding the button.
 
 ### Creating flashcards from notes
 
@@ -584,7 +621,7 @@ Q: What is the function of mitochondria?
 A: ATP production through cellular respiration.
 ```
 
-Write these patterns in the notes associated with your document, then open the Flashcards trainer.
+Write these patterns in the notes associated with your document, then open the Flashcards trainer. Separators inside code and LaTeX are ignored, so `std::vector` or `$a::b$` alone never creates a card. You can still use Markdown and math in a card, for example `` `word` :: Definition `` or `$x^2$ :: Square`. Preview displays the same recognized cards as styled callouts, including fenced code and display math in Q/A answers.
 
 ### Reviewing cards
 
@@ -649,55 +686,98 @@ Use the palette when you want to trigger an action without searching through the
 
 Open Settings to configure the application.
 
-Settings are divided into dedicated sections.
+Open **Advanced Settings** to configure the application. It has eight sections, listed in the left column. Every section is laid out the same way: a title with a one-line description, then titled cards that group related options, and a short explanation under each option.
 
-### Study & Canvas
+- **Appearance:** theme, interface density and text.
+- **Tools & Study:** annotation toolbar, occlusion tape and flashcards.
+- **Workspace:** panels, Notes panel, audio, new-page style and Slideshow + Notes.
+- **Keybindings:** configurable and fixed shortcuts.
+- **Export & PDF:** saving the document and the options of exported PDFs.
+- **Storage & Data:** stored documents, PDF history, caches and app state.
+- **Dictionaries:** spellcheck, installed dictionaries and custom words.
+- **Credits:** application version, license, project links and open-source acknowledgements.
 
-The controls are grouped to reduce long runs of checkboxes:
+### Tools & Study
 
-- **Annotation toolbar:** show or hide the bar, choose horizontal or vertical placement, adjust tool behavior (including switching back to Cursor when closing the bar), and stroke thickness.
-- **Sidebars & Panels:** panel persistence and Notes, Sketch, and Audio options.
-- **Active Recall:** occlusion controls, Flashcards button visibility and its notification dot.
-- **Pages & Presentation:** page insertion style and Slideshow + Notes options.
+- **Annotation toolbar:** show the Annotation Tools button, enable the radial tools menu, switch back to Cursor when closing the bar, choose Horizontal or Vertical Rail, set the horizontal toolbar edge to Top, Bottom, or Follow topbar (default), and set the stroke thickness.
+- **Active recall:** cover or reveal all occlusion tapes, show the Flashcards button and its notification dot, open the Flashcards modal and export an Anki deck.
 
-### Theme & Fonts
+### Workspace
 
-Customize the application's visual appearance and typography.
+- **Panels:** remember whether the Notes and Outline panels were open when a document is reopened.
+- **Notes panel:** allow the panel under the page in a portrait window, and enable the Sketch tab.
+- **Audio:** enable Audio notes (voice memos) and Audio Lessons with the audio dock.
+- **Page scrolling:** the mouse-wheel speed and the middle-button drag speed. Both work the same in Single Page, Continuous Scroll, the two-page book view and the Split-View pane; Ctrl + wheel still zooms.
+- **Pages & presentation:** the default style of new pages and how Slideshow + Notes handles slides without annotations.
 
-Use these settings to adapt the workspace to your preferences.
+### Appearance
+
+Select one source at the top: **Presets**, **Catppuccin**, or **Custom**. These are alternatives; switching replaces the active palette, and only the selected source’s controls are shown.
+
+Under **Presets**, choose a built-in palette from the **Dark** or **Light** group. Each entry shows its own accent and background colors. Under **Catppuccin**, choose **Latte**, **Frappe**, **Macchiato**, or **Mocha**, then one of its 14 accents. The accent colors match [the official Catppuccin palette](https://catppuccin.com/palette/).
+
+Open **Customize palette** to edit backgrounds, widget states, text, accents, borders, status colors, and corner radius. Editing switches the source to **Custom**. Changes apply immediately and the active theme is restored on restart. Color pickers open above settings; press `Esc` once to close a picker and again to close settings.
+
+To keep a palette while trying other themes:
+
+1. Enter a name in **Custom theme name** and click **Save custom theme**.
+2. Select **Custom** and recall it from **Saved custom themes…** whenever you want.
+3. To replace that named palette with your current colors, use the same name and click **Update saved theme**.
+
+**Import…** loads a theme JSON file; save it under a name to keep it in the custom-theme menu. **Export…** writes the current theme to a portable JSON file. **Reset default** restores Suite Dark without removing saved custom themes.
+
+Named palettes are stored in `custom_themes.json` alongside the active `theme.json` in the Lapis configuration folder. Selected controls use the full accent with contrasting palette tones throughout the workspace, including Sketch/Edit/Preview, formatting buttons, and toolbars. Catppuccin surfaces retain their official colors; hover and pressed widget text adapts for readability. Custom colors remain editable, so choose text and background colors that work well together.
+
+**Interface density** below the theme section sets how tightly the whole app is packed. **Standard** is the default. **Compact** shortens the topbar by about 7 px and the annotation sub-topbar from 36 to 28 px. **Ultra-compact** goes to about 11 px shorter and a 24 px sub-topbar, with smaller icons, swatches and buttons. Both levels also tighten the notes panel header, the sidebar tabs, the split-view header, and the spacing, padding, margins and default text size used by menus, dialogs and settings. The notes text size is not affected; it keeps its own setting. Ultra-compact suits small screens but has smaller click targets. The Notes and Flashcards dots shrink with the bar so they stay uncropped. The choice applies immediately and is remembered.
+
+**Topbar** sets where the topbar sits and when it shows. **Position** moves it to the **Top** (default) or **Bottom** edge of the window; at the bottom its menus, the bookmark popup and the search popup open upwards, and notifications move up to stay clear of it. The annotation toolbar follows by default, but its edge can be set independently under **Tools & Study → Annotation toolbar**. The vertical rail stays on the right edge. **Auto-hide topbar** is described under [Auto-hide topbar](#auto-hide-topbar--altt). The command palette also has **Move Topbar to Bottom / Top**.
+
+**PDF & notes text** holds PDF dark mode, the notes font size and the custom notes font.
 
 ### Keybindings
 
 Lapis supports configurable keyboard shortcuts.
 
-Open this section to inspect or reassign supported actions.
+Configurable actions are grouped into **Document & navigation**, **View & zoom**, **Workspace**, and **Annotation tools**. Click a binding and press the new combination (or two keys in sequence for a chord). Use the checkbox beside an action to disable or enable its binding without losing the assigned keys. **Enable all** and **Disable all** apply to the configurable actions; the individual reset button and **Reset All Shortcuts to Default** restore and enable the corresponding defaults. Conflicts between enabled configurable bindings are flagged. The separate **Fixed shortcuts** section lists built-in controls that are not affected by these toggles.
 
-The interface also identifies conflicting shortcut combinations and provides an option to reset all configurable shortcuts to their defaults.
+Default single-letter bindings work when you are not typing:
 
-### System & Export
+| Annotation tools | Workspace and view |
+|---|---|
+| `V` Cursor / Select | `N` Toggle notes panel |
+| `P` Pen | `X` Switch Edit / Preview |
+| `H` Highlighter | `G` Toggle outline |
+| `T` Textbox | `D` Toggle annotation toolbar |
+| `U` Underline | `Z` Radial tools menu |
+| `E` Eraser | `M` PDF night mode |
+| `R` Rectangle | `W` Fit Width |
+| `O` Circle | `F` Fit Page |
+| `L` Line | `C` Toggle Continuous / Single Page |
+| `A` Arrow | |
+| `S` Snip | |
+| `B` Occlusion tape | |
 
-Contains document-management and export-related options.
+Tooltips and radial-menu labels show the current shortcut rather than the default. Disabled shortcuts have no key hint. The drawing-hold binding (Space by default) applies to both PDF annotations and the Sketch canvas. Existing custom bindings are kept when upgrading; former default Ctrl+N, Ctrl+E and Ctrl+T bindings are migrated to N, X and G respectively if the new key is free.
 
-Available actions include:
+### Export & PDF
 
-- Download the original PDF.
-- Insert a new page.
-- Choose what the PDF export contains: annotations, notes, or both.
-- Configure the typography of exported notes.
-- Configure the share of the page width used by the slide on pages with notes.
-- Restore export defaults.
-
-The export settings are: **Export content** (annotations only, notes only, or annotations + notes), the base font size of the notes, and the percentage of the page width occupied by the slide on pages that have notes. See [Exporting a PDF](#exporting-a-pdf).
+- **Current document:** download the original PDF, or export the PDF with the content selected below.
+- **PDF export options:** **Export content** (annotations only, notes only, or annotations + notes), the base font size of the notes, the percentage of the page width occupied by the slide on pages that have notes, and a button to restore the export defaults. See [Exporting a PDF](#exporting-a-pdf).
 
 ### Storage & Data
 
-Provides access to storage and document-data management.
-
-Use this section to inspect and manage stored application data.
+- **Stored documents:** notes, audio and original-PDF copies per document, largest first, with cleanup actions and a cleaner for orphaned data.
+- **PDF revision history:** compact the current PDF to remove historical Lapis incremental updates.
+- **Temporary cache:** the time-stretched audio created for playback speeds other than 1x.
+- **App state:** the recent files list with its saved page, zoom and bookmarks, and the folders where notes and audio are kept.
 
 ### Dictionaries
 
-Manage additional dictionaries and custom words used by spellchecking.
+Turn spellcheck on or off, enable or add dictionaries (**Installed dictionaries**), and manage the words you added (**Custom words**).
+
+### Credits
+
+The Credits button is pinned to the bottom of the left sidebar. Its page displays the installed Lapis version, project license, copyright, links to the source code, releases, issue tracker and User Guide, and acknowledgements of selected dependencies.
 
 ---
 
@@ -735,7 +815,7 @@ The exported file contains page headings in ascending order, making it easy to r
 
 ### Exporting a PDF
 
-Use **FILE → Export PDF (…)**. The label shows what will be exported; change it in **Settings → System & Export → PDF Export → Export content**.
+Use **FILE → Export PDF (…)**. The label shows what will be exported; change it in **Settings → Export & PDF → PDF export options → Export content**.
 
 | Export content | Result | File name |
 |---|---|---|

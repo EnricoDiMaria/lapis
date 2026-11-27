@@ -1,6 +1,6 @@
 [package]
 name = "lapis"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -9,6 +9,7 @@ license = "MIT"
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
 eframe = { version = "0.37", default-features = false, features = [
     "default_fonts",
+    "system_fonts",
     "wgpu",
     "x11",
     "wayland",
@@ -21,7 +22,8 @@ egui_commonmark = { version = "0.26", features = ["better_syntax_highlighting"] 
 egui_commonmark_backend = "0.26"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-lopdf = "0.40"
+lopdf = "0.45"
+memchr = "2"
 rfd = "0.17.2"
 arboard = "3"
 dunce = "1"

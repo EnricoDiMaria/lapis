@@ -2354,7 +2354,7 @@ fn make_slide_form(
     page_id: ObjectId,
     geo: &PageGeo,
 ) -> Result<ObjectId, String> {
-    let content = pdf.get_page_content(page_id).map_err(es)?;
+    let content = pdf.get_page_content(page_id);
     let resources = match crate::notes::page_inherited(pdf, page_id, b"Resources")
         .map(|o| crate::notes::resolve_obj(pdf, o))
     {
@@ -3477,11 +3477,18 @@ mod tests {
         let snip = env.root.join("my shots").join("snip.png");
         write_png(&shot, 200, 200, [255, 0, 0]);
         write_png(&snip, 200, 200, [255, 0, 0]);
-        let encoded = format!(
-            "![screenshot](file://{})",
-            shot.display().to_string().replace(' ', "%20")
-        );
-        let raw = format!("![Snip p.1](file://{})", snip.display());
+        // Use the same URI builders as the app, including Windows drive-letter paths.
+        let encoded = crate::screenshots::markdown_image(&shot);
+        let raw = format!("![Snip p.1]({})", crate::paths::file_uri(&snip));
+        // Verify both forms resolve to the original files before testing the rendering.
+        for (markdown, original) in [(&encoded, &shot), (&raw, &snip)] {
+            let (_, url) = parse_markdown_image(markdown).unwrap();
+            let resolved = note_image_path(url).unwrap();
+            assert_eq!(
+                std::fs::canonicalize(&resolved).unwrap(),
+                std::fs::canonicalize(original).unwrap()
+            );
+        }
 
         // Only the screenshot (percent-encoded) and a missing file.
         let mut notes = HashMap::new();

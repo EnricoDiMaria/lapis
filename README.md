@@ -40,10 +40,11 @@ Each PDF page can have its own notes, annotations, audio references, transcript 
 ## Features at a Glance
 
 - **Advanced PDF Viewer** — Single Page, Continuous Scroll, Two-Page Book, Slideshow, and Slideshow with Notes modes.
-- **Customizable Workspace**: Choose which features to enable, which buttons to display, and tailor the app to your liking. Select from 15+ unique themes, upload custom fonts, personalize keyboard shortcuts, and much more — all from advanced settings.
+- **Unicode Notes**: Installed system fonts provide fallback glyphs for multilingual Markdown text, symbols and emoji without replacing the selected font.
+- **Customizable Workspace**: Choose which features to enable, which buttons to display, and tailor the app to your liking. Switch between Presets, Catppuccin, and Custom: choose from 18 color-previewed presets or four Catppuccin flavors with 14 official accents each, save named custom themes, choose a standard, compact, or ultra-compact interface density, upload custom fonts, personalize keyboard shortcuts, and much more — all from advanced settings.
 - **Split View** — Display and annotate two PDF pages side by side.
 - **PDF Night Mode** — Toggle a dark viewing treatment for PDFs.
-- **Annotation tools always at hand**: Right-click the PDF canvas to open the radial menu when no PDF text is selected; right-click selected PDF text to copy it.
+- **Annotation tools always at hand**: Place the horizontal annotation toolbar at the top or bottom independently of the topbar, or use the vertical rail. The PDF cursor and topbar tools icon reflect the selected annotation tool. Each drawing tool remembers its last-used color; choose a swatch before or after selecting a tool. Right-click the PDF canvas to open the radial menu when no PDF text is selected; right-click selected PDF text to copy it.
 - **Full Drawing & Markup Kit** — Freehand drawing, highlighting, underlining, shapes, text boxes, eraser, occlusion tape, region snipping, and laser pointer.
 - **Ergonomic Drawing** — Hold Spacebar and move the pointer to draw on the PDF or Sketch canvas without clicking. On laptops, you may need to turn off your OS’s “Disable touchpad while typing” setting.
 - **Custom Study Pages** — Insert ruled, dotted, grid, or blank pages into your document.
@@ -297,6 +298,7 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 |---|---|
 | `src/main.rs` | Application state, UI, viewing modes, annotation tools, search, flashcards |
 | `src/notes.rs` | Notes and annotation data model, storage inside the PDF, local backups, page operations |
+| `src/save_intent.rs` | Pure rules of the background PDF save: queueing, close/switch ordering, follow-up commits |
 | `src/export.rs` | PDF export (vector pipeline and rasterised fallback) and note layout |
 | `src/docid.rs` | Stable document identity and migration of legacy data |
 | `src/audio.rs` | Audio workspace, recording, voice memos, transcription |
@@ -307,9 +309,10 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 ## Where your work is stored
 
 - **Hybrid PDF & standard annotation storage:** While you work, periodic autosaves update a fast **local backup** without bloating the PDF file. When you explicitly save (`Ctrl + S`), switch documents, or close the app, Lapis commits a single **PDF Incremental Update** containing both standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText` with appearance streams for external viewers) and Lapis's own metadata stream (notes, sketches, flashcards, and custom properties).
-- **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open, without truncating external PDF revisions.
+- **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open (or merged before the next save if they appear while the document is open), without truncating external PDF revisions.
 - **Portable Lapis metadata is stored inside a PDF stream object**, delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END`, rather than appended after `%%EOF`. Standard PDF annotations are stored separately as native annotation objects. Both travel with the PDF.
-- **Autosaves update the local backup** without modifying the PDF. Explicit Save (`Ctrl + S`), document switches and exit commit document changes to the PDF; the local backup also protects against an interrupted or unavailable PDF write.
+- **Per-document view state** (page, zoom, view mode, notes-panel size) is kept in `state.json` in the settings folder, not in the PDF.
+- **Autosaves update the local backup** without modifying the PDF. Explicit Save (`Ctrl + S`), document switches and exit commit document changes to the PDF on a background worker; the workspace remains editable and save feedback appears as a toast. Closing or switching waits for any newer edits to be committed. The local backup also protects against an interrupted or unavailable PDF write.
 - Every saved document has a random **document ID** stored in its metadata. Local data (note backup, audio folder, original-PDF copy) is keyed by the ID rather than by the file path, so moving or renaming a PDF, or opening it on another computer, keeps everything connected. A copy of a file made on the same computer gets its own ID.
 - Each save records a **revision**. When the PDF and the local backup disagree, the newest revision wins as a whole (so deletions propagate too) and the discarded version is kept as `notes/<id>.conflict-<timestamp>.bak` (the latest five).
 - Annotations are stored in coordinates normalised to the page (0–1), so they follow the page at any zoom and in the export.
@@ -337,7 +340,7 @@ Lapis separates its editable document state from the PDF's native annotation obj
 
 At commit time, Lapis writes a PDF incremental update rather than rewriting the original file. Supported Lapis annotations are exported as standard PDF annotations; imported and exported annotation geometry is converted between PDF page coordinates and Lapis page coordinates. The import path supports PDF `/Ink`, `/Highlight`, `/FreeText`, and `/Text` annotations. Exported Lapis annotations carry `/LapisExported`, `/LapisKind`, and `/LapisSig` entries so they can be recognized and, where their signature changes, synchronized after edits in another PDF viewer.
 
-Exported FreeText annotations include a normal appearance (`/AP`) Form XObject so viewers that rely on annotation appearances can display their text immediately. The appearance uses Helvetica with `WinAnsiEncoding`, including octal escapes for common Latin-1 accented characters. MuPDF page rasterization does not paint PDF annotations into the page image; Lapis renders its own annotation layer to avoid duplicate appearances.
+Exported FreeText annotations include a normal appearance (`/AP`) Form XObject so viewers that rely on annotation appearances can display their text immediately. The appearance uses Helvetica with `WinAnsiEncoding`, including octal escapes for Latin-1 accents and typographic characters such as curly quotes, dashes and bullets, and it includes the box's translucent background when one is set. Text sizes are scaled by the page height (the same 800-unit convention used on screen and in the slides export), and the signature ignores the box height and Lapis-only markers so an unedited box is never mistaken for an external edit. MuPDF page rasterization does not paint PDF annotations into the page image; Lapis renders its own annotation layer to avoid duplicate appearances.
 
 Lapis metadata is delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END` and stored as uncompressed bytes in a PDF stream object added to the incremental document. This keeps the metadata searchable by Lapis without placing a large block between `startxref` and `%%EOF`. A short `%LAPIS_INC_EOF` marker identifies the base length for a Lapis-created revision. Cleanup only rolls back a revision when that marker identifies the immediately trailing Lapis update; later external PDF revisions are intended to remain intact. Existing legacy trailing metadata markers remain readable for migration.
 
@@ -345,7 +348,7 @@ For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a f
 
 ## Additional spelling languages
 
-Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download matching files and select both at once in **Add dictionary**, or add either file first and its missing partner later. Incomplete pairs are warned about and remain inactive. You can disable any installed language, including built-in English, without deleting it; the dictionary list shows both file paths. Suggestions are ranked across all enabled languages with source labels such as **IT** and **EN**. See the [user guide](docs/USER_GUIDE.md#9-spellchecking-and-dictionaries) for direct download links and instructions.
+Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **Settings → Dictionaries**. Download matching files and select both at once in **Add dictionary**, or add either file first and its missing partner later. Incomplete pairs are warned about and remain inactive. You can disable any installed language, including built-in English, without deleting it; the dictionary list shows both file paths. Suggestions are ranked across all enabled languages (accent fixes first, then closest letter edits) with source labels such as **IT** and **EN**. See the [user guide](docs/USER_GUIDE.md#9-spellchecking-and-dictionaries) for direct download links and instructions.
 
 ## Development
 
@@ -360,7 +363,7 @@ Releases are built by GitHub Actions: pushing a `v*` tag builds the Windows inst
 
 # Keyboard Shortcuts
 
-Some shortcuts are configurable through **Settings → Keybindings**. The following table lists the fixed shortcuts and the principal default navigation shortcuts visible in the application.
+Configurable shortcuts are grouped in **Settings → Keybindings**. Uncheck individual actions or use the bulk enable/disable controls; disabled bindings are retained. The following table lists fixed controls and the main default bindings.
 
 | Shortcut | Action |
 |---|---|
@@ -378,16 +381,30 @@ Some shortcuts are configurable through **Settings → Keybindings**. The follow
 | `C` | Toggle Continuous / Single Page when not typing |
 | `Alt + S` | Open / close the Sketch tab of the notes panel |
 | `F11` | Toggle fullscreen (also outside slideshow) |
+| `Alt + T` | Turn topbar auto-hide on / off |
 | `PageUp` | Previous page |
 | `PageDown` | Next page |
+| Wheel up / down over PDF | Previous / next pages in Single Page; larger scrolls jump multiple pages (at vertical edges when zoomed) |
 | `Left / Right` | Previous / Next page when not typing |
 | `K / J` | Previous / Next page when not typing |
 | `Space` | Draw without pressing the mouse button on PDF / Sketch with a drawing tool; otherwise audio play / pause when applicable |
 | `Ctrl + Plus` | Zoom in |
 | `Ctrl + Minus` | Zoom out |
 | `Ctrl + 0` | Reset zoom to 100% |
+| `V` | Cursor / Select PDF Text |
+| `P` / `H` / `T` / `U` | Pen / Highlighter / Textbox / Underline |
+| `E` | Eraser |
+| `R` / `O` / `L` / `A` | Rectangle / Circle / Line / Arrow |
+| `S` / `B` | Snip / Occlusion tape |
+| `N` / `X` / `G` | Toggle notes / Edit–Preview / Outline |
+| `D` / `Z` | Toggle annotation toolbar / Radial tools menu |
+| `M` | Toggle PDF night mode |
+| `W` | Fit Width |
+| `F` | Fit Page without resizing the notes panel when not typing |
+| `Alt + F` | Fit PDF and right notes panel to the available workspace |
+| Double-click notes divider | Fit PDF and right notes panel |
 
-The configurable shortcut system also provides global previous/next slide navigation and other application actions.
+Single-letter shortcuts operate outside text fields. Toolbar and radial-menu hints reflect the active binding; disabled shortcuts do not appear in those hints. The configurable shortcut system also provides global previous/next slide navigation and other application actions.
 
 For the complete and current shortcut assignments, open **Settings → Keybindings**.
 
@@ -442,4 +459,4 @@ The application does not require a cloud account to use its core PDF annotation 
 
 Lapis is distributed under the **MIT License**.
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details. The **Advanced Settings → Credits** page displays the installed version, license, project links and selected dependency acknowledgements.

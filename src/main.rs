@@ -18,8 +18,10 @@ mod dialogs;
 use dialogs::{AsrRetry, DialogKind, DialogSpec, Dialogs};
 mod export;
 mod notes;
+mod save_intent;
 mod sketch;
 mod theme;
+mod theme_picker;
 use theme::{SuiteTheme, rgb};
 mod state;
 use crate::state::*;
@@ -212,7 +214,7 @@ fn read_audio_index(dir: &Path) -> Option<audio::AudioDocIndex> {
 fn write_audio_index(dir: &Path, idx: &audio::AudioDocIndex) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(idx)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("audio_index.json"), json)
+    paths::write_atomic(&dir.join("audio_index.json"), json.as_bytes())
 }
 
 /// Removes an audio file only if in the media folder of the file
@@ -457,6 +459,95 @@ fn storage_delete_leftovers(en: &StorageEntry) -> std::io::Result<()> {
 }
 
 // End of Storage Section
+
+// ───────── Advanced Settings layout helpers ─────────
+// Every settings page is built from the same pieces: a page header, titled cards (sections)
+// that group related options, small sub-headings inside a card, and options that carry a short
+// explanation underneath.
+
+/// Page title with a one-line description.
+fn settings_page_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(egui::RichText::new(title).size(18.0).strong());
+    ui.weak(description);
+    ui.add_space(10.0);
+}
+
+/// A titled card that groups related options.
+fn settings_section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let out = ui
+        .group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).size(14.0).strong());
+            if !description.is_empty() {
+                ui.weak(description);
+            }
+            ui.add_space(6.0);
+            add_contents(ui)
+        })
+        .inner;
+    ui.add_space(10.0);
+    out
+}
+
+/// Small heading for a group of options inside a card.
+fn settings_subheading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(text).size(12.5).strong());
+    ui.add_space(2.0);
+}
+
+/// Explanation under a checkbox or radio button, aligned with its label.
+fn settings_hint(ui: &mut egui::Ui, text: &str) {
+    let indent = ui.spacing().icon_width + ui.spacing().icon_spacing;
+    egui::Frame::NONE
+        .inner_margin(egui::Margin {
+            left: indent as i8,
+            right: 0,
+            top: 0,
+            bottom: 3,
+        })
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(11.5).weak());
+        });
+}
+
+/// Checkbox with an explanation underneath.
+fn settings_toggle(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    label: &str,
+    hint: &str,
+) -> egui::Response {
+    let response = ui.checkbox(value, label);
+    settings_hint(ui, hint);
+    response
+}
+
+/// Row of mutually exclusive choices drawn as buttons. Returns true when the choice changed.
+fn settings_choice<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    options: &[(T, &str)],
+    min_width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for &(value, label) in options {
+            let button = crate::theme::selected_button(label, *current == value, ui.visuals())
+                .min_size(egui::vec2(min_width, 28.0));
+            if ui.add(button).clicked() && *current != value {
+                *current = value;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
 
 /// Button with inline confirmation: first click -> "Sure? Yes / No". Returns true upon confirmation.
 fn danger_button(
@@ -1008,6 +1099,79 @@ fn spawn_worker(
     req_tx
 }
 
+/// Retire the previous worker's channel and cancellation token as a pair.
+fn replace_asr_channel(
+    rx: &mut Receiver<audio::AsrJobResult>,
+    cancel: &mut Arc<std::sync::atomic::AtomicBool>,
+) -> Sender<audio::AsrJobResult> {
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (tx, next_rx) = channel();
+    *rx = next_rx;
+    *cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tx
+}
+
+fn merge_imported_notes(
+    notes: &mut HashMap<u32, String>,
+    imported: impl IntoIterator<Item = (u32, String)>,
+    note_page: u32,
+) -> String {
+    notes.extend(imported);
+    notes.get(&note_page).cloned().unwrap_or_default()
+}
+
+fn has_extra_study_content(sketch: Option<&notes::SketchPage>, memos: Option<&Vec<audio::VoiceMemoEntry>>) -> bool {
+    sketch.is_some_and(|s| !s.strokes.is_empty()) || memos.is_some_and(|m| !m.is_empty())
+}
+
+fn page_has_notes_or_sketch(
+    page: u32,
+    note_page: u32,
+    current_note: &str,
+    notes: &HashMap<u32, String>,
+    sketches: &HashMap<u32, notes::SketchPage>,
+) -> bool {
+    let has_note = if page == note_page {
+        !current_note.trim().is_empty()
+    } else {
+        notes.get(&page).is_some_and(|text| !text.trim().is_empty())
+    };
+    has_note || sketches.get(&page).is_some_and(|sketch| !sketch.strokes.is_empty())
+}
+
+fn cached_page<'a, T>(pages: &'a HashMap<u32, T>, thumbs: &'a HashMap<u32, T>, page: u32) -> Option<&'a T> {
+    pages.get(&page).or_else(|| thumbs.get(&page))
+}
+
+/// Validate a candidate before replacing the active document or its lock.
+fn inspect_pdf(path: &Path) -> Result<(u32, Vec<TocItem>, (f32, f32)), String> {
+    let doc = Document::open(path.to_str().ok_or("Invalid file path")?)
+        .map_err(|e| e.to_string())?;
+    if !doc.is_pdf() {
+        return Err("The selected file is not a PDF".into());
+    }
+    if doc.needs_password().map_err(|e| e.to_string())? {
+        return Err("Password-protected PDFs must be unlocked before opening".into());
+    }
+    let count = doc.page_count().map_err(|e| e.to_string())?;
+    if count <= 0 {
+        return Err("The PDF has no pages".into());
+    }
+    let bounds = doc.load_page(0).and_then(|p| p.bounds()).map_err(|e| e.to_string())?;
+    let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return Err("The first PDF page has invalid dimensions".into());
+    }
+    let mut outline = Vec::new();
+    if let Ok(nodes) = doc.outlines() {
+        for node in nodes {
+            let idx = node.dest.as_ref().map(|d| d.loc.page_number as i32).unwrap_or(0);
+            outline.push(TocItem { title: node.title.clone(), page: (idx.max(0) as u32) + 1 });
+        }
+    }
+    Ok((count as u32, outline, (w, h)))
+}
+
 /// Page worker (low latency) + thumbnail worker (never blocks the main page).
 fn spawn_render_workers(
     path: PathBuf,
@@ -1137,6 +1301,64 @@ fn clamp_scroll_offset(off: egui::Vec2, content: egui::Vec2, view: egui::Vec2) -
     egui::vec2(off.x.clamp(0.0, max.x), off.y.clamp(0.0, max.y))
 }
 
+#[derive(Clone, Copy, Default)]
+struct SinglePageWheel {
+    accumulated: f32,
+    last_event: Option<f64>,
+    reset_offset: bool,
+}
+
+impl SinglePageWheel {
+    const POINTS_PER_PAGE: f32 = 48.0;
+
+    fn update(&mut self, time: f64, delta: f32, offset: f32, max_offset: f32) -> i32 {
+        if !delta.is_finite() {
+            self.accumulated = 0.0;
+            return 0;
+        }
+        if delta == 0.0 {
+            return 0;
+        }
+        let at_edge = (delta > 0.0 && offset <= 1.0)
+            || (delta < 0.0 && offset >= max_offset - 1.0);
+        if !at_edge {
+            self.accumulated = 0.0;
+            self.last_event = None;
+            return 0;
+        }
+        if self.last_event.is_none_or(|t| time - t > 0.3)
+            || self.accumulated.signum() != delta.signum()
+        {
+            self.accumulated = 0.0;
+        }
+        self.last_event = Some(time);
+        self.accumulated += delta;
+        let pages = (self.accumulated / Self::POINTS_PER_PAGE).trunc();
+        self.accumulated %= Self::POINTS_PER_PAGE;
+        (-pages) as i32
+    }
+}
+
+fn wheel_page_target(current: u32, total: u32, hidden: &HashSet<u32>, steps: i32) -> u32 {
+    let mut target = current;
+    let mut page = current;
+    let mut remaining = steps.unsigned_abs();
+    while remaining > 0 {
+        let Some(next) = page.checked_add_signed(steps.signum()) else {
+            break;
+        };
+        if next == 0 || next > total {
+            break;
+        }
+        page = next;
+        if !hidden.contains(&page) {
+            target = page;
+            remaining -= 1;
+        }
+    }
+    target
+}
+
 #[derive(Clone)]
 struct TocItem {
     title: String,
@@ -1206,6 +1428,59 @@ enum AnnotationTool {
     Laser,
 }
 
+impl AnnotationTool {
+    fn color_slot(self) -> Option<usize> {
+        match self {
+            Self::Draw => Some(0),
+            Self::Highlight => Some(1),
+            Self::TextBox => Some(2),
+            Self::Underline => Some(3),
+            Self::Shape => Some(4),
+            Self::Tape => Some(5),
+            _ => None,
+        }
+    }
+}
+
+fn annotation_shortcut_hint(sc: &ShortcutsConfig, tool: AnnotationTool, label: &str) -> String {
+    let binding = match tool {
+        AnnotationTool::Cursor => &sc.select_cursor,
+        AnnotationTool::Draw => &sc.select_pen,
+        AnnotationTool::Highlight => &sc.select_highlighter,
+        AnnotationTool::TextBox => &sc.select_textbox,
+        AnnotationTool::Underline => &sc.select_underline,
+        AnnotationTool::Eraser => &sc.select_eraser,
+        AnnotationTool::Snip => &sc.select_snip,
+        AnnotationTool::Tape => &sc.select_tape,
+        AnnotationTool::Shape | AnnotationTool::Laser => return label.to_owned(),
+    };
+    binding.hint(label)
+}
+
+fn shape_shortcut_hint(sc: &ShortcutsConfig, shape: ShapeKind, label: &str) -> String {
+    match shape {
+        ShapeKind::Rect => &sc.select_rectangle,
+        ShapeKind::Circle => &sc.select_circle,
+        ShapeKind::Line => &sc.select_line,
+        ShapeKind::Arrow => &sc.select_arrow,
+    }.hint(label)
+}
+
+fn annotation_kind_color_slot(kind: notes::AnnotationKind) -> Option<usize> {
+    match kind {
+        notes::AnnotationKind::Freehand => AnnotationTool::Draw.color_slot(),
+        notes::AnnotationKind::Highlight => AnnotationTool::Highlight.color_slot(),
+        notes::AnnotationKind::TextBox => AnnotationTool::TextBox.color_slot(),
+        notes::AnnotationKind::Underline => AnnotationTool::Underline.color_slot(),
+        notes::AnnotationKind::Rect
+        | notes::AnnotationKind::Circle
+        | notes::AnnotationKind::Line
+        | notes::AnnotationKind::Arrow => AnnotationTool::Shape.color_slot(),
+        notes::AnnotationKind::Tape => AnnotationTool::Tape.color_slot(),
+        notes::AnnotationKind::Image => None,
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum ShapeKind {
     Rect,
@@ -1230,6 +1505,21 @@ const ANNOTATION_PALETTE: [([u8; 3], &str); 8] = [
     ([192, 132, 252], "Lavender"),
 ];
 
+/// Freehand strokes within this distance of the eraser are removed (fraction of the page).
+const ERASER_REACH: f32 = 0.025;
+
+/// Where the topbar is drawn this frame.
+enum TopbarSlot {
+    /// In the layout, pushing the page down.
+    Docked,
+    /// Auto-hide: floating over the page while revealed.
+    Overlay,
+    Hidden,
+}
+
+/// Vertical gap between pages in Continuous mode.
+const CONTINUOUS_GAP: f32 = 14.0;
+
 #[derive(Debug, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum ViewMode {
     SinglePage,
@@ -1242,11 +1532,13 @@ enum ViewMode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
     StudyAndTools,
+    Workspace,
     AppearanceAndTheme,
     Shortcuts,
     SystemAndData,
     Storage,
     Dictionaries,
+    Credits,
 }
 
 #[derive(Clone, Copy)]
@@ -1264,6 +1556,28 @@ struct ImageDrag {
     mode: ImageDragMode,
 }
 
+use save_intent::{AfterPdfSave, Completion};
+
+/// A page change that would invalidate a digital signature, waiting for the user's decision.
+#[derive(Clone, Copy)]
+enum SignedPageOp {
+    Insert { after_page: u32, style: notes::BlankPageStyle },
+    Delete { page: u32 },
+    Reorder { from: u32, to: u32 },
+}
+
+struct PdfSaveJob {
+    worker: thread::JoinHandle<std::io::Result<()>>,
+    after: AfterPdfSave,
+    snapshot_hash: Option<u64>,
+}
+
+struct PdfSaveFailure {
+    after: AfterPdfSave,
+    message: String,
+    checkpoint_ok: bool,
+}
+
 struct Lapis {
     current_page: u32,
     target_page: u32,
@@ -1273,6 +1587,17 @@ struct Lapis {
     note_is_dirty: bool,
     /// Last successful local checkpoint; detects edits from every UI tool, not just notes.
     last_local_checkpoint_hash: Option<u64>,
+    pending_signed_page_op: Option<SignedPageOp>,
+    /// True only while a confirmed page change is replayed on a signed PDF.
+    allow_signature_loss: bool,
+    /// Set while local checkpoints fail; throttles the per-frame retry.
+    checkpoint_failed_at: Option<std::time::Instant>,
+    /// Guards against a merge/retry loop when an external change cannot be acknowledged.
+    last_external_merge: Option<std::time::Instant>,
+    queued_pdf_save: Option<AfterPdfSave>,
+    pdf_save_job: Option<PdfSaveJob>,
+    pdf_save_failure: Option<PdfSaveFailure>,
+    allow_window_close: bool,
     pdf_path: PathBuf,
     pdf_name: String,
     texture_handle: Option<egui::TextureHandle>,
@@ -1283,7 +1608,32 @@ struct Lapis {
     zoom_mode: ZoomMode,
     view_mode: ViewMode,
     prev_view_mode: ViewMode,
+    /// View mode last written to `state.json`; a difference triggers a save.
+    saved_view_mode: ViewMode,
+    /// Auto-hide: time until which a revealed topbar stays (hover grace period).
+    topbar_hold_until: f64,
+    /// Height of the revealed overlay topbar; 0 while hidden or docked.
+    topbar_overlay_h: f32,
+    /// Height of the docked topbar in the last frame (0 while hidden or floating).
+    topbar_dock_h: f32,
+    /// Height of the docked annotation sub-topbar in the last frame (0 when not shown).
+    subbar_h: f32,
+    /// A popup drawn by the topbar (file menu, bookmark popup) was open in the last frame.
+    topbar_popup_open: bool,
+    /// Notes-panel sizes of the open document.
+    panel_sizes: PanelSizes,
+    /// Panels that take the saved size the next time they are shown.
+    panel_apply: [bool; 3],
+    /// Last size seen per panel, to detect resizes by the user.
+    panel_seen: [Option<f32>; 3],
+    panel_sizes_dirty: bool,
+    notes_panel_resizing: bool,
+    fit_notes_layout_pending: bool,
     continuous_scroll_to_page: Option<u32>,
+    /// Scroll offset to keep when switching between Single and Continuous:
+    /// x, and y relative to the top of the current page.
+    mode_switch_offset: Option<egui::Vec2>,
+    single_page_wheel: SinglePageWheel,
     continuous_scroll_delta: f32,
     render_tx: Sender<RenderRequest>,
     thumb_tx: Sender<RenderRequest>,
@@ -1320,9 +1670,12 @@ struct Lapis {
     user_bookmarks: Vec<state::BookmarkItem>,
     bookmark_input: String,
     last_synced_sidebar_page: u32,
+    /// Sidebar tab that was last scrolled to the current page.
+    last_synced_sidebar_tab: SidebarTab,
     thumb_cache: HashMap<u32, (egui::TextureHandle, (u32, u32))>,
     annotation_tool: AnnotationTool,
-    annotation_color: [u8; 3],
+    pending_annotation_color: Option<[u8; 3]>,
+    last_annotation_color: [u8; 3],
     annotations: HashMap<u32, Vec<notes::PageAnnotation>>,
     active_stroke: Option<notes::PageAnnotation>,
     stroke_width: f32,
@@ -1361,7 +1714,7 @@ struct Lapis {
     memo_audio_engine: AudioEngine,
     audio_index: AudioDocIndex,
     asr_rx: Receiver<audio::AsrJobResult>,
-    asr_tx: Sender<audio::AsrJobResult>,
+    audio_index_pending: bool,
     asr_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// (done_ms, total_ms) of the running lecture transcription
     asr_progress: Option<(u64, u64)>,
@@ -1461,12 +1814,13 @@ impl Lapis {
         let theme = SuiteTheme::load_or_init();
         theme.apply(&cc.egui_ctx);
         let app_state = AppState::load();
+        theme.apply_density(&cc.egui_ctx, app_state.settings.ui_density);
 
         let (req_tx, _req_rx) = channel::<RenderRequest>();
         let (thumb_tx, _thumb_rx) = channel::<RenderRequest>();
         let (_res_tx, res_rx) = channel::<WorkerMsg>();
         let (export_tx, export_rx) = channel::<Result<PathBuf, String>>();
-        let (asr_tx, asr_rx) = channel::<audio::AsrJobResult>();
+        let asr_rx = channel::<audio::AsrJobResult>().1;
         let (home_thumb_tx, home_thumb_rx) = channel::<(PathBuf, egui::ColorImage)>();
         let spellchecker = spellcheck::SpellChecker::with_preferences(
             &app_state.settings.extra_dictionaries,
@@ -1482,6 +1836,14 @@ impl Lapis {
             notes: HashMap::new(),
             note_is_dirty: false,
             last_local_checkpoint_hash: None,
+            pending_signed_page_op: None,
+            allow_signature_loss: false,
+            checkpoint_failed_at: None,
+            last_external_merge: None,
+            queued_pdf_save: None,
+            pdf_save_job: None,
+            pdf_save_failure: None,
+            allow_window_close: false,
             pdf_path: PathBuf::new(),
             pdf_name: String::new(),
             texture_handle: None,
@@ -1492,7 +1854,21 @@ impl Lapis {
             zoom_mode: FitWidth,
             view_mode: ViewMode::SinglePage,
             prev_view_mode: ViewMode::SinglePage,
+            saved_view_mode: ViewMode::SinglePage,
+            topbar_hold_until: 0.0,
+            topbar_overlay_h: 0.0,
+            topbar_dock_h: 0.0,
+            subbar_h: 0.0,
+            topbar_popup_open: false,
+            panel_sizes: PanelSizes::default(),
+            panel_apply: [true; 3],
+            panel_seen: [None; 3],
+            panel_sizes_dirty: false,
+            notes_panel_resizing: false,
+            fit_notes_layout_pending: false,
             continuous_scroll_to_page: None,
+            mode_switch_offset: None,
+            single_page_wheel: SinglePageWheel::default(),
             continuous_scroll_delta: 0.0,
             render_tx: req_tx,
             thumb_tx,
@@ -1526,9 +1902,11 @@ impl Lapis {
             user_bookmarks: Vec::new(),
             bookmark_input: String::new(),
             last_synced_sidebar_page: 1,
+            last_synced_sidebar_tab: SidebarTab::Thumbnails,
             thumb_cache: HashMap::new(),
             annotation_tool: AnnotationTool::Cursor,
-            annotation_color: ANNOTATION_PALETTE[0].0,
+            pending_annotation_color: None,
+            last_annotation_color: ANNOTATION_PALETTE[0].0,
             annotations: HashMap::new(),
             active_stroke: None,
             stroke_width: 2.5,
@@ -1542,7 +1920,7 @@ impl Lapis {
             slide_rects: Vec::new(),
             canvas_rect: egui::Rect::NOTHING,
             show_settings: false,
-            settings_tab: SettingsTab::StudyAndTools,
+            settings_tab: SettingsTab::AppearanceAndTheme,
             rebinding_action: None,
             show_search: false,
             focus_search_input: false,
@@ -1561,7 +1939,7 @@ impl Lapis {
             memo_audio_engine: AudioEngine::new(),
             audio_index: AudioDocIndex::default(),
             asr_rx,
-            asr_tx,
+            audio_index_pending: false,
             asr_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             asr_progress: None,
             asr_model_dir: None,
@@ -1654,10 +2032,140 @@ impl Lapis {
         !self.pdf_path.as_os_str().is_empty()
     }
 
+    /// Mode to remember: slideshows are transient, so they store the mode they came from.
+    fn reading_view_mode(&self) -> ViewMode {
+        match self.view_mode {
+            ViewMode::Slideshow | ViewMode::SlideshowWithNotes => self.prev_view_mode,
+            mode => mode,
+        }
+    }
+
+    fn fitted_notes_width(
+        width: f32, height: f32, aspect: f32, count: usize, min: f32, max: f32,
+    ) -> f32 {
+        let gap = if count == 2 { 2.0 } else { 0.0 };
+        let pdf_width = (height - 2.0).max(1.0) * aspect * count as f32 + gap + 2.0;
+        (width - pdf_width).clamp(min, max)
+    }
+
+    fn fit_notes_target_width(&self, available: egui::Rect, min_w: f32, max_w: f32) -> f32 {
+        let (w, h) = self.page_cache.get(&self.current_page)
+            .map(|(_, dims)| *dims).unwrap_or(self.page_dims);
+        let aspect = if w > 0 && h > 0 { w as f32 / h as f32 } else { 4.0 / 3.0 };
+        let count = if self.view_mode == ViewMode::TwoPage {
+            let (left, right) = self.current_book_spread();
+            (left.iter().count() + right.iter().count()).max(1)
+        } else { 1 };
+        Self::fitted_notes_width(available.width(), available.height(), aspect, count, min_w, max_w)
+    }
+
+    fn notes_layout_needs_fit(zoom: ZoomMode, current: f32, target: f32) -> bool {
+        // Ignore small differences from panel borders and texture rounding.
+        zoom != ZoomMode::FitPage || (current - target).abs() > 3.0
+    }
+
+    fn handle_fit_notes_divider_double_click(
+        &mut self, ui: &egui::Ui, panel: &egui::Response,
+        available: egui::Rect, min_w: f32, max_w: f32,
+    ) {
+        if !self.can_fit_notes_layout() || self.notes_panel_resizing || self.pdf_panning
+            || self.show_settings || self.show_command_palette || self.show_flashcards_modal
+            || self.show_search || self.radial_menu_pos.is_some()
+            || !ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+        {
+            return;
+        }
+        let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else { return; };
+        let rect = panel.rect;
+        let near_divider = (pos.x - rect.left()).abs() <= 5.0
+            && pos.y >= rect.top() && pos.y <= rect.bottom();
+        let ctx = ui.ctx();
+        if !near_divider || ctx.layer_id_at(pos) != Some(panel.layer_id) {
+            return;
+        }
+        let target = self.fit_notes_target_width(available, min_w, max_w);
+        if Self::notes_layout_needs_fit(self.zoom_mode, rect.width(), target) {
+            self.request_fit_notes_layout(ctx);
+        }
+    }
+
+    fn can_fit_notes_layout(&self) -> bool {
+        self.has_pdf() && self.show_notes && !self.split_view_enabled
+            && !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes)
+    }
+
+    fn request_fit_notes_layout(&mut self, ctx: &egui::Context) {
+        if self.can_fit_notes_layout() {
+            self.fit_notes_layout_pending = true;
+            ctx.request_repaint();
+        }
+    }
+
+    /// Makes `panel` take the document's saved size the first time it is shown.
+    fn restore_panel_size(
+        &mut self,
+        panel: egui::Panel,
+        slot: PanelSlot,
+        default: f32,
+        range: (f32, f32),
+    ) -> egui::Panel {
+        let idx = slot as usize;
+        if !self.panel_apply[idx] {
+            return panel;
+        }
+        self.panel_apply[idx] = false;
+        self.panel_seen[idx] = None;
+        let size = self.panel_sizes.get(slot).unwrap_or(default);
+        panel.exact_size(size.clamp(range.0, range.1))
+    }
+
+    /// Stores a size changed by dragging the panel's resize handle.
+    fn track_panel_size(&mut self, ui: &egui::Ui, slot: PanelSlot, size: f32) {
+        let idx = slot as usize;
+        let pointer_active = ui.input(|inp| inp.pointer.any_down() || inp.pointer.any_released());
+        if pointer_active && self.panel_seen[idx].is_some_and(|seen| (seen - size).abs() > 0.5) {
+            self.panel_sizes.set(slot, size);
+            self.panel_sizes_dirty = true;
+            if ui.input(|inp| inp.pointer.any_down()) {
+                self.notes_panel_resizing = true;
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        self.panel_seen[idx] = Some(size);
+    }
+
+    fn annotation_color(&self) -> [u8; 3] {
+        self.pending_annotation_color.unwrap_or_else(|| {
+            self.annotation_tool
+                .color_slot()
+                .map_or(self.last_annotation_color, |slot| self.app_state.annotation_colors[slot])
+        })
+    }
+
+    fn remember_annotation_color(&mut self, kind: notes::AnnotationKind, color: [u8; 3]) {
+        if let Some(slot) = annotation_kind_color_slot(kind)
+            && self.app_state.annotation_colors[slot] != color
+        {
+            self.app_state.annotation_colors[slot] = color;
+            self.app_state.save();
+        }
+    }
+
+    fn commit_annotation_color(&mut self, kind: notes::AnnotationKind, color: [u8; 3]) {
+        if self.pending_annotation_color == Some(color) {
+            self.pending_annotation_color = None;
+        }
+        self.last_annotation_color = color;
+        self.remember_annotation_color(kind, color);
+    }
+
     fn save_session_state(&mut self) {
         if !self.has_pdf() {
             return;
         }
+        let view_mode = self.reading_view_mode();
+        self.saved_view_mode = view_mode;
         self.app_state.upsert_recent(RecentFileEntry {
             path: self.pdf_path.clone(),
             name: self.pdf_name.clone(),
@@ -1669,10 +2177,198 @@ impl Lapis {
             show_toc: self.show_toc,
             bookmarks: self.user_bookmarks.clone(),
             hidden_pages: self.hidden_pages.clone(),
-            view_mode: self.view_mode,
+            view_mode,
             pdf_dark_mode: self.pdf_dark_mode,
+            panel_sizes: self.panel_sizes,
         });
     }
+    /// Decides where the topbar goes. With auto-hide on it floats over the page (never pushing
+    /// it down) while the pointer is at the top edge, or over the bar, a menu of the bar is
+    /// open or one of its fields is edited; it hides 0.4 s later. A pinned bar stays docked.
+    fn topbar_slot(&mut self, ui: &egui::Ui) -> TopbarSlot {
+        if !self.app_state.settings.topbar_auto_hide {
+            return TopbarSlot::Docked;
+        }
+        let ctx = ui.ctx();
+        let screen = ctx.content_rect();
+        let now = ctx.input(|i| i.time);
+        let (pointer, button_down) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_down()));
+        let was_shown = self.topbar_overlay_h > 0.0;
+        let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+        // Distance from the window edge the bar sits on.
+        let near_edge = |reach: f32| {
+            pointer.is_some_and(|p| {
+                if at_bottom { p.y >= screen.bottom() - reach } else { p.y <= screen.top() + reach }
+            })
+        };
+        // A press elsewhere (drawing, dragging) must not pop the bar open.
+        let at_edge = near_edge(5.0) && !button_down;
+        // Keep the revealed bar open while using a same-edge annotation toolbar.
+        let settings = &self.app_state.settings;
+        let shared_edge = self.show_tools_rail
+            && settings.tools_layout == state::ToolsLayoutMode::SubTopbar
+            && settings.annotation_bar_edge() == settings.topbar_position;
+        let reach = self.topbar_overlay_h + if shared_edge { self.subbar_h } else { 0.0 } + 4.0;
+        let over_bar = was_shown && near_edge(reach);
+        // Menus and popups opened from the bar keep it visible while they are open: egui menus
+        // (zoom, overflow), the file and bookmark popups, and the search popup.
+        // `Popup::is_any_open` reads egui's memory, so it already works before the bar is drawn
+        // (`Context::any_popup_open` only sees popups shown earlier in the same frame).
+        let menu_open = was_shown
+            && (egui::Popup::is_any_open(ctx) || self.topbar_popup_open || self.show_search);
+        let editing = was_shown
+            && ctx
+                .memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|r| {
+                    if at_bottom {
+                        r.rect.top() >= screen.bottom() - reach + 2.0
+                    } else {
+                        r.rect.bottom() <= screen.top() + reach - 2.0
+                    }
+                });
+        if at_edge || over_bar || menu_open || editing {
+            self.topbar_hold_until = now + 0.4;
+        }
+        if now >= self.topbar_hold_until {
+            return TopbarSlot::Hidden;
+        }
+        // Wake up again to hide the bar once the grace period ends.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        TopbarSlot::Overlay
+    }
+
+    /// Shortcut: turns topbar auto-hide on or off (saved, like the setting).
+    fn toggle_topbar(&mut self) {
+        let settings = &mut self.app_state.settings;
+        settings.topbar_auto_hide = !settings.topbar_auto_hide;
+        self.app_state.save();
+        // Start from a clean state: hidden when auto-hide was just turned on.
+        self.topbar_hold_until = 0.0;
+        self.topbar_overlay_h = 0.0;
+    }
+
+    /// Placement of a popup opened from a topbar button: under it, or above it when the bar is
+    /// at the bottom of the window. `centered` centres it on the button, otherwise it starts at
+    /// the button's left edge.
+    fn topbar_popup_placement(&self, button: egui::Rect, centered: bool) -> (egui::Pos2, egui::Align2) {
+        let x = if centered { button.center().x } else { button.left() };
+        let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+        match (at_bottom, centered) {
+            (false, true) => (egui::pos2(x, button.bottom() + 6.0), egui::Align2::CENTER_TOP),
+            (false, false) => (egui::pos2(x, button.bottom() + 6.0), egui::Align2::LEFT_TOP),
+            (true, true) => (egui::pos2(x, button.top() - 6.0), egui::Align2::CENTER_BOTTOM),
+            (true, false) => (egui::pos2(x, button.top() - 6.0), egui::Align2::LEFT_BOTTOM),
+        }
+    }
+
+    /// Space occupied by visible bars at the bottom of the window.
+    fn bottom_bars_h(&self) -> f32 {
+        let settings = &self.app_state.settings;
+        let topbar = if settings.topbar_position == state::TopbarPosition::Bottom {
+            self.topbar_dock_h + self.topbar_overlay_h
+        } else {
+            0.0
+        };
+        let annotation = if settings.annotation_bar_edge() == state::TopbarPosition::Bottom {
+            self.subbar_h
+        } else {
+            0.0
+        };
+        topbar + annotation
+    }
+
+    /// Moves the topbar between the top and the bottom edge (saved).
+    fn toggle_topbar_position(&mut self) {
+        let settings = &mut self.app_state.settings;
+        settings.topbar_position = match settings.topbar_position {
+            state::TopbarPosition::Top => state::TopbarPosition::Bottom,
+            state::TopbarPosition::Bottom => state::TopbarPosition::Top,
+        };
+        self.app_state.save();
+        self.topbar_hold_until = 0.0;
+        self.topbar_overlay_h = 0.0;
+    }
+
+    /// Wheel / trackpad scroll multiplier shared by every page view.
+    fn wheel_speed(&self) -> f32 {
+        self.app_state.settings.wheel_scroll_speed.clamp(0.2, 8.0)
+    }
+
+    /// Middle-button drag multiplier shared by every page view.
+    fn pan_speed(&self) -> f32 {
+        self.app_state.settings.pan_scroll_speed.clamp(0.2, 12.0)
+    }
+
+    /// Scales this frame's wheel scrolling over `rect` (Ctrl + wheel stays the zoom).
+    fn apply_wheel_speed(&self, ui: &egui::Ui, rect: egui::Rect) {
+        if !ui.rect_contains_pointer(rect) {
+            return;
+        }
+        let speed = self.wheel_speed();
+        ui.input_mut(|i| {
+            if !i.modifiers.ctrl && !i.modifiers.command {
+                i.smooth_scroll_delta *= speed;
+            }
+        });
+    }
+
+    /// Middle-button drag panning for a scroll area outside the main canvas: the scroll delta
+    /// for this frame. The drag starts inside `rect` and continues wherever the pointer goes.
+    fn middle_drag_pan(&self, ui: &egui::Ui, key: &str, rect: egui::Rect) -> egui::Vec2 {
+        let id = ui.make_persistent_id(("middle_drag_pan", key));
+        let (pressed, down, delta, pos) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.pointer.button_down(egui::PointerButton::Middle),
+                i.pointer.delta(),
+                i.pointer.hover_pos().or(i.pointer.latest_pos()),
+            )
+        });
+        let mut active = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        if pressed && pos.is_some_and(|p| rect.contains(p)) {
+            active = true;
+        }
+        if !down {
+            active = false;
+        }
+        ui.data_mut(|d| d.insert_temp(id, active));
+        if !active {
+            return egui::Vec2::ZERO;
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx().request_repaint();
+        delta * self.pan_speed()
+    }
+
+    /// Scales a fixed panel size (button height, margin) by the interface density.
+    fn sz(&self, base: f32) -> f32 {
+        (base * self.app_state.settings.ui_density.scale()).round()
+    }
+
+    /// Switches view mode. Single <-> Continuous keeps the vertical reading position.
+    fn set_view_mode(&mut self, mode: ViewMode) {
+        let off = self.pdf_scroll_offset;
+        self.mode_switch_offset = None;
+        self.single_page_wheel = SinglePageWheel::default();
+        match (self.view_mode, mode) {
+            (ViewMode::SinglePage, ViewMode::Continuous) => {
+                self.continuous_scroll_to_page = Some(self.current_page);
+                self.mode_switch_offset = Some(egui::vec2(off.x, off.y.max(0.0)));
+            }
+            (ViewMode::Continuous, ViewMode::SinglePage) => {
+                let row = (1..self.current_page)
+                    .filter(|p| !self.hidden_pages.contains(p))
+                    .count() as f32;
+                let pitch = self.last_layout.1 + CONTINUOUS_GAP;
+                self.mode_switch_offset = Some(egui::vec2(off.x, (off.y - row * pitch).max(0.0)));
+            }
+            (_, ViewMode::Continuous) => self.continuous_scroll_to_page = Some(self.current_page),
+            _ => {}
+        }
+        self.view_mode = mode;
+    }
+
     fn enter_custom_zoom(&mut self) {
         if self.zoom_mode != ZoomMode::Custom {
             self.zoom_scale = self.last_effective_zoom.clamp(0.3, 3.0);
@@ -1685,6 +2381,7 @@ impl Lapis {
             self.target_page = self.current_page;
             return;
         }
+        self.single_page_wheel = SinglePageWheel::default();
         self.sync_and_save();
 
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
@@ -1715,7 +2412,16 @@ impl Lapis {
         }
 
         self.selected_textbox = None;
+        if matches!(self.view_mode, ViewMode::SinglePage | ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+            self.pdf_selection = None;
+            self.selecting = false;
+            self.active_stroke = None;
+            self.radial_menu_pos = None;
+            self.slide_rects.clear();
+            self.last_slide_rects.clear();
+        }
         self.continuous_scroll_to_page = Some(page);
+        // Keep the last texture visible until the destination is ready.
 
         // Rendering requests are issued once per frame by `pump_render_requests`.
         if let Some((handle, dims)) = self.page_cache.get(&page) {
@@ -1725,7 +2431,7 @@ impl Lapis {
             self.touch_cache(page);
         } else {
             self.is_rendering = true;
-            // Show the low-res thumbnail instead of the previous page while rendering.
+            // Prefer a destination thumbnail; otherwise retain the previous render.
             if let Some((h, dims)) = self.thumb_cache.get(&page) {
                 self.texture_handle = Some(h.clone());
                 self.page_dims = *dims;
@@ -1771,8 +2477,12 @@ impl Lapis {
         }
         let ideal = self.display_w_pt * ppp / pw;
         let cap = (MAX_TEXTURE_SIDE / pw.max(ph))
-            .min((MAX_PAGE_PIXELS / (pw * ph)).sqrt())
-            .min(MAX_RENDER_SCALE);
+            .min((MAX_PAGE_PIXELS / (pw * ph)).sqrt());
+        let cap = if matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+            cap
+        } else {
+            cap.min(MAX_RENDER_SCALE)
+        };
         let quantized = (ideal / SCALE_STEP).ceil() * SCALE_STEP;
         quantized.max(MIN_RENDER_SCALE).min(cap)
     }
@@ -1812,7 +2522,9 @@ impl Lapis {
     /// that the GPU would have to downscale it by more than 2x (LINEAR has no mipmaps).
     fn page_is_adequate(&self, p: u32, key: u32) -> bool {
         match self.page_scale.get(&p) {
-            Some(&k) if self.page_cache.contains_key(&p) => k >= key && k <= key * 2,
+            Some(&k) if self.page_cache.contains_key(&p) => {
+                k % 2 == key % 2 && k >= key && k <= key * 2
+            }
             _ => false,
         }
     }
@@ -1820,7 +2532,8 @@ impl Lapis {
     /// Called once per frame. Sends a request only when the *desired* state changed
     /// (page set or resolution), never every frame.
     fn pump_render_requests(&mut self, ctx: &egui::Context) {
-        if !self.has_pdf() {
+        // Keep scaling cached textures until the panel drag ends.
+        if !self.has_pdf() || self.notes_panel_resizing {
             return;
         }
         let scale = self.needed_scale(ctx.pixels_per_point());
@@ -2000,35 +2713,297 @@ impl Lapis {
     }
 
     fn sync_and_save(&mut self) {
-        if !self.has_pdf() { return; }
+        match self.sync_local_checkpoint() {
+            Ok(()) => self.checkpoint_failed_at = None,
+            Err(err) => {
+                eprintln!("Lapis: failed to checkpoint document locally: {err}");
+                if self.checkpoint_failed_at.is_none() {
+                    self.toast_message = Some((
+                        format!("󰀪 Local backup failed: {err}"),
+                        std::time::Instant::now(),
+                    ));
+                }
+                self.checkpoint_failed_at = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    /// Page edits rebuild the PDF from the local backup, so it must be current first.
+    fn checkpoint_before_structure_change(&mut self) -> bool {
+        match self.sync_local_checkpoint() {
+            Ok(()) => true,
+            Err(err) => {
+                self.toast_message = Some((
+                    format!("󰅚 Page change cancelled: local backup failed ({err})"),
+                    std::time::Instant::now(),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Another program appended to the PDF: import its annotations into the live model,
+    /// checkpoint them, then record the new length so the next commit may proceed.
+    fn merge_external_into_model(&mut self) -> std::io::Result<()> {
+        self.finish_sketch_edit();
+        notes::merge_external_annotations(&self.pdf_path, &mut self.annotations);
+        self.sync_local_checkpoint()?;
+        notes::mark_pdf_observed(&self.pdf_path)
+    }
+
+    fn sync_local_checkpoint(&mut self) -> std::io::Result<()> {
+        if !self.has_pdf() { return Ok(()); }
         if self.current_note.trim().is_empty() {
             self.notes.remove(&self.note_page);
         } else {
             self.notes.insert(self.note_page, self.current_note.clone());
         }
-        match notes::save_doc_data(
+        notes::save_doc_data(
             &self.pdf_path, &self.notes, &self.annotations,
             self.blank_pages.clone(), &self.sketches,
+        )?;
+        self.note_is_dirty = false;
+        self.last_local_checkpoint_hash = self.local_checkpoint_hash();
+        Ok(())
+    }
+
+    // Start next frame, after all edits in this frame have been checkpointed.
+    fn request_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) {
+        if !self.has_pdf() { return; }
+        if let Some(failure) = &mut self.pdf_save_failure {
+            save_intent::request_during_failure(&mut failure.after, after);
+        } else if let Some(job) = &mut self.pdf_save_job {
+            save_intent::request_during_job(&mut job.after, &mut self.queued_pdf_save, after);
+        } else {
+            save_intent::request_when_idle(&mut self.queued_pdf_save, after);
+        }
+        ctx.request_repaint();
+    }
+
+    fn start_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) {
+        self.finish_sketch_edit();
+        if let Err(err) = self.sync_local_checkpoint() {
+            self.pdf_save_failed(after, err.to_string(), false);
+            return;
+        }
+        self.save_session_state();
+        let path = self.pdf_path.clone();
+        let snapshot = match notes::prepare_pdf_commit(
+            &path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches,
         ) {
-            Ok(()) => {
-                self.note_is_dirty = false;
-                self.last_local_checkpoint_hash = self.local_checkpoint_hash();
+            Ok(data) => data,
+            Err(err) => {
+                self.pdf_save_failed(after, err.to_string(), true);
+                return;
             }
-            Err(err) => eprintln!("Lapis: failed to checkpoint document locally: {err}"),
+        };
+        let snapshot_hash = self.local_checkpoint_hash();
+        let repaint = ctx.clone();
+        match thread::Builder::new().name("lapis-pdf-save".into()).spawn(move || {
+            let result = notes::commit_pdf_snapshot(&path, snapshot);
+            repaint.request_repaint();
+            result
+        }) {
+            Ok(worker) => {
+                self.pdf_save_job = Some(PdfSaveJob { worker, after, snapshot_hash });
+                self.toast_message = Some(("Saving PDF…".into(), std::time::Instant::now()));
+            }
+            Err(err) => self.pdf_save_failed(after, err.to_string(), true),
         }
     }
 
-    /// Explicit Save and graceful document transitions commit the PDF; background
-    /// editing and per-frame local checkpoints never call this method.
-    fn save_pdf_explicitly(&mut self) -> std::io::Result<()> {
-        if !self.has_pdf() { return Ok(()); }
-        self.finish_sketch_edit();
-        self.sync_and_save();
-        self.save_session_state();
-        notes::commit_doc_data(
-            &self.pdf_path, &self.notes, &self.annotations,
-            self.blank_pages.clone(), &self.sketches,
-        )
+    fn pdf_save_failed(&mut self, after: AfterPdfSave, message: String, checkpoint_ok: bool) {
+        if matches!(&after, AfterPdfSave::Stay) {
+            self.toast_message = Some((format!("PDF save failed: {message}"), std::time::Instant::now()));
+        } else {
+            self.pdf_save_failure = Some(PdfSaveFailure { after, message, checkpoint_ok });
+        }
+    }
+
+    fn complete_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) -> bool {
+        if matches!(&after, AfterPdfSave::Home | AfterPdfSave::Exit)
+            && !self.finish_audio_before_transition()
+        {
+            ctx.request_repaint();
+            return false;
+        }
+        match after {
+            AfterPdfSave::Stay => {
+                self.toast_message = Some(("󰄬 Saved".into(), std::time::Instant::now()));
+            }
+            AfterPdfSave::Home => {
+                self.close_pdf();
+                self.toast_message = Some(("󰄬 Saved".into(), std::time::Instant::now()));
+            }
+            AfterPdfSave::Open(path) => {
+                self.toast_message = Some(("󰄬 Saved".into(), std::time::Instant::now()));
+                return self.open_pdf(path, ctx);
+            }
+            AfterPdfSave::Exit => {
+                // Send Close in the next frame, separate from any CancelClose command.
+                self.allow_window_close = true;
+            }
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    // Keep the workspace live while the worker commits an immutable snapshot.
+    fn service_pdf_save(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        if self.allow_window_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return true;
+        }
+        if self.has_pdf() && ui.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if let Some(failure) = &mut self.pdf_save_failure {
+                failure.after = AfterPdfSave::Exit;
+            } else {
+                self.request_pdf_save(AfterPdfSave::Exit, &ctx);
+            }
+        }
+        if self.pdf_save_job.as_ref().is_some_and(|job| job.worker.is_finished()) {
+            let job = self.pdf_save_job.take().unwrap();
+            let queued = self.queued_pdf_save.take().is_some();
+            match job.worker.join() {
+                Ok(Ok(())) => {
+                    if !matches!(&job.after, AfterPdfSave::Stay) || queued {
+                        self.finish_sketch_edit();
+                    }
+                    let current_hash = self.local_checkpoint_hash();
+                    match save_intent::on_commit_success(&job.after, queued, job.snapshot_hash, current_hash) {
+                        Completion::Followup => self.request_pdf_save(job.after, &ctx),
+                        Completion::Done { newer_edits } => {
+                            if self.complete_pdf_save(job.after, &ctx) && newer_edits {
+                                self.toast_message = Some(("󰄬 PDF saved; newer edits are local".into(), std::time::Instant::now()));
+                            }
+                        }
+                    }
+                }
+                Ok(Err(err)) if notes::is_external_modification(&err) => {
+                    let repeated = self.last_external_merge
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5));
+                    self.last_external_merge = Some(std::time::Instant::now());
+                    match self.merge_external_into_model() {
+                        Ok(()) if !repeated => {
+                            self.toast_message = Some((
+                                "PDF changed outside Lapis; its annotations were merged".into(),
+                                std::time::Instant::now(),
+                            ));
+                            self.request_pdf_save(job.after, &ctx);
+                        }
+                        Ok(()) => self.pdf_save_failed(job.after, err.to_string(), true),
+                        Err(merge_err) => self.pdf_save_failed(job.after, merge_err.to_string(), false),
+                    }
+                }
+                Ok(Err(err)) => self.pdf_save_failed(job.after, err.to_string(), true),
+                Err(_) => self.pdf_save_failed(job.after, "Save worker stopped unexpectedly".into(), true),
+            }
+            if self.allow_window_close { return true; }
+        }
+        if self.pdf_save_job.is_none() && self.pdf_save_failure.is_none() {
+            if let Some(after) = self.queued_pdf_save.take() {
+                self.start_pdf_save(after, &ctx);
+            }
+        }
+        if self.pdf_save_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        }
+        if let Some(failure) = self.pdf_save_failure.take() {
+            let mut retry = false;
+            let mut keep_working = false;
+            let mut continue_local = false;
+            egui::Modal::new(ui.make_persistent_id("pdf_save_failure"))
+                .frame(self.modal_glass_frame(242))
+                .show(&ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.heading("Could not save PDF");
+                ui.label(&failure.message);
+                if failure.checkpoint_ok {
+                    ui.weak("Your edits are in the local backup, but may not be embedded in the PDF.");
+                } else {
+                    ui.weak("The local backup could not be updated. Retry or keep working.");
+                }
+                ui.add_space(10.0);
+                retry = ui.button("Retry Save").clicked();
+                keep_working = ui.button("Keep working").clicked();
+                if failure.checkpoint_ok {
+                    continue_local = ui.button("Continue with local backup only").clicked();
+                }
+            });
+            if retry {
+                self.request_pdf_save(failure.after, &ctx);
+            } else if continue_local {
+                self.finish_sketch_edit();
+                match self.sync_local_checkpoint() {
+                    Ok(()) => {
+                        self.save_session_state();
+                        if self.complete_pdf_save(failure.after, &ctx) {
+                            self.toast_message = Some(("󰀪 PDF not saved; local backup kept".into(), std::time::Instant::now()));
+                        }
+                    }
+                    Err(err) => self.pdf_save_failed(failure.after, err.to_string(), false),
+                }
+            } else if !keep_working {
+                self.pdf_save_failure = Some(failure);
+            }
+            if retry || continue_local || keep_working {
+                ctx.request_repaint();
+            }
+            return self.allow_window_close;
+        }
+        false
+    }
+
+    /// Page changes rewrite the whole file, which invalidates a digital signature. Ask first;
+    /// nothing was written when this is shown.
+    fn show_signed_page_modal(&mut self, ui: &mut egui::Ui) {
+        let Some(op) = self.pending_signed_page_op else { return; };
+        if !self.has_pdf() {
+            self.pending_signed_page_op = None;
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let mut proceed = false;
+        let mut cancel = false;
+        egui::Modal::new(ui.make_persistent_id("signed_page_change"))
+            .frame(self.modal_glass_frame(242))
+            .show(&ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.heading("This PDF is digitally signed");
+                ui.label("Inserting, deleting or reordering pages rewrites the file and invalidates its signature. Other viewers will report the signature as broken.");
+                ui.weak("Your notes and annotations are not affected. Lapis keeps a copy of the original file in its data folder, but keep your own copy if you need the signature.");
+                ui.add_space(10.0);
+                proceed = ui.button("Change pages anyway").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        if proceed || cancel {
+            self.pending_signed_page_op = None;
+            ctx.request_repaint();
+        }
+        if proceed {
+            self.allow_signature_loss = true;
+            match op {
+                SignedPageOp::Insert { after_page, style } => self.insert_blank_page_after(after_page, style, &ctx),
+                SignedPageOp::Delete { page } => self.delete_pdf_page_and_shift_data(page, &ctx),
+                SignedPageOp::Reorder { from, to } => self.reorder_pdf_page(from, to, &ctx),
+            }
+            self.allow_signature_loss = false;
+        }
+    }
+
+    fn pdf_structure_busy(&mut self) -> bool {
+        if self.audio_engine.is_recording() || self.is_transcribing {
+            self.audio_toast("Finish recording or transcription before changing PDF pages");
+            return true;
+        }
+        if self.pdf_save_job.is_some() || self.queued_pdf_save.is_some() || self.pdf_save_failure.is_some() {
+            self.toast_message = Some(("PDF is saving; retry the page action shortly".into(), std::time::Instant::now()));
+            true
+        } else {
+            false
+        }
     }
 
     /// Persist notes, annotations and sketches (after a change made in the Sketch tab).
@@ -2157,25 +3132,13 @@ impl Lapis {
                     return;
                 }
 
-                for (page, text) in imported {
-                    self.notes.insert(page, text);
-                }
-
-                self.current_note = self
-                    .notes
-                    .get(&self.current_page)
-                    .cloned()
-                    .unwrap_or_default();
-                self.note_is_dirty = false;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
-
+                self.current_note = merge_imported_notes(&mut self.notes, imported, self.note_page);
+                self.note_is_dirty = true;
                 self.show_notes = true;
+                if let Err(err) = self.sync_local_checkpoint() {
+                    self.audio_toast(format!("Notes imported, but local backup failed: {err}"));
+                    return;
+                }
 
                 self.toast_message = Some((
                     format!("󰄬 Notes imported for {} pages", count),
@@ -2382,7 +3345,7 @@ impl Lapis {
                             return;
                         }
                         match notes::create_blank_study_notebook(&path) {
-                            Ok(()) => self.open_pdf(path, ctx),
+                            Ok(()) => self.open_pdf_user(path, ctx),
                             Err(e) => {
                                 self.toast_message = Some((
                                     format!("󰅚 Notebook creation failed: {}", e),
@@ -2420,15 +3383,18 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  Annotation tools", "")
-                } else {
-                    " ".to_string()
-                })
-                .selected(self.show_tools_rail)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  Annotation tools", self.annotation_cursor_icon())
+                    } else {
+                        self.annotation_cursor_icon().to_string()
+                    },
+                    self.show_tools_rail,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
-            .on_hover_text("Toggle Annotation Tools Bar")
+            .on_hover_text(self.app_state.shortcuts.toggle_tools.hint("Toggle Annotation Tools Bar"))
             .clicked()
             && self.has_pdf()
         {
@@ -2457,29 +3423,28 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::SinglePage,
-                    "󰈙  Single Page        [Alt+1]",
+                    self.app_state.shortcuts.view_single.hint("󰈙  Single Page"),
                 )
                 .clicked()
             {
-                self.view_mode = ViewMode::SinglePage;
+                self.set_view_mode(ViewMode::SinglePage);
                 ui.close();
             }
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::Continuous,
-                    "󰡏  Continuous Scroll  [Alt+2]",
+                    self.app_state.shortcuts.view_continuous.hint("󰡏  Continuous Scroll"),
                 )
                 .clicked()
             {
-                self.view_mode = ViewMode::Continuous;
-                self.continuous_scroll_to_page = Some(self.current_page);
+                self.set_view_mode(ViewMode::Continuous);
                 ui.close();
             }
 
             let book_menu_label = if self.book_cover_mode {
-                "󰂻  Book (2,3 Cover)   [Alt+3]"
+                self.app_state.shortcuts.view_twopage.hint("󰂻  Book (2,3 Cover)")
             } else {
-                "󰂺  Book (1,2 Pair)    [Alt+3]"
+                self.app_state.shortcuts.view_twopage.hint("󰂺  Book (1,2 Pair)")
             };
 
             if ui
@@ -2501,7 +3466,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::Slideshow,
-                    "󰐨  Slideshow          [Alt+4]",
+                    self.app_state.shortcuts.view_slideshow.hint("󰐨  Slideshow"),
                 )
                 .clicked()
             {
@@ -2516,7 +3481,7 @@ impl Lapis {
             if ui
                 .selectable_label(
                     self.view_mode == ViewMode::SlideshowWithNotes,
-                    "󰠮  Slideshow + Notes  [Alt+5]",
+                    self.app_state.shortcuts.view_slideshow_notes.hint("󰠮  Slideshow + Notes"),
                 )
                 .clicked()
             {
@@ -2541,12 +3506,15 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  Split view", "󰯌")
-                } else {
-                    "󰯌".to_string()
-                })
-                .selected(self.split_view_enabled)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  Split view", "󰯌")
+                    } else {
+                        "󰯌".to_string()
+                    },
+                    self.split_view_enabled,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
             .on_hover_text("Toggle PDF Split-View (view & annotate two pages side-by-side)")
@@ -2572,15 +3540,18 @@ impl Lapis {
         let dark_icon = if self.pdf_dark_mode { "󰖔" } else { "󰖙" };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{}  PDF night mode", dark_icon)
-                } else {
-                    dark_icon.to_string()
-                })
-                .selected(self.pdf_dark_mode)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{}  PDF night mode", dark_icon)
+                    } else {
+                        dark_icon.to_string()
+                    },
+                    self.pdf_dark_mode,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
-            .on_hover_text("Toggle PDF Dark / Night Mode")
+            .on_hover_text(self.app_state.shortcuts.toggle_night.hint("Toggle PDF Dark / Night Mode"))
             .clicked()
         {
             if labeled {
@@ -2604,18 +3575,18 @@ impl Lapis {
         };
         if ui
             .add(
-                egui::Button::new(if labeled {
-                    format!("{} Search in notes", "")
-                } else {
-                    " ".to_string()
-                })
-                .selected(self.show_search)
+                crate::theme::selected_button(
+                    if labeled {
+                        format!("{} Search in notes", "")
+                    } else {
+                        " ".to_string()
+                    },
+                    self.show_search,
+                    ui.visuals(),
+                )
                 .min_size(btn_size),
             )
-            .on_hover_text(format!(
-                "Search in Notes [{}]",
-                self.app_state.shortcuts.search_notes.format_label()
-            ))
+            .on_hover_text(self.app_state.shortcuts.search_notes.hint("Global Search"))
             .clicked()
             && self.has_pdf()
         {
@@ -2630,6 +3601,28 @@ impl Lapis {
         }
     }
 
+    /// Allow corner badges to extend into the topbar margin.
+    fn paint_topbar_dot(&self, ui: &egui::Ui, button: egui::Rect) {
+        let m = self.app_state.settings.ui_density.bar();
+        let extent = m.dot_radius + 0.5;
+        let mut clip = ui.clip_rect();
+        clip.min.y -= f32::from(m.margin_y);
+        clip = clip.intersect(ui.ctx().content_rect());
+        if clip.width() < 2.0 * extent || clip.height() < 2.0 * extent {
+            return;
+        }
+        let center = egui::pos2(
+            (button.right() - m.dot_inset).clamp(clip.left() + extent, clip.right() - extent),
+            (button.top() + m.dot_inset).clamp(clip.top() + extent, clip.bottom() - extent),
+        );
+        ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(clip).circle(
+            center,
+            m.dot_radius,
+            rgb(self.theme.accent),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
+        );
+    }
+
     fn topbar_flash_button(&mut self, ui: &mut egui::Ui, sq_btn: egui::Vec2, labeled: bool) {
         if !self.app_state.settings.flash_button {
             return;
@@ -2642,24 +3635,20 @@ impl Lapis {
         // Flashcards of the page on screen: the live text of the editor when it is that page's note.
         let has_flashcards = self.document_has_flashcards();
         let resp = ui.add(
-            egui::Button::new(if labeled {
-                format!("{}  Flashcards", "󰘸")
-            } else {
-                "󰘸 ".to_string()
-            })
-            .selected(self.show_flashcards_modal)
+            crate::theme::selected_button(
+                if labeled {
+                    format!("{}  Flashcards", "󰘸")
+                } else {
+                    "󰘸 ".to_string()
+                },
+                self.show_flashcards_modal,
+                ui.visuals(),
+            )
             .min_size(btn_size),
         );
         if has_flashcards && self.app_state.settings.flash_notification_dot {
             // Same dot as the Notes button.
-            let dot_center =
-                egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);
-            ui.painter().circle(
-                dot_center,
-                3.5,
-                theme::rgb(self.theme.accent),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
-            );
+            self.paint_topbar_dot(ui, resp.rect);
         }
         let has_cards_hover = if has_flashcards {
             "\n(This document contains flashcards)"
@@ -2727,7 +3716,11 @@ impl Lapis {
                 } else {
                     format!("    {label}")
                 };
-                let row = ui.selectable_label(selected, egui::RichText::new(row_label).strong());
+                let row = ui.add(crate::theme::selected_button(
+                    egui::RichText::new(row_label).strong(),
+                    selected,
+                    ui.visuals(),
+                ).frame_when_inactive(selected));
                 let row = row.on_hover_text(description);
                 if row.clicked() {
                     chosen_style = Some(style);
@@ -2771,19 +3764,22 @@ impl Lapis {
 
         let bm_resp = ui
             .add(
-                egui::Button::new(
+                crate::theme::selected_button(
                     egui::RichText::new(if labeled {
                         format!("{}  Bookmark", bm_icon)
                     } else {
                         bm_icon.to_string()
                     })
-                    .color(if is_bookmarked {
+                    .color(if bm_open {
+                        self.theme.on_accent()
+                    } else if is_bookmarked {
                         rgb(self.theme.warning)
                     } else {
                         rgb(self.theme.fg_primary)
                     }),
+                    bm_open,
+                    ui.visuals(),
                 )
-                .selected(bm_open)
                 .min_size(btn_size),
             )
             .on_hover_text("Add / Edit Bookmark for this page");
@@ -2818,11 +3814,11 @@ impl Lapis {
         let mut bm_open = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(bm_id));
         if bm_open {
             let mut close_bm = false;
-            let popup_pos = egui::pos2(anchor.center().x, anchor.bottom() + 6.0);
+            let (popup_pos, popup_pivot) = self.topbar_popup_placement(anchor, true);
 
             let area_resp = egui::Area::new(ui.make_persistent_id("bookmark_popup_area"))
                 .fixed_pos(popup_pos)
-                .pivot(egui::Align2::CENTER_TOP)
+                .pivot(popup_pivot)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     self.modal_glass_frame(MENU_GLASS_ALPHA)
@@ -2897,9 +3893,12 @@ impl Lapis {
             }
         }
         ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(bm_id) = bm_open);
+        if bm_open {
+            self.topbar_popup_open = true;
+        }
     }
 
-    fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
+    fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) -> bool {
         // Do not open a document already locked by another window.
         // Multiple instances would overwrite notes and annotations.
         let same_doc =
@@ -2918,64 +3917,37 @@ impl Lapis {
                         format!("\"{name}\" is already open in another Lapis window"),
                         std::time::Instant::now(),
                     ));
-                    return;
+                    return false;
                 }
                 Err(doc_lock::LockError::Io(_)) => None, // Continue if locking is unavailable.
             }
         };
 
-        if self.has_pdf() {
-            self.sync_and_save();
-            if let Err(err) = notes::commit_doc_data(
-                &self.pdf_path, &self.notes, &self.annotations,
-                self.blank_pages.clone(), &self.sketches,
-            ) {
-                self.toast_message = Some((
-                    format!("Could not commit PDF annotations: {err}"),
-                    std::time::Instant::now(),
-                ));
+        let (total_pages, outline, first_page_pt) = match inspect_pdf(&path) {
+            Ok(info) => info,
+            Err(err) => {
+                self.audio_toast(format!("Could not open PDF: {err}"));
+                ctx.request_repaint();
+                return false;
             }
-            self.save_session_state();
+        };
+        if !same_doc && !self.finish_audio_before_transition() {
+            ctx.request_repaint();
+            return false;
         }
-        if let Some(l) = new_lock {
-            self.doc_lock = Some(l); // Drop the previous document lock.
+        // Only release the old lock after the candidate has been validated.
+        if !same_doc {
+            self.doc_lock = new_lock;
+        } else if let Some(l) = new_lock {
+            self.doc_lock = Some(l);
         }
-
-        let (total_pages, outline, first_page_pt) =
-            match Document::open(path.to_str().unwrap_or_default()) {
-                Ok(doc) => {
-                    let pages = doc.page_count().unwrap_or(1) as u32;
-                    let mut items = Vec::new();
-
-                    if let Ok(outlines_iter) = doc.outlines() {
-                        for node in outlines_iter {
-                            let page_idx: i32 = node
-                                .dest
-                                .as_ref()
-                                .map(|d| d.loc.page_number as i32)
-                                .unwrap_or(0);
-                            let p: u32 = (page_idx.max(0) as u32) + 1;
-                            items.push(TocItem {
-                                title: node.title.clone(),
-                                page: p,
-                            });
-                        }
-                    }
-                    let pt = doc
-                        .load_page(0)
-                        .and_then(|p| p.bounds())
-                        .map(|b| (b.x1 - b.x0, b.y1 - b.y0))
-                        .unwrap_or((0.0, 0.0));
-                    (pages, items, pt)
-                }
-                Err(_) => (1, Vec::new(), (0.0, 0.0)),
-            };
 
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
 
+        self.single_page_wheel = SinglePageWheel::default();
         let doc_data = notes::load_doc_data(&path);
         self.notes = doc_data.notes;
         self.annotations = doc_data.annotations;
@@ -3011,24 +3983,26 @@ impl Lapis {
             self.user_bookmarks = entry.bookmarks;
             self.pdf_dark_mode = entry.pdf_dark_mode;
             self.hidden_pages = entry.hidden_pages;
-            self.view_mode = entry.view_mode;
+            self.view_mode = match entry.view_mode {
+                ViewMode::Slideshow | ViewMode::SlideshowWithNotes => ViewMode::SinglePage,
+                mode => mode,
+            };
+            self.prev_view_mode = self.view_mode;
+            self.panel_sizes = entry.panel_sizes;
         } else {
             self.user_bookmarks.clear();
             self.hidden_pages.clear();
+            self.panel_sizes = PanelSizes::default();
         }
+        // Panels pick up this document's sizes when they are next shown.
+        self.panel_apply = [true; 3];
+        self.panel_seen = [None; 3];
+        self.panel_sizes_dirty = false;
+        self.notes_panel_resizing = false;
+        self.fit_notes_layout_pending = false;
 
-        if self.pdf_path != path {
-            self.audio_engine.stop_and_release();
-            self.memo_audio_engine.stop_and_release();
-            self.asr_cancel
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            self.is_transcribing = false;
-            self.asr_progress = None;
-            self.transcript_last_seg = None;
-            self.show_audio_trimmer = false;
-            self.trim_memo_target = None;
-        }
         self.audio_index = AudioDocIndex::load(&path);
+        self.audio_index_pending = false;
 
         self.thumb_cache.clear();
         self.pending_delete_page = None;
@@ -3038,6 +4012,9 @@ impl Lapis {
         self.last_thumb_req = None;
         self.visible_pages = (0, 0);
         self.last_local_checkpoint_hash = None;
+        self.checkpoint_failed_at = None;
+        self.last_external_merge = None;
+        self.pending_signed_page_op = None;
         self.pdf_path = path.clone();
         self.pdf_name = name;
         self.total_pages = total_pages;
@@ -3048,10 +4025,14 @@ impl Lapis {
         self.note_is_dirty = false;
         self.page_cache.clear();
         self.page_text.clear();
+        self.page_links.clear();
+        self.slide_rects.clear();
+        self.last_slide_rects.clear();
         self.pdf_selection = None;
         self.selecting = false;
         self.cache_order.clear();
         self.texture_handle = None;
+        self.page_dims = (0, 0);
         self.is_rendering = true;
         self.note_page = start_page;
         self.lock_note_page = false;
@@ -3078,6 +4059,7 @@ impl Lapis {
 
         self.save_session_state();
         ctx.request_repaint();
+        true
     }
 
     /// Open a user-requested document unless it is already open.
@@ -3089,26 +4071,18 @@ impl Lapis {
             ));
             return;
         }
-        self.open_pdf(path, ctx);
+        if self.has_pdf() {
+            self.request_pdf_save(AfterPdfSave::Open(path), ctx);
+        } else {
+            self.open_pdf(path, ctx);
+        }
     }
 
     fn close_pdf(&mut self) {
+        self.single_page_wheel = SinglePageWheel::default();
         if !self.has_pdf() {
             return;
         }
-        self.finish_sketch_edit();
-        self.sync_and_save();
-        if let Err(err) = notes::commit_doc_data(
-            &self.pdf_path, &self.notes, &self.annotations,
-            self.blank_pages.clone(), &self.sketches,
-        ) {
-            self.toast_message = Some((
-                format!("Could not commit PDF annotations: {err}"),
-                std::time::Instant::now(),
-            ));
-        }
-        self.save_session_state();
-
         // Release the per-document lock, otherwise the file stays marked as open
         // (other windows get "already open" and the storage cleanup stays disabled).
         self.doc_lock = None;
@@ -3118,6 +4092,9 @@ impl Lapis {
         self.texture_handle = None;
         self.page_cache.clear();
         self.page_text.clear();
+        self.page_links.clear();
+        self.slide_rects.clear();
+        self.last_slide_rects.clear();
         self.pdf_selection = None;
         self.selecting = false;
         self.cache_order.clear();
@@ -3510,7 +4487,6 @@ impl Lapis {
             AnnotationTool::Cursor | AnnotationTool::TextBox
         );
         let accent = rgb(self.theme.accent);
-        let bg_elev = rgb(self.theme.bg_elevated);
         let fg = rgb(self.theme.fg_primary);
 
         let pw = page_rect.width().max(1.0);
@@ -3633,7 +4609,7 @@ impl Lapis {
                 self.push_undo_snapshot(page);
                 let ann = notes::PageAnnotation {
                     kind: notes::AnnotationKind::TextBox,
-                    color: self.annotation_color,
+                    color: self.annotation_color(),
                     points: vec![(nx, ny), (nx + w, ny + h)],
                     text: String::new(),
                     font_size: self.textbox_font_size,
@@ -3641,6 +4617,7 @@ impl Lapis {
                     italic: self.textbox_italic,
                     stroke_width: self.stroke_width,
                 };
+                self.commit_annotation_color(ann.kind, ann.color);
                 let list = self.annotations.entry(page).or_default();
                 list.push(ann);
                 let new_idx = list.len() - 1;
@@ -3713,9 +4690,7 @@ impl Lapis {
             );
             let galley = ui.fonts_mut(|f| f.layout_job(job));
 
-            let box_h = (br.y - tl.y)
-                .max(galley.size().y + 2.0 * pad)
-                .max(ph * MIN_H);
+            let box_h = galley.size().y + 2.0 * pad;
             let rect = egui::Rect::from_min_size(tl, egui::vec2(box_w, box_h));
 
             let hit_w = (galley.size().x + 2.0 * pad).min(box_w).max(16.0);
@@ -3775,7 +4750,7 @@ impl Lapis {
             let idx = g.idx;
             let selected = sel_idx == Some(idx);
             let editing = selected && editing_here;
-            let rect = g.rect;
+            let mut rect = g.rect;
 
             let mut move_delta = egui::Vec2::ZERO;
             let mut resize_to: Option<egui::Pos2> = None;
@@ -3846,15 +4821,6 @@ impl Lapis {
                     move_delta += resp.drag_delta();
                 }
             } else {
-                // Selected block.
-                sel_rect = Some(rect);
-
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::CornerRadius::same(3),
-                    egui::Stroke::new(1.5, accent),
-                    egui::StrokeKind::Outside,
-                );
 
                 if !editing {
                     let mv = ui.interact(
@@ -3918,9 +4884,6 @@ impl Lapis {
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
 
-                        // FIX SFASAMENTO: TextEdit somma internamente `visuals.widgets.*.bg_stroke.width`
-                        // Preserve the margin when the frame is disabled.
-                        // Reset child UI spacing to keep editing positions stable.
                         {
                             let v = &mut child.style_mut().visuals.widgets;
                             v.inactive.bg_stroke.width = 0.0;
@@ -3933,15 +4896,20 @@ impl Lapis {
 
                         let te = egui::TextEdit::multiline(&mut ann.text)
                             .id(te_id)
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::same(g.pad_i8))
-                            .desired_width(g.box_w - 2.0 * g.pad)
+                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(g.pad_i8)))
+                            .desired_width(g.box_w)
                             .desired_rows(1)
                             .lock_focus(true)
                             .layouter(&mut layouter)
                             .hint_text("Type here...");
+
                         let out = te.show(&mut child);
-                        if need_init_cursor || !out.response.has_focus() {
+                        // Use the editor's current wrapped layout.
+                        let min_height = (to_screen(g.p1).y - rect.min.y).max(ph * MIN_H);
+                        let text_height = out.galley.size().y + 2.0 * g.pad;
+                        rect.max.y = rect.min.y + min_height.max(text_height);
+
+                        if need_init_cursor {
                             out.response.request_focus();
                             if need_init_cursor
                                 && let Some(mut st) =
@@ -3953,9 +4921,6 @@ impl Lapis {
                                 st.store(ui.ctx(), te_id);
                             }
                             ui.ctx().request_repaint();
-                        }
-                        if out.response.changed() {
-                            dirty = true;
                         }
                         if out.response.changed() {
                             dirty = true;
@@ -3973,6 +4938,15 @@ impl Lapis {
                         }
                     }
                 }
+                
+                sel_rect = Some(rect);
+
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(3),
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Outside,
+                );
 
                 // ----- Maniglia di ridimensionamento -----
                 let handle_rect =
@@ -3997,7 +4971,7 @@ impl Lapis {
                     accent,
                 );
 
-                // Block settings toolbar without a shadow.
+                // Compact glass controls for the selected textbox.
                 let mut t_toggle_bg = false;
                 let bg_mode = g.bg_mode;
                 let mut t_size: Option<f32> = None;
@@ -4031,11 +5005,11 @@ impl Lapis {
                     .constrain(true)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::window(ui.style())
-                            .shadow(egui::Shadow::NONE) // <-- Ombra rimossa!
-                            .fill(bg_elev)
+                            .shadow(egui::Shadow::NONE)
+                            .fill(self.modal_glass_frame(MENU_GLASS_ALPHA).fill)
                             .stroke(egui::Stroke::new(1.2, accent))
                             .corner_radius(egui::CornerRadius::same(8))
-                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .inner_margin(egui::Margin::symmetric(6, 4))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let grip = ui
@@ -4068,10 +5042,19 @@ impl Lapis {
                                     {
                                         t_size = Some(s);
                                     }
+                                    let format_response = ui.small_button("Aa")
+                                        .on_hover_text("Text formatting")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    egui::Popup::menu(&format_response)
+                                        .id(ui.make_persistent_id(("tb_format_palette", page, idx)))
+                                        .frame(self.modal_glass_frame(MENU_GLASS_ALPHA)
+                                            .inner_margin(egui::Margin::symmetric(6, 4)))
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                        .show(|ui| {
+                                            ui.horizontal(|ui| {
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new("B").strong())
-                                                .selected(bold),
+                                            crate::theme::selected_button(egui::RichText::new("B").strong(), bold, ui.visuals()),
                                         )
                                         .on_hover_text("Bold")
                                         .clicked()
@@ -4080,8 +5063,7 @@ impl Lapis {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new("I").italics())
-                                                .selected(italic),
+                                            crate::theme::selected_button(egui::RichText::new("I").italics(), italic, ui.visuals()),
                                         )
                                         .on_hover_text("Italic")
                                         .clicked()
@@ -4113,13 +5095,15 @@ impl Lapis {
                                     {
                                         t_toggle_list = true;
                                     }
+                                            });
+                                        });
                                     let bg_label = match bg_mode {
                                         1 => "󰝤 Bg: Dark",
                                         2 => "󰝤 Bg: Light",
                                         _ => "󰝣 Bg",
                                     };
                                     if ui
-                                        .add(egui::Button::new(bg_label).selected(bg_mode != 0))
+                                        .add(crate::theme::selected_button(bg_label, bg_mode != 0, ui.visuals()))
                                         .on_hover_text("Background: Off → Dark → Light")
                                         .clicked()
                                     {
@@ -4128,23 +5112,40 @@ impl Lapis {
 
                                     ui.separator();
 
-                                    for (pc, name) in ANNOTATION_PALETTE {
-                                        let (sw, resp) = ui.allocate_exact_size(
-                                            egui::vec2(18.0, 18.0),
-                                            egui::Sense::click(),
-                                        );
-                                        ui.painter().circle_filled(sw.center(), 6.5, rgb(pc));
-                                        if pc == color || resp.hovered() {
-                                            ui.painter().circle_stroke(
-                                                sw.center(),
-                                                8.5,
-                                                egui::Stroke::new(1.6, fg),
-                                            );
-                                        }
-                                        if resp.on_hover_text(name).clicked() {
-                                            t_color = Some(pc);
-                                        }
-                                    }
+                                    let (color_rect, color_response) = ui.allocate_exact_size(
+                                        egui::vec2(24.0, 22.0), egui::Sense::click(),
+                                    );
+                                    ui.painter().circle_filled(color_rect.center(), 8.5, rgb(color));
+                                    ui.painter().circle_stroke(
+                                        color_rect.center(), 9.5,
+                                        egui::Stroke::new(if color_response.hovered() { 2.0 } else { 1.2 }, fg),
+                                    );
+                                    let color_response = color_response
+                                        .on_hover_text("Text color")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    egui::Popup::menu(&color_response)
+                                        .id(ui.make_persistent_id(("tb_color_palette", page, idx)))
+                                        .frame(self.modal_glass_frame(MENU_GLASS_ALPHA)
+                                            .inner_margin(egui::Margin::symmetric(6, 4)))
+                                        .show(|ui| {
+                                            ui.horizontal(|ui| {
+                                                for (pc, name) in ANNOTATION_PALETTE {
+                                                    let (sw, response) = ui.allocate_exact_size(
+                                                        egui::vec2(22.0, 22.0), egui::Sense::click(),
+                                                    );
+                                                    ui.painter().circle_filled(sw.center(), 8.5, rgb(pc));
+                                                    if pc == color || response.hovered() {
+                                                        ui.painter().circle_stroke(sw.center(), 10.0,
+                                                            egui::Stroke::new(1.8, fg));
+                                                    }
+                                                    if response.on_hover_text(name)
+                                                        .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                                        t_color = Some(pc);
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        });
 
                                     ui.separator();
                                     if ui
@@ -4153,6 +5154,19 @@ impl Lapis {
                                         .clicked()
                                     {
                                         t_delete = true;
+                                    }
+                                    if ui.small_button("󰆏 ")
+                                        .on_hover_text("Copy whole textbox")
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        if let Some(ann) = self.annotations.get(&page).and_then(|v| v.get(idx)) {
+                                            self.clipboard.set_text(ann.text.trim_start_matches(['\u{200B}', '\u{200C}']));
+                                        }
+                                    }
+                                    if ui.add_sized(
+                                        [48.0, 22.0],
+                                        egui::Button::new(if editing { "Done" } else { "Edit" }),
+                                    ).on_hover_text("Edit text or finish editing (Esc)").clicked() {
+                                        sel = Some((page, idx, !editing));
                                     }
                                 });
                             });
@@ -4185,6 +5199,11 @@ impl Lapis {
                     || t_toggle_bg
                 {
                     self.push_undo_snapshot(page);
+                    if let Some(color) = t_color
+                        && self.annotations.get(&page).and_then(|v| v.get(idx)).is_some()
+                    {
+                        self.remember_annotation_color(notes::AnnotationKind::TextBox, color);
+                    }
                     if let Some(ann) = self.annotations.get_mut(&page).and_then(|v| v.get_mut(idx))
                     {
                         if let Some(s) = t_size {
@@ -4201,7 +5220,6 @@ impl Lapis {
                         }
                         if let Some(c) = t_color {
                             ann.color = c;
-                            self.annotation_color = c;
                         }
                         if let Some(tok) = t_wrap_token {
                             if ann.text.starts_with(tok)
@@ -4280,7 +5298,7 @@ impl Lapis {
         }
 
         // 4. Escape, Delete, and outside clicks.
-        if !just_created_this_frame
+        if !egui::Popup::is_any_open(ui.ctx()) && !just_created_this_frame
             && let Some((sp, si, ed)) = sel
             && sp == page
         {
@@ -4541,6 +5559,79 @@ impl Lapis {
         }
     }
 
+    fn annotation_cursor_icon(&self) -> &'static str {
+        match self.annotation_tool {
+            AnnotationTool::Cursor => "󰇀",
+            AnnotationTool::Draw => "󱦹",
+            AnnotationTool::Highlight => "",
+            AnnotationTool::Underline => "󰊇",
+            AnnotationTool::TextBox => "󰊄",
+            AnnotationTool::Eraser => "󰇾",
+            AnnotationTool::Tape => "󰝤",
+            AnnotationTool::Snip => "󰆞",
+            AnnotationTool::Laser => "󰐾",
+            AnnotationTool::Shape => match self.shape_kind {
+                ShapeKind::Rect => "󰝣",
+                ShapeKind::Circle => "󰝥",
+                ShapeKind::Line => "󰕞",
+                ShapeKind::Arrow => "󰁔",
+            },
+        }
+    }
+
+    fn paint_annotation_cursor(&self, ctx: &egui::Context) {
+        if self.annotation_tool == AnnotationTool::Cursor
+            || self.pdf_panning || self.show_settings || self.radial_menu_pos.is_some()
+            || ctx.output(|o| o.cursor_icon) != egui::CursorIcon::Crosshair
+        {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return; };
+        let Some((layer, clip)) = ctx.data(|d| {
+            d.get_temp::<(egui::LayerId, egui::Rect)>(egui::Id::unique("annotation_cursor_target"))
+        }) else { return; };
+        if !clip.contains(pos) || ctx.layer_id_at(pos) != Some(layer) {
+            return;
+        }
+        if self.annotation_tool == AnnotationTool::Eraser {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            return;
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+        let painter = ctx.layer_painter(layer).with_clip_rect(ctx.content_rect());
+        let color = if self.annotation_tool.color_slot().is_some() {
+            rgb(self.annotation_color())
+        } else {
+            egui::Color32::WHITE
+        };
+        // Snap the painted cursor, not the annotation coordinates.
+        let ppp = ctx.pixels_per_point();
+        let pos = egui::pos2((pos.x * ppp).round() / ppp, (pos.y * ppp).round() / ppp);
+        if self.annotation_tool == AnnotationTool::Draw {
+            painter.circle_stroke(pos, 3.0, egui::Stroke::new(1.5, egui::Color32::BLACK));
+            painter.circle_stroke(pos, 3.0, egui::Stroke::new(0.75, color));
+            return;
+        }
+        let line = |a: (f32, f32), b: (f32, f32)| {
+            let points = [pos + egui::vec2(a.0, a.1), pos + egui::vec2(b.0, b.1)];
+            painter.line_segment(points, egui::Stroke::new(1.5, egui::Color32::BLACK));
+            painter.line_segment(points, egui::Stroke::new(0.75, color));
+        };
+        if self.annotation_tool == AnnotationTool::Highlight {
+            let corners = [(-7.0, 3.0), (3.0, -7.0), (7.0, -3.0), (-3.0, 7.0)];
+            let points = corners.iter().map(|&(x, y)| pos + egui::vec2(x, y)).collect();
+            painter.add(egui::Shape::convex_polygon(
+                points, color, egui::Stroke::new(0.9, egui::Color32::BLACK),
+            ));
+            return;
+        }
+        line((-5.0, 0.0), (5.0, 0.0));
+        line((0.0, -5.0), (0.0, 5.0));
+        // Keep the glyph at a fixed offset instead of flipping at screen edges.
+        painter.text(pos + egui::vec2(12.0, 12.0), egui::Align2::CENTER_CENTER,
+            self.annotation_cursor_icon(), egui::FontId::proportional(13.0), color);
+    }
+
     fn handle_slide_annotations(
         &mut self,
         ui: &mut egui::Ui,
@@ -4588,7 +5679,7 @@ impl Lapis {
         let pointer_on_pdf_layer = pointer_pos
             .map(|pos| ui.ctx().layer_id_at(pos) == Some(img_resp.layer_id))
             .unwrap_or(false);
-        if img_resp.hovered() && pointer_on_pdf_layer {
+        if (img_resp.hovered() || img_resp.dragged()) && pointer_on_pdf_layer {
             let icon = match self.annotation_tool {
                 AnnotationTool::Cursor => egui::CursorIcon::Default,
                 _ => egui::CursorIcon::Crosshair,
@@ -4599,6 +5690,10 @@ impl Lapis {
         let pointer_in_slide = pointer_pos
             .map(|p| slide_rect.contains(p) && pointer_on_pdf_layer)
             .unwrap_or(false);
+        if pointer_in_slide && pointer_pos.is_some_and(|p| ui.clip_rect().contains(p)) {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("annotation_cursor_target"),
+                (img_resp.layer_id, slide_rect.intersect(ui.clip_rect()))));
+        }
         let any_text_focused = ui.ctx().memory(|m| m.focused().is_some());
 
         let hold_key_down = !any_text_focused
@@ -4704,11 +5799,16 @@ impl Lapis {
             }
             AnnotationTool::Eraser => {
                 if let Some(pos) = pointer_pos {
+                    if pointer_in_slide && ui.clip_rect().contains(pos) {
+                    // Halfway between the old fixed 7 px and the real reach, so the circle
+                    // follows the page zoom and still stays small enough to aim with.
+                    let reach_px = ERASER_REACH * (slide_rect.width() + slide_rect.height()) * 0.5;
                     ui.painter().circle_stroke(
-                    pointer_pos.unwrap(),
-                    7.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+                        pos,
+                        (7.0 + reach_px) * 0.5,
+                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
                     );
+                    }
                     if img_resp.clicked() || img_resp.dragged() || hold_key_down {
                     let (nx, ny) = to_norm(pos);
                     let before_state = self.annotations.get(&page_num).cloned().unwrap_or_default();
@@ -4749,7 +5849,7 @@ impl Lapis {
                             notes::AnnotationKind::Freehand => !ann
                                 .points
                                 .iter()
-                                .any(|&(px, py)| (px - nx).hypot(py - ny) < 0.025),
+                                .any(|&(px, py)| (px - nx).hypot(py - ny) < ERASER_REACH),
                             notes::AnnotationKind::TextBox => {
                                 if let Some(&(bx, by)) = ann.points.first() {
                                     let (ex, ey) = ann
@@ -4886,7 +5986,7 @@ impl Lapis {
                         let pt = to_norm(pos);
                         self.active_stroke = Some(notes::PageAnnotation {
                             kind,
-                            color: self.annotation_color,
+                            color: self.annotation_color(),
                             points: vec![pt, pt],
                             text: String::new(),
                             font_size: self.textbox_font_size,
@@ -4916,14 +6016,10 @@ impl Lapis {
                         stroke.points = notes::smooth_freehand_points(&stroke.points);
                     }
                     self.push_undo_snapshot(page_num);
+                    self.commit_annotation_color(stroke.kind, stroke.color);
                     self.annotations.entry(page_num).or_default().push(stroke);
-                    let _ = notes::save_doc_data(
-                        &self.pdf_path,
-                        &self.notes,
-                        &self.annotations,
-                        self.blank_pages.clone(),
-                        &self.sketches,
-                    );
+                    // Update the checkpoint so the end of the frame does not save again.
+                    self.sync_and_save();
                 }
             }
         }
@@ -5078,42 +6174,21 @@ impl Lapis {
             return;
         }
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape) && self.rebinding_action.is_none()) {
-            self.show_settings = false;
-            return;
-        }
+        let screen = ui.ctx().content_rect();
+        let modal_w = (screen.width() - 56.0).clamp(1.0, 1000.0);
+        let modal_h = (screen.height() - 56.0).clamp(1.0, 650.0);
+        let sidebar_w = (modal_w * 0.25).clamp(100.0, 185.0);
+        let pane_w = (modal_w - sidebar_w - 64.0).max(1.0);
+        let body_h = (modal_h - 65.0).max(1.0);
 
-        const MODAL_W: f32 = 690.0;
-        const MODAL_H: f32 = 460.0;
-        const SIDEBAR_W: f32 = 175.0;
-        const PANE_W: f32 = 475.0;
-        const BODY_H: f32 = 395.0;
-
-        let full_rect = ui.ctx().content_rect();
-        egui::Area::new(ui.make_persistent_id("settings_backdrop"))
-            .fixed_pos(full_rect.min)
-            .order(egui::Order::Foreground)
+        let rebinding_at_start = self.rebinding_action.is_some();
+        let response = egui::Modal::new(ui.make_persistent_id("settings_modal_window"))
+            .frame(self.modal_glass_frame(242))
+            .backdrop_color(egui::Color32::from_black_alpha(115))
             .show(ui.ctx(), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(full_rect.size(), egui::Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::ZERO,
-                    egui::Color32::from_black_alpha(115),
-                );
-                if resp.clicked() && self.rebinding_action.is_none() {
-                    self.show_settings = false;
-                }
-            });
-
-        egui::Area::new(ui.make_persistent_id("settings_modal_window"))
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .order(egui::Order::Tooltip)
-            .constrain(true)
-            .show(ui.ctx(), |ui| {
-                self.modal_glass_frame(242).show(ui, |ui| {
-                    // Dimensione davvero fissa: min == max
-                    ui.set_min_size(egui::vec2(MODAL_W, MODAL_H));
-                    ui.set_max_size(egui::vec2(MODAL_W, MODAL_H));
+                    // Keep the dialog within the available window.
+                    ui.set_min_size(egui::vec2(modal_w, modal_h));
+                    ui.set_max_size(egui::vec2(modal_w, modal_h));
 
                     // Force a vertical layout; the parent may be horizontal.
                     ui.vertical(|ui| {
@@ -5141,36 +6216,58 @@ impl Lapis {
                         ui.horizontal_top(|ui| {
                             // 1. Left column: category navigation.
                             egui::Frame::NONE
-                                .fill(egui::Color32::from_black_alpha(45))
-                                .corner_radius(egui::CornerRadius::same(8))
                                 .inner_margin(egui::Margin::same(8))
                                 .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(SIDEBAR_W, BODY_H));
-                                    ui.set_max_size(egui::vec2(SIDEBAR_W, BODY_H));
+                                    ui.set_min_size(egui::vec2(sidebar_w, body_h));
+                                    ui.set_max_size(egui::vec2(sidebar_w, body_h));
 
-                                    // Frame::show inherits the parent layout.
                                     ui.vertical(|ui| {
-                                        let tabs = [
-                                            (SettingsTab::StudyAndTools, "󰏫  Study & Canvas"),
-                                            (SettingsTab::AppearanceAndTheme, "󰔎  Theme & Fonts"),
-                                            (SettingsTab::Shortcuts, "󰌌  Keybindings"),
-                                            (SettingsTab::SystemAndData, "󰒓  System & Export"),
-                                            (SettingsTab::Storage, "󰋊  Storage & Data"),
-                                            (SettingsTab::Dictionaries, "󰗊  Dictionaries"),
-                                        ];
+                                        let idle = &mut ui.visuals_mut().widgets.inactive;
+                                        idle.bg_fill = egui::Color32::TRANSPARENT;
+                                        idle.weak_bg_fill = egui::Color32::TRANSPARENT;
+                                        idle.bg_stroke = egui::Stroke::NONE;
 
-                                        for (tab, label) in tabs {
-                                            let selected = self.settings_tab == tab;
-                                            let btn = egui::Button::new(
-                                                egui::RichText::new(label).size(13.0),
-                                            )
-                                            .selected(selected)
-                                            .min_size(egui::vec2(SIDEBAR_W - 16.0, 32.0));
+                                        let footer_h = 32.0;
+                                        let gap = ui.spacing().item_spacing.y;
+                                        let nav_h = (body_h - footer_h - gap).max(0.0);
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("settings_navigation")
+                                            .max_height(nav_h)
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                let tabs = [
+                                                    (SettingsTab::AppearanceAndTheme, "󰔎  Appearance"),
+                                                    (SettingsTab::StudyAndTools, "󰏫  Tools & Study"),
+                                                    (SettingsTab::Workspace, "󰕮  Workspace"),
+                                                    (SettingsTab::Shortcuts, "󰌌  Keybindings"),
+                                                    (SettingsTab::SystemAndData, "󰚥  Export & PDF"),
+                                                    (SettingsTab::Storage, "󰋊  Storage & Data"),
+                                                    (SettingsTab::Dictionaries, "󰗊  Dictionaries"),
+                                                ];
 
-                                            if ui.add(btn).clicked() {
-                                                self.settings_tab = tab;
-                                            }
-                                            ui.add_space(4.0);
+                                                for (tab, label) in tabs {
+                                                    let btn = crate::theme::selected_button(
+                                                        egui::RichText::new(label).size(13.0),
+                                                        self.settings_tab == tab,
+                                                        ui.visuals(),
+                                                    )
+                                                    .min_size(egui::vec2(sidebar_w - 16.0, 32.0));
+
+                                                    if ui.add(btn).clicked() {
+                                                        self.settings_tab = tab;
+                                                    }
+                                                    ui.add_space(4.0);
+                                                }
+                                            });
+
+                                        let btn = crate::theme::selected_button(
+                                            egui::RichText::new("󰋼  Credits").size(13.0),
+                                            self.settings_tab == SettingsTab::Credits,
+                                            ui.visuals(),
+                                        )
+                                        .min_size(egui::vec2(sidebar_w - 16.0, footer_h));
+                                        if ui.add(btn).clicked() {
+                                            self.settings_tab = SettingsTab::Credits;
                                         }
                                     });
                                 });
@@ -5181,577 +6278,479 @@ impl Lapis {
                             egui::Frame::NONE
                                 .inner_margin(egui::Margin::symmetric(6, 2))
                                 .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(PANE_W, BODY_H));
-                                    ui.set_max_size(egui::vec2(PANE_W, BODY_H));
+                                    ui.set_min_size(egui::vec2(pane_w, body_h));
+                                    ui.set_max_size(egui::vec2(pane_w, body_h));
 
                                     egui::ScrollArea::vertical()
                                         .id_salt("settings_right_pane_scroll")
-                                        .max_height(BODY_H - 5.0)
+                                        .max_height(body_h - 5.0)
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             // Use an explicit vertical layout.
                                             ui.vertical(|ui| {
-                                                ui.set_max_width(PANE_W - 24.0);
+                                                ui.set_max_width(pane_w - 24.0);
 
                                                 let mut settings_dirty = false;
 
                                                 match self.settings_tab {
-                                                    // ───────────── STUDY & CANVAS ─────────────
+                                                    // ───────────── TOOLS & STUDY ─────────────
                                                     SettingsTab::StudyAndTools => {
-                                                        ui.label(egui::RichText::new("Study & Canvas").size(16.0).strong());
-                                                        ui.weak("Choose which tools appear, how panels behave, and how you study.");
-                                                        ui.add_space(10.0);
+                                                        settings_page_header(ui, "Tools & Study", "Annotation tools, active recall and flashcards.");
 
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                            ui.label(egui::RichText::new("Annotation toolbar").size(14.0).strong());
-                                                            ui.weak("Visibility and quick access");
-                                                            ui.add_space(5.0);
-
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.radial_menu_enabled,
-                                                                "Enable Quick Radial Tools Menu on canvas",
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-
-                                                        if ui
-                                                            .checkbox(
+                                                        settings_section(ui, "Annotation toolbar", "Which tools are shown and how you reach them.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.tools_button,
                                                                 "Show Annotation Tools button",
+                                                                "Adds the annotation tools button to the topbar.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.radial_menu_enabled,
+                                                                "Enable Quick Radial Tools Menu on canvas",
+                                                                "Right-click the page, or use its shortcut, to open a circular menu of tools.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.reset_tool_on_bar_close,
+                                                                "Switch to Cursor when closing the annotation bar",
+                                                                "Closing the toolbar returns to the Cursor / Select tool instead of keeping the active tool.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
 
-                                                        ui.add_space(8.0);
-                                                        ui.label(egui::RichText::new("When closing the toolbar").strong());
-                                                        if ui.checkbox(
-                                                            &mut self.app_state.settings.reset_tool_on_bar_close,
-                                                            "Switch to Cursor when closing the annotation bar",
-                                                        ).changed() {
-                                                            settings_dirty = true;
-                                                        }
-
-                                                        ui.add_space(10.0);
-                                                        ui.label(egui::RichText::new("Toolbar position").size(13.0).strong());
-                                                        ui.add_space(4.0);
-
-                                                        ui.horizontal(|ui| {
-                                                            let current = self.app_state.settings.tools_layout;
-
-                                                            let options = [
-                                                                (state::ToolsLayoutMode::SubTopbar, "󰕮  Sub-Topbar"),
-                                                                (state::ToolsLayoutMode::VerticalRail, "󰍜  Vertical Rail"),
-                                                            ];
-
-                                                            for (mode, label) in options {
-                                                                let btn = egui::Button::new(label)
-                                                                    .selected(current == mode)
-                                                                    .min_size(egui::vec2(150.0, 28.0));
-
-                                                                if ui.add(btn).clicked() && current != mode {
-                                                                    self.app_state.settings.tools_layout = mode;
+                                                            settings_subheading(ui, "Toolbar position");
+                                                            let mut layout = self.app_state.settings.tools_layout;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut layout,
+                                                                &[
+                                                                    (state::ToolsLayoutMode::SubTopbar, "󰕮  Horizontal"),
+                                                                    (state::ToolsLayoutMode::VerticalRail, "󰍜  Vertical Rail"),
+                                                                ],
+                                                                150.0,
+                                                            ) {
+                                                                self.app_state.settings.tools_layout = layout;
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.weak("Horizontal bar or vertical rail on the right edge.");
+                                                            if layout == state::ToolsLayoutMode::SubTopbar {
+                                                                settings_subheading(ui, "Horizontal toolbar edge");
+                                                                let mut position = self.app_state.settings.annotation_bar_position;
+                                                                if settings_choice(
+                                                                    ui,
+                                                                    &mut position,
+                                                                    &[
+                                                                        (None, "Follow topbar"),
+                                                                        (Some(state::TopbarPosition::Top), "Top"),
+                                                                        (Some(state::TopbarPosition::Bottom), "Bottom"),
+                                                                    ],
+                                                                    100.0,
+                                                                ) {
+                                                                    self.app_state.settings.annotation_bar_position = position;
                                                                     settings_dirty = true;
                                                                 }
+                                                                ui.weak("Choose an edge independently of the topbar. When both share an edge, the topbar stays outermost.");
                                                             }
+
+                                                            settings_subheading(ui, "Drawing");
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Stroke Thickness:");
+                                                                ui.add(egui::Slider::new(&mut self.stroke_width, 1.0..=18.0).suffix(" px"));
+                                                            });
                                                         });
 
-                                                        ui.add_space(10.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Stroke Thickness:");
-                                                            ui.add(egui::Slider::new(&mut self.stroke_width, 1.0..=18.0).suffix(" px"));
-                                                        });
+                                                        settings_section(ui, "Active recall", "Study by hiding and revealing your own material.", |ui| {
+                                                            settings_subheading(ui, "Occlusion tape");
+                                                            ui.weak("Hide parts of a page with tape, then reveal them to test yourself.");
+                                                            ui.add_space(4.0);
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui
+                                                                    .button("󰝤  Cover All Tapes (Quiz Mode)")
+                                                                    .on_hover_text("Hide all revealed occlusion tapes across the PDF")
+                                                                    .clicked()
+                                                                {
+                                                                    self.revealed_tapes.clear();
+                                                                }
 
+                                                                if ui
+                                                                    .button("󰈈  Reveal All Tapes")
+                                                                    .on_hover_text("Temporarily uncover all occlusion tapes in the document")
+                                                                    .clicked()
+                                                                {
+                                                                    for (&p, list) in &self.annotations {
+                                                                        for (idx, ann) in list.iter().enumerate() {
+                                                                            if matches!(ann.kind, notes::AnnotationKind::Tape) {
+                                                                                self.revealed_tapes.insert((p, idx));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+
+                                                            settings_subheading(ui, "Flashcards");
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.flash_button,
+                                                                "Show Flashcards button",
+                                                                "Adds the Flashcards button to the topbar.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.flash_notification_dot,
+                                                                "Show flashcard notification dot when document has cards",
+                                                                "Marks the Flashcards button when your notes contain flashcards.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰘸 Open Flashcards Modal").clicked() {
+                                                                    self.toggle_flashcards_modal();
+                                                                }
+
+                                                                if ui.button("󰈇 Export Anki Deck (.tsv)").clicked() {
+                                                                    self.export_anki_dialog(ui.ctx());
+                                                                }
+                                                            });
                                                         });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Sidebars & Panels")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.weak("Remember which panels were open");
-                                                        ui.add_space(5.0);
-                                                        if ui
-                                                            .checkbox(
+                                                    }
+
+                                                    // ───────────── WORKSPACE ─────────────
+                                                    SettingsTab::Workspace => {
+                                                        settings_page_header(ui, "Workspace", "Panels, audio, and how pages and slideshows behave.");
+
+                                                        settings_section(ui, "Panels", "What Lapis restores when you reopen a document.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.restore_show_notes,
                                                                 "Remember Notes panel state on reopen",
+                                                                "Reopen a document with the Notes panel open or closed, as you left it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.restore_show_toc,
                                                                 "Remember Outline panel state on reopen",
+                                                                "Reopen a document with the Outline panel open or closed, as you left it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        ui.add_space(9.0);
-                                                        ui.label(egui::RichText::new("Notes workspace").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                        });
+
+                                                        settings_section(ui, "Notes panel", "Where your notes live and what they offer.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.bottom_notes,
                                                                 "Allow Notes panel to fit under the page when window is in portrait",
+                                                                "In a tall window the panel can sit under the page instead of beside it.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
+                                                            {
+                                                                settings_dirty = true;
+                                                            }
+                                                            if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.sketch_enabled,
                                                                 "Enable Sketch (per-page scratchpad tab in the Notes panel)",
-                                                            )
-                                                            .on_hover_text("Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.")
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                            if !self.app_state.settings.sketch_enabled {
-                                                                self.finish_sketch_edit();
-                                                                if self.note_mode == NoteMode::Sketch {
-                                                                    self.note_mode = NoteMode::Edit;
-                                                                }
-                                                            }
-                                                        }
-                                                        ui.add_space(9.0);
-                                                        ui.label(egui::RichText::new("Audio workspace").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.audio_notes,
-                                                                "Enable Audio notes",
+                                                                "Turning it off hides the Sketch tab and leaves sketches out of exports. Your sketches are kept.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.audio_dock,
-                                                                "Enable Audio Lessons registation and Audio dock",
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        
-
-                                                        });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Active Recall")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.weak("Occlusion tape controls");
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui
-                                                                .button("󰝤  Cover All Tapes (Quiz Mode)")
-                                                                .on_hover_text("Hide all revealed occlusion tapes across the PDF")
-                                                                .clicked()
                                                             {
-                                                                self.revealed_tapes.clear();
-                                                            }
-
-                                                            if ui
-                                                                .button("󰈈  Reveal All Tapes")
-                                                                .on_hover_text("Temporarily uncover all occlusion tapes in the document")
-                                                                .clicked()
-                                                            {
-                                                                for (&p, list) in &self.annotations {
-                                                                    for (idx, ann) in list.iter().enumerate() {
-                                                                        if matches!(ann.kind, notes::AnnotationKind::Tape) {
-                                                                            self.revealed_tapes.insert((p, idx));
-                                                                        }
+                                                                settings_dirty = true;
+                                                                if !self.app_state.settings.sketch_enabled {
+                                                                    self.finish_sketch_edit();
+                                                                    if self.note_mode == NoteMode::Sketch {
+                                                                        self.note_mode = NoteMode::Edit;
                                                                     }
                                                                 }
                                                             }
                                                         });
 
-                                                        ui.add_space(10.0);
-                                                        ui.separator();
-                                                        ui.add_space(7.0);
-                                                        ui.label(egui::RichText::new("Flashcards").size(13.0).strong());
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.app_state.settings.flash_button,
-                                                                "Show Flashcards button",
+                                                        settings_section(ui, "Audio", "Voice memos and lesson recordings.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.audio_notes,
+                                                                "Enable Audio notes",
+                                                                "Voice memos attached to pages.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            settings_dirty = true;
-                                                        }
-                                                        if ui.checkbox(
-                                                            &mut self.app_state.settings.flash_notification_dot,
-                                                            "Show flashcard notification dot when document has cards",
-                                                        ).changed() {
-                                                            settings_dirty = true;
-                                                        }
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰘸 Open Flashcards Modal").clicked() {
-                                                                self.toggle_flashcards_modal();
+                                                            {
+                                                                settings_dirty = true;
                                                             }
-
-                                                            if ui.button("󰈇 Export Anki Deck (.tsv)").clicked() {
-                                                                self.export_anki_dialog(ui.ctx());
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.audio_dock,
+                                                                "Enable Audio Lessons recording and Audio dock",
+                                                                "Record or load a lesson and follow it with its transcript in the audio dock.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                settings_dirty = true;
                                                             }
                                                         });
 
-
-                                                        });
-                                                        ui.add_space(10.0);
-                                                        ui.group(|ui| {
-                                                            ui.set_min_width(PANE_W - 54.0);
-                                                        ui.label(
-                                                            egui::RichText::new("Pages & Presentation")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.label(egui::RichText::new("Default new page style").strong());
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for (style, label) in [
-                                                                (notes::BlankPageStyle::Ruled, "Ruled"),
-                                                                (notes::BlankPageStyle::Dotted, "Dotted"),
-                                                                (notes::BlankPageStyle::Grid, "Grid"),
-                                                                (notes::BlankPageStyle::Blank, "Blank"),
-                                                            ] {
-                                                                if ui.selectable_value(&mut self.app_state.settings.default_page_style, style, label).changed() {
+                                                        settings_section(ui, "Page scrolling", "How fast the page moves with the mouse. The same in every view mode.", |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Mouse wheel speed:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.wheel_scroll_speed,
+                                                                            0.5..=5.0,
+                                                                        )
+                                                                        .step_by(0.1)
+                                                                        .suffix("×"),
+                                                                    )
+                                                                    .changed()
+                                                                {
                                                                     settings_dirty = true;
                                                                 }
-                                                            }
-                                                        });
-                                                        ui.add_space(8.0);
-
-                                                        ui.separator();
-                                                        ui.add_space(7.0);
-                                                        ui.label(egui::RichText::new("Slideshow + Notes").size(13.0).strong());
-                                                        ui.weak(
-                                                            "Choose how Slideshow + Notes handles slides without annotations.",
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        for (mode, label) in [
-                                                            (
-                                                                SlideshowEmptyMode::AutoHold,
-                                                                "Auto-Hold Previous Note",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::ContextDashboard,
-                                                                "Study Context Dashboard",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::SkipEmpty,
-                                                                "Skip Unannotated Slides",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::ExpandFull,
-                                                                "Auto-Expand Fullscreen",
-                                                            ),
-                                                            (
-                                                                SlideshowEmptyMode::StaticEmpty,
-                                                                "Show Empty-Slide Placeholder",
-                                                            ),
-                                                        ] {
-                                                            if ui
-                                                                .radio_value(
-                                                                    &mut self.app_state.settings.slideshow_empty_mode,
-                                                                    mode,
-                                                                    label,
-                                                                )
-                                                                .changed()
-                                                            {
+                                                            });
+                                                            ui.weak("Distance moved per wheel notch or trackpad swipe. Ctrl + wheel still zooms.");
+                                                            ui.add_space(6.0);
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Middle-button drag speed:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.pan_scroll_speed,
+                                                                            1.0..=8.0,
+                                                                        )
+                                                                        .step_by(0.1)
+                                                                        .suffix("×"),
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
+                                                            ui.weak("How far the page moves per pixel you drag with the middle button held down. 1× follows the pointer exactly.");
+                                                            ui.add_space(6.0);
+                                                            if ui.button("Restore scrolling defaults").clicked() {
+                                                                self.app_state.settings.wheel_scroll_speed = state::DEFAULT_WHEEL_SCROLL_SPEED;
+                                                                self.app_state.settings.pan_scroll_speed = state::DEFAULT_PAN_SCROLL_SPEED;
                                                                 settings_dirty = true;
                                                             }
-                                                        }
-
-
                                                         });
 
+                                                        settings_section(ui, "Pages & presentation", "", |ui| {
+                                                            settings_subheading(ui, "Default new page style");
+                                                            ui.weak("Style of the blank pages you insert into a document.");
+                                                            ui.add_space(4.0);
+                                                            let mut page_style = self.app_state.settings.default_page_style;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut page_style,
+                                                                &[
+                                                                    (notes::BlankPageStyle::Ruled, "Ruled"),
+                                                                    (notes::BlankPageStyle::Dotted, "Dotted"),
+                                                                    (notes::BlankPageStyle::Grid, "Grid"),
+                                                                    (notes::BlankPageStyle::Blank, "Blank"),
+                                                                ],
+                                                                80.0,
+                                                            ) {
+                                                                self.app_state.settings.default_page_style = page_style;
+                                                                settings_dirty = true;
+                                                            }
+
+                                                            settings_subheading(ui, "Slideshow + Notes");
+                                                            ui.weak("What the Notes panel does on slides without annotations.");
+                                                            ui.add_space(4.0);
+                                                            for (mode, label, hint) in [
+                                                                (
+                                                                    SlideshowEmptyMode::AutoHold,
+                                                                    "Auto-Hold Previous Note",
+                                                                    "Keeps the previous annotated slide's note visible.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::ContextDashboard,
+                                                                    "Study Context Dashboard",
+                                                                    "Shows the audio transcript and a preview of the next note.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::SkipEmpty,
+                                                                    "Skip Unannotated Slides",
+                                                                    "Arrow navigation jumps over slides without annotations.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::ExpandFull,
+                                                                    "Auto-Expand Fullscreen",
+                                                                    "Hides the Notes panel on empty slides so the slide fills the screen.",
+                                                                ),
+                                                                (
+                                                                    SlideshowEmptyMode::StaticEmpty,
+                                                                    "Show Empty-Slide Placeholder",
+                                                                    "Keeps the panel in place and shows \"No notes for this slide.\"",
+                                                                ),
+                                                            ] {
+                                                                if ui
+                                                                    .radio_value(
+                                                                        &mut self.app_state.settings.slideshow_empty_mode,
+                                                                        mode,
+                                                                        label,
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                                settings_hint(ui, hint);
+                                                            }
+                                                        });
                                                     }
 
-                                                    // ───────────── THEME & FONTS ─────────────
+                                                    // ───────────── APPEARANCE ─────────────
                                                     SettingsTab::AppearanceAndTheme => {
-                                                        ui.label(
-                                                            egui::RichText::new("Theme Presets, Colors & Typography")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(8.0);
+                                                        settings_page_header(ui, "Appearance", "Theme, interface size, and text.");
 
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰋺  Import Theme...").clicked() {
-                                                                self.import_theme_dialog(ui.ctx());
-                                                            }
-                                                            if ui.button("󰈇  Export Theme...").clicked() {
-                                                                self.export_theme_dialog(ui.ctx());
-                                                            }
-                                                            if ui.button("󰑐  Reset Default").clicked() {
-                                                                self.theme = SuiteTheme::default();
-                                                                self.theme.apply(ui.ctx());
-                                                                let _ = self.theme.save();
+                                                        settings_section(ui, "Theme", "Choose one theme source. Switching replaces the active palette.", |ui| {
+                                                            let id = ui.make_persistent_id("theme_picker_state");
+                                                            let mut picker = ui.data_mut(|d| d.get_temp::<theme_picker::ThemePicker>(id))
+                                                                .unwrap_or_else(theme_picker::ThemePicker::load);
+                                                            let action = picker.show(ui, &mut self.theme);
+                                                            ui.data_mut(|d| d.insert_temp(id, picker));
+                                                            match action {
+                                                                Some(theme_picker::ThemeAction::Import) => self.import_theme_dialog(ui.ctx()),
+                                                                Some(theme_picker::ThemeAction::Export) => self.export_theme_dialog(ui.ctx()),
+                                                                None => {}
                                                             }
                                                         });
 
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-
-                                                        ui.label(
-                                                            egui::RichText::new("Theme Presets")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.weak(
-                                                            "Each preset updates the entire interface palette, including backgrounds, text, borders and widget states.",
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        // ───────────── DARK THEMES · 12 ─────────────
-                                                        ui.label(
-                                                            egui::RichText::new("  Dark Themes")
-                                                                .strong()
-                                                                .size(13.5),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for preset in SuiteTheme::dark_presets() {
-                                                                let selected = self.theme.name == preset.name;
-
-                                                                let button = egui::Button::new(
-                                                                    egui::RichText::new(format!("{}  {}", preset.symbol(), preset.name))
-                                                                        .color(rgb(preset.accent))
-                                                                        .strong(),
-                                                                )
-                                                                .fill(rgb(preset.bg_widget))
-                                                                .stroke(egui::Stroke::new(
-                                                                    1.0,
-                                                                    if selected {
-                                                                        rgb(preset.accent)
-                                                                    } else {
-                                                                        rgb(preset.border)
-                                                                    },
-                                                                ))
-                                                                .corner_radius(egui::CornerRadius::same(8))
-                                                                .min_size(egui::vec2(142.0, 36.0));
-
-                                                                if ui.add(button).clicked() && !selected {
-                                                                    self.theme = preset;
-                                                                    self.theme.apply(ui.ctx());
-                                                                    let _ = self
-                                                                        .theme
-                                                                        .save_to_file(&SuiteTheme::default_config_path());
-                                                                }
+                                                        settings_section(ui, "Interface density", "Spacing, text and bar sizes across the whole app.", |ui| {
+                                                            let mut density = self.app_state.settings.ui_density;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut density,
+                                                                &[
+                                                                    (state::UiDensity::Standard, "Standard"),
+                                                                    (state::UiDensity::Compact, "Compact"),
+                                                                    (state::UiDensity::Ultra, "Ultra-compact"),
+                                                                ],
+                                                                110.0,
+                                                            ) {
+                                                                self.app_state.settings.ui_density = density;
+                                                                settings_dirty = true;
                                                             }
                                                         });
 
-                                                        ui.add_space(10.0);
-
-                                                        // ───────────── LIGHT THEMES · 6 ─────────────
-                                                        ui.label(
-                                                            egui::RichText::new("  Light Themes")
-                                                                .strong()
-                                                                .size(13.5),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            for preset in SuiteTheme::light_presets() {
-                                                                let selected = self.theme.name == preset.name;
-
-                                                                let button = egui::Button::new(
-                                                                    egui::RichText::new(format!("{}  {}", preset.symbol(), preset.name))
-                                                                        .color(rgb(preset.accent))
-                                                                        .strong(),
-                                                                )
-                                                                .fill(rgb(preset.bg_widget))
-                                                                .stroke(egui::Stroke::new(
-                                                                    1.0,
-                                                                    if selected {
-                                                                        rgb(preset.accent)
-                                                                    } else {
-                                                                        rgb(preset.border)
-                                                                    },
-                                                                ))
-                                                                .corner_radius(egui::CornerRadius::same(8))
-                                                                .min_size(egui::vec2(142.0, 36.0));
-
-                                                                if ui.add(button).clicked() && !selected {
-                                                                    self.theme = preset;
-                                                                    self.theme.apply(ui.ctx());
-                                                                    let _ = self
-                                                                        .theme
-                                                                        .save_to_file(&SuiteTheme::default_config_path());
-                                                                }
+                                                        settings_section(ui, "Topbar", "Where the topbar sits and when it shows.", |ui| {
+                                                            let mut position = self.app_state.settings.topbar_position;
+                                                            if settings_choice(
+                                                                ui,
+                                                                &mut position,
+                                                                &[
+                                                                    (state::TopbarPosition::Top, "Top"),
+                                                                    (state::TopbarPosition::Bottom, "Bottom"),
+                                                                ],
+                                                                110.0,
+                                                            ) {
+                                                                self.app_state.settings.topbar_position = position;
+                                                                self.topbar_hold_until = 0.0;
+                                                                self.topbar_overlay_h = 0.0;
+                                                                settings_dirty = true;
                                                             }
-                                                        });
-
-                                                        ui.add_space(16.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-
-                                                        // --- Color picker dettagliati & corner radius ---
-                                                        ui.label(
-                                                            egui::RichText::new("Advanced Manual Palette Tweaks")
-                                                                .size(13.5)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        let mut theme_changed = false;
-                                                        egui::Grid::new("theme_colors_grid_manual")
-                                                            .num_columns(4)
-                                                            .spacing([18.0, 8.0])
-                                                            .show(ui, |ui| {
-                                                                ui.label("Canvas BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_canvas).changed();
-                                                                ui.label("Panel BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_panel).changed();
-                                                                ui.end_row();
-
-                                                                ui.label("Elevated BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_elevated).changed();
-                                                                ui.label("Widget BG:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.bg_widget).changed();
-                                                                ui.end_row();
-
-                                                                ui.label("Accent Color:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.accent).changed();
-                                                                ui.label("Border Color:");
-                                                                theme_changed |= ui.color_edit_button_srgb(&mut self.theme.border).changed();
-                                                                ui.end_row();
-                                                            });
-
-                                                        ui.add_space(8.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("UI Corner Radius:");
-                                                            if ui
-                                                                .add(
-                                                                    egui::Slider::new(&mut self.theme.corner_radius, 0..=14)
-                                                                        .suffix(" px"),
-                                                                )
-                                                                .changed()
-                                                            {
-                                                                theme_changed = true;
-                                                            }
-                                                        });
-
-                                                        if theme_changed {
-                                                            self.theme.apply(ui.ctx());
-                                                            let _ = self.theme.save();
-                                                        }
-
-                                                        ui.add_space(12.0);
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-
-                                                        // --- PDF dark mode & tipografia ---
-                                                        ui.label(
-                                                            egui::RichText::new("PDF Rendering & Notes Font")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(6.0);
-
-                                                        if ui
-                                                            .checkbox(
-                                                                &mut self.pdf_dark_mode,
-                                                                "PDF Dark Mode (invert slide background to deep slate)",
+                                                            ui.weak("Bottom puts the topbar on the bottom edge; its menus open upwards. The annotation toolbar has its own placement setting.");
+                                                            ui.add_space(6.0);
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.app_state.settings.topbar_auto_hide,
+                                                                "Auto-hide topbar",
+                                                                "Hover the window edge the topbar sits on to show it. The auto-hide shortcut can be changed in Keybindings.",
                                                             )
                                                             .changed()
-                                                        {
-                                                            self.page_cache.clear();
-                                                            self.thumb_cache.clear();
-                                                            ui.ctx().request_repaint();
-                                                        }
-
-                                                        ui.add_space(6.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Notes Font Size:");
-                                                            if ui
-                                                                .add(
-                                                                    egui::Slider::new(
-                                                                        &mut self.app_state.settings.note_font_size,
-                                                                        11.0..=24.0,
-                                                                    )
-                                                                    .suffix(" pt"),
-                                                                )
-                                                                .changed()
                                                             {
                                                                 settings_dirty = true;
                                                             }
                                                         });
 
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
+                                                        settings_section(ui, "PDF & notes text", "How pages are drawn and the font used for notes.", |ui| {
+                                                            if settings_toggle(
+                                                                ui,
+                                                                &mut self.pdf_dark_mode,
+                                                                "PDF Dark Mode",
+                                                                "Inverts the slide background to a deep slate for reading at night.",
+                                                            )
+                                                            .changed()
+                                                            {
+                                                                self.page_cache.clear();
+                                                                self.thumb_cache.clear();
+                                                                ui.ctx().request_repaint();
+                                                            }
 
-                                                        ui.label(
-                                                            egui::RichText::new("Custom Notes Font")
-                                                                .size(14.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
+                                                            settings_subheading(ui, "Notes font size");
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Size:");
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Slider::new(
+                                                                            &mut self.app_state.settings.note_font_size,
+                                                                            11.0..=24.0,
+                                                                        )
+                                                                        .suffix(" pt"),
+                                                                    )
+                                                                    .changed()
+                                                                {
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
 
-                                                        let font_label = self
-                                                            .app_state
-                                                            .settings
-                                                            .custom_font_path
-                                                            .as_ref()
-                                                            .and_then(|p| p.file_name())
-                                                            .and_then(|s| s.to_str())
-                                                            .unwrap_or("Default font");
-
-                                                        ui.weak(format!("Active font: {}", font_label));
-                                                        ui.add_space(6.0);
-
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰛖  Load Font (.ttf/.otf)...").clicked()
-                                                                && let Some(path) = rfd::FileDialog::new()
-                                                                    .add_filter("Font Files", &["ttf", "otf"])
-                                                                    .pick_file()
+                                                            settings_subheading(ui, "Custom notes font");
+                                                            let font_label = self
+                                                                .app_state
+                                                                .settings
+                                                                .custom_font_path
+                                                                .as_ref()
+                                                                .and_then(|p| p.file_name())
+                                                                .and_then(|s| s.to_str())
+                                                                .unwrap_or("Default font");
+                                                            ui.weak(format!("Active font: {}", font_label));
+                                                            ui.add_space(4.0);
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰛖  Load Font (.ttf/.otf)...").clicked()
+                                                                    && let Some(path) = rfd::FileDialog::new()
+                                                                        .add_filter("Font Files", &["ttf", "otf"])
+                                                                        .pick_file()
                                                                 {
                                                                     self.app_state.settings.custom_font_path = Some(path);
                                                                     self.apply_custom_font(ui.ctx());
                                                                     settings_dirty = true;
                                                                 }
 
-                                                            if self.app_state.settings.custom_font_path.is_some()
-                                                                && ui.button("Reset Font").clicked()
-                                                            {
-                                                                self.app_state.settings.custom_font_path = None;
-                                                                self.apply_custom_font(ui.ctx());
-                                                                settings_dirty = true;
-                                                            }
+                                                                if self.app_state.settings.custom_font_path.is_some()
+                                                                    && ui.button("Reset Font").clicked()
+                                                                {
+                                                                    self.app_state.settings.custom_font_path = None;
+                                                                    self.apply_custom_font(ui.ctx());
+                                                                    settings_dirty = true;
+                                                                }
+                                                            });
                                                         });
-
                                                     }
+
                                                     // ───────────── KEYBINDINGS ─────────────
                                                     
                                                     SettingsTab::Shortcuts => {
-                                                        ui.label(egui::RichText::new("Keyboard Shortcuts").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Click a shortcut, then press the new combination. Hold a key and press another for multi-key combos (e.g. G + H). Esc cancels.");
-                                                        ui.add_space(8.0);
+                                                        settings_page_header(ui, "Keybindings", "Uncheck a shortcut to disable it without losing its binding. Click a key to rebind, or press two keys in sequence for a chord. Esc cancels.");
                                                     
                                                         // Defaults and snapshots for reset and conflict detection.
                                                         let mut defaults_cfg = ShortcutsConfig::default();
@@ -5761,142 +6760,183 @@ impl Lapis {
                                                             .collect();
                                                     
                                                         let cfg = &mut self.app_state.shortcuts;
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            for (label, enabled) in [("Enable all", true), ("Disable all", false)] {
+                                                                if ui.button(label).clicked() {
+                                                                    for (_, binding) in shortcut_entries(cfg) {
+                                                                        binding.enabled = enabled;
+                                                                    }
+                                                                    self.rebinding_action = None;
+                                                                    settings_dirty = true;
+                                                                }
+                                                            }
+                                                        });
+                                                        ui.add_space(6.0);
                                                         let snapshot: Vec<(&'static str, ShortcutBinding)> = shortcut_entries(cfg)
                                                             .into_iter()
                                                             .map(|(l, b)| (l, b.clone()))
                                                             .collect();
-                                                    
-                                                        for (label, binding) in shortcut_entries(cfg) {
-                                                            if self.rebinding_action.as_deref() == Some(label)
-                                                                && let Some(cap) = capture_shortcut(ui) {
-                                                                    if let Capture::Set(nb) = cap {
-                                                                        *binding = nb;
-                                                                        settings_dirty = true;
-                                                                    }
-                                                                    self.rebinding_action = None;
-                                                                }
-                                                    
-                                                            let is_rebinding = self.rebinding_action.as_deref() == Some(label);
-                                                            let default = defaults.iter().find(|(l, _)| *l == label).map(|(_, b)| b.clone());
-                                                    
-                                                            let conflict = snapshot
-                                                                .iter()
-                                                                .find(|(l, b)| *l != label && *b == *binding)
-                                                                .map(|(l, _)| *l);
-                                                    
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(label);
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    // Reset (rightmost)
-                                                                    if let Some(def) = &default
-                                                                        && *binding != *def
-                                                                            && ui.small_button("󰑐").on_hover_text("Reset to default").clicked()
-                                                                        {
-                                                                            *binding = def.clone();
-                                                                            settings_dirty = true;
-                                                                            if is_rebinding {
-                                                                                self.rebinding_action = None;
+
+                                                        for (group, description, labels) in [
+                                                            ("Document & navigation", "Save, search and move between pages.", &[
+                                                                "Save notes", "Search in notes", "Previous slide (global)", "Next slide (global)"
+                                                            ][..]),
+                                                            ("View & zoom", "Change PDF view, zoom and appearance.", &[
+                                                                "View: Single page", "View: Continuous", "View: Book spread", "View: Slideshow", "View: Slideshow + Notes", "Toggle Continuous / Single page", "Toggle fullscreen", "Fit Page", "Fit Width", "Fit PDF and notes layout", "PDF night mode"
+                                                            ][..]),
+                                                            ("Workspace", "Show or switch panels and toolbars.", &[
+                                                                "Toggle notes panel", "Toggle edit / preview", "Toggle outline", "Toggle Sketch tab (notes panel)", "Toggle topbar auto-hide", "Toggle annotation toolbar", "Radial tools menu"
+                                                            ][..]),
+                                                            ("Annotation tools", "Choose tools without opening a toolbar.", &[
+                                                                "Cursor / Select PDF Text", "Pen", "Highlighter", "Textbox", "Underline", "Eraser", "Rectangle", "Circle", "Line", "Arrow", "Snip", "Occlusion tape", "Trackpad draw (hold)"
+                                                            ][..]),
+                                                        ] {
+                                                            settings_section(ui, group, description, |ui| {
+                                                                for (label, binding) in shortcut_entries(cfg) {
+                                                                    if !labels.contains(&label) { continue; }
+                                                                    if self.rebinding_action.as_deref() == Some(label)
+                                                                        && let Some(cap) = capture_shortcut(ui) {
+                                                                            if let Capture::Set(nb) = cap {
+                                                                                let enabled = binding.enabled;
+                                                                                *binding = nb;
+                                                                                binding.enabled = enabled;
+                                                                                settings_dirty = true;
                                                                             }
+                                                                            self.rebinding_action = None;
                                                                         }
-                                                    
+
+                                                                    let is_rebinding = self.rebinding_action.as_deref() == Some(label);
+                                                                    let default = defaults.iter().find(|(l, _)| *l == label).map(|(_, b)| b.clone());
+
+                                                                    let conflict = snapshot
+                                                                        .iter()
+                                                                        .find(|(l, b)| *l != label && binding.enabled && b.enabled && b.conflicts_with(binding))
+                                                                        .map(|(l, _)| *l);
+
                                                                     let text = if is_rebinding {
                                                                         "󰌌  Press keys…  (Esc to cancel)".to_string()
                                                                     } else {
                                                                         binding.format_label()
                                                                     };
-                                                                    let btn = egui::Button::new(egui::RichText::new(text).monospace())
-                                                                        .selected(is_rebinding)
-                                                                        .min_size(egui::vec2(170.0, 24.0));
-                                                    
-                                                                    if ui.add(btn).clicked() {
-                                                                        ui.data_mut(|d| d.remove::<PendingChord>(ui.make_persistent_id(PENDING_ID)));
-                                                                        self.rebinding_action = if is_rebinding {
-                                                                            None
-                                                                        } else {
-                                                                            Some(label.to_string())
-                                                                        };
+                                                                    let label_w = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                    let key_w = ui.painter().layout_no_wrap(text.clone(), egui::TextStyle::Monospace.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                    let control_w = (key_w + 70.0).max(220.0);
+                                                                    let inline = ui.available_width() >= label_w + control_w + 48.0;
+                                                                    let mut row = |ui: &mut egui::Ui| {
+                                                                        if ui.checkbox(&mut binding.enabled, label).on_hover_text("Enable this shortcut").changed() {
+                                                                            settings_dirty = true;
+                                                                            if !binding.enabled && is_rebinding {
+                                                                                self.rebinding_action = None;
+                                                                            }
+                                                                        }
+                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                            if let Some(def) = &default {
+                                                                                if ui.add_enabled(*binding != *def, egui::Button::new("󰑐").small())
+                                                                                    .on_hover_text("Reset to default and enable").clicked()
+                                                                                {
+                                                                                    *binding = def.clone();
+                                                                                    settings_dirty = true;
+                                                                                    self.rebinding_action = None;
+                                                                                }
+                                                                            }
+                                                                            let btn = crate::theme::selected_button(
+                                                                                egui::RichText::new(&text).monospace(),
+                                                                                is_rebinding,
+                                                                                ui.visuals(),
+                                                                            )
+                                                                                .min_size(egui::vec2((control_w - 32.0).min(ui.available_width()).max(0.0), 24.0))
+                                                                                .wrap();
+                                                                            if ui.add(btn).clicked() {
+                                                                                ui.data_mut(|d| d.remove::<PendingChord>(egui::Id::unique(PENDING_ID)));
+                                                                                self.rebinding_action = if is_rebinding {
+                                                                                    None
+                                                                                } else {
+                                                                                    Some(label.to_string())
+                                                                                };
+                                                                            }
+                                                                        });
+                                                                    };
+                                                                    if inline {
+                                                                        ui.horizontal(&mut row);
+                                                                    } else {
+                                                                        ui.vertical(&mut row);
                                                                     }
-                                                                });
+
+                                                                    if let Some(other) = conflict {
+                                                                        ui.label(
+                                                                            egui::RichText::new(format!("⚠ Conflicts with “{}”", other))
+                                                                                .size(11.5)
+                                                                                .color(egui::Color32::from_rgb(251, 191, 36)),
+                                                                        );
+                                                                    }
+                                                                    ui.separator();
+                                                                }
                                                             });
-                                                    
-                                                            if let Some(other) = conflict {
-                                                                ui.label(
-                                                                    egui::RichText::new(format!("⚠ Same combination as “{}”", other))
-                                                                        .size(11.5)
-                                                                        .color(egui::Color32::from_rgb(251, 191, 36)),
-                                                                );
-                                                            }
-                                                            ui.separator();
                                                         }
-                                                    
+
                                                         ui.add_space(8.0);
                                                         if ui.button("󰑐  Reset All Shortcuts to Default").clicked() {
                                                             *cfg = ShortcutsConfig::default();
                                                             self.rebinding_action = None;
                                                             settings_dirty = true;
                                                         }
-                                                    
+
                                                         ui.add_space(12.0);
-                                                        ui.label(egui::RichText::new("Fixed shortcuts").size(13.5).strong());
-                                                        ui.add_space(4.0);
-                                                        for (name, keys) in [
-                                                            ("Command Palette", "Ctrl + P / Ctrl + K"),
-                                                            ("Global Search", "Ctrl + F"),
-                                                            ("Undo / Redo Annotation", "Ctrl + Z / Ctrl + Y"),
-                                                        ] {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(name);
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    ui.code(keys);
-                                                                });
-                                                            });
-                                                        }
+                                                        settings_section(ui, "Fixed shortcuts", "Built-in controls, independent of the configurable bindings above.", |ui| {
+                                                            for (name, keys) in [
+                                                                ("Command Palette", "Ctrl + P / Ctrl + K"),
+                                                                ("Undo annotations", "Ctrl + Z"),
+                                                                ("Redo annotations", "Ctrl + Y / Ctrl + Shift + Z"),
+                                                                ("Previous / next page", "Left / Right, K / J, PageUp / PageDown"),
+                                                                ("Zoom in / out / reset", "Ctrl + Plus / Minus / 0"),
+                                                                ("Exit slideshow", "Esc"),
+                                                            ] {
+                                                                let name_w = ui.painter().layout_no_wrap(name.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                let keys_w = ui.painter().layout_no_wrap(keys.to_string(), egui::TextStyle::Monospace.resolve(ui.style()), ui.visuals().text_color()).size().x;
+                                                                if ui.available_width() >= name_w + keys_w + 24.0 {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(name);
+                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                            ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                        });
+                                                                    });
+                                                                } else {
+                                                                    ui.label(name);
+                                                                    ui.label(egui::RichText::new(keys).monospace().weak());
+                                                                }
+                                                                ui.add_space(3.0);
+                                                            }
+                                                        });
                                                     }
 
 
-                                                    // ───────────── SYSTEM & EXPORT ─────────────
+                                                    // ───────────── EXPORT & PDF ─────────────
                                                     SettingsTab::SystemAndData => {
-                                                                                                                ui.label(egui::RichText::new("System Integration & Document Management").size(15.0).strong());
-                                                        ui.add_space(8.0);
-                                                        ui.label(egui::RichText::new("Current PDF Actions").size(15.0).strong());
-                                                        ui.add_space(6.0);
+                                                        settings_page_header(ui, "Export & PDF", "Save the current document and control how exported PDFs look.");
 
-                                                        ui.horizontal_wrapped(|ui| {
-                                                            if ui.button("󰇚  Download Original PDF").clicked() {
-                                                                self.prompt_download_original_pdf(ui.ctx());
-                                                            }
-                                                            let export_label = if self.is_exporting {
-                                                                "󱑚  Exporting...".to_string()
-                                                            } else {
-                                                                format!(
-                                                                    "󰚥  Export PDF ({})",
-                                                                    self.app_state.export_settings.content.short_label()
-                                                                )
-                                                            };
-                                                            if ui.button(export_label).clicked()
-                                                                && !self.is_exporting {
+                                                        settings_section(ui, "Current document", "Save the open PDF.", |ui| {
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("󰇚  Download Original PDF").clicked() {
+                                                                    self.prompt_download_original_pdf(ui.ctx());
+                                                                }
+                                                                let export_label = if self.is_exporting {
+                                                                    "󱑚  Exporting...".to_string()
+                                                                } else {
+                                                                    format!(
+                                                                        "󰚥  Export PDF ({})",
+                                                                        self.app_state.export_settings.content.short_label()
+                                                                    )
+                                                                };
+                                                                if ui.button(export_label).clicked() && !self.is_exporting {
                                                                     self.start_export(ui.ctx());
                                                                 }
+                                                            });
+                                                            ui.add_space(4.0);
+                                                            ui.weak("Download Original PDF saves the file as it was before Lapis. Export PDF builds a new PDF with the options below.");
                                                         });
 
-                                                    ui.add_space(12.0);
-                                                    ui.separator();
-                                                    ui.add_space(8.0);
-                                                        ui.label(
-                                                            egui::RichText::new("PDF Export")
-                                                                .size(15.0)
-                                                                .strong(),
-                                                        );
-                                                        ui.add_space(4.0);
-
-                                                        ui.weak(
-                                                            "Customize note typography and slide proportions in exported PDFs.",
-                                                        );
-                                                        ui.add_space(8.0);
-
                                                         let mut export_changed = false;
-
-                                                        {
+                                                        settings_section(ui, "PDF export options", "Customize note typography and slide proportions in exported PDFs.", |ui| {
                                                             let cfg = &mut self.app_state.export_settings;
 
                                                             egui::Grid::new("export_settings_grid")
@@ -5925,8 +6965,7 @@ impl Lapis {
                                                                         let current = cfg.content;
 
                                                                         for content in crate::state::ExportContent::ALL {
-                                                                            let btn = egui::Button::new(content.label())
-                                                                                .selected(current == content);
+                                                                            let btn = crate::theme::selected_button(content.label(), current == content, ui.visuals());
 
                                                                             if ui
                                                                                 .add_sized([220.0, 28.0], btn)
@@ -5960,10 +6999,7 @@ impl Lapis {
 
                                                             ui.add_space(8.0);
 
-                                                            if ui
-                                                                .button("󰑐  Restore Export Defaults")
-                                                                .clicked()
-                                                            {
+                                                            if ui.button("󰑐  Restore Export Defaults").clicked() {
                                                                 *cfg = state::ExportSettings::default();
                                                                 export_changed = true;
                                                             }
@@ -5971,13 +7007,11 @@ impl Lapis {
                                                             if export_changed {
                                                                 cfg.clamp_valid();
                                                             }
-                                                        }
-
+                                                        });
                                                         if export_changed {
                                                             settings_dirty = true;
                                                         }
-
-                                                    }     
+                                                    }
                                                     SettingsTab::Storage => {
                                                         let cache_id = ui.make_persistent_id("storage_scan_cache");
                                                         let stretch_id = ui.make_persistent_id("storage_stretch_size");
@@ -6009,35 +7043,9 @@ impl Lapis {
                                                             None
                                                         };
                                                     
-                                                        ui.label(egui::RichText::new("Stored Data & Cleanup").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Notes, audio and original-PDF copies per document, largest first.");
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.label(egui::RichText::new("PDF revision history").strong());
-                                                        ui.weak("Rebuild the current PDF to remove historical Lapis incremental updates. Keeps a copy of the original alongside the PDF. Signed and encrypted PDFs are not supported.");
-                                                        if ui.add_enabled(self.has_pdf(), egui::Button::new("󰐻  Compact Lapis PDF history..."))
-                                                            .on_hover_text("Compact the current PDF (may rewrite external PDF revision history)")
-                                                            .clicked()
-                                                        {
-                                                            self.finish_sketch_edit();
-                                                            self.sync_and_save();
-                                                            self.save_session_state();
-                                                            let result = notes::compact_doc_data(
-                                                                &self.pdf_path, &self.notes, &self.annotations,
-                                                                self.blank_pages.clone(), &self.sketches,
-                                                            );
-                                                            self.toast_message = Some((
-                                                                match result {
-                                                                    Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
-                                                                    Err(err) => format!("PDF compaction failed: {err}"),
-                                                                },
-                                                                std::time::Instant::now(),
-                                                            ));
-                                                        }
-                                                        ui.separator();
-                                                        ui.add_space(8.0);
-                                                    
+                                                        settings_page_header(ui, "Storage & Data", "What Lapis keeps on disk, and how to clean it up.");
+
+                                                        settings_section(ui, "Stored documents", "Notes, audio and original-PDF copies per document, largest first.", |ui| {
                                                         let total: u64 = entries.iter().map(|e| e.total()).sum();
                                                         let audio_total: u64 = entries.iter().map(|e| e.audio_size).sum();
                                                         let orphan_count = entries
@@ -6267,18 +7275,38 @@ impl Lapis {
                                                             ui.add_space(6.0);
                                                         }
                                                     
-                                                        // ───────── Cache temporanea ─────────
-                                                        ui.add_space(6.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("Temporary Cache").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak(format!(
-                                                            "Time-stretched audio for playback speeds other than 1x: {}. Re-created on demand.",
-                                                            human_size(stretch_size)
-                                                        ));
-                                                        ui.add_space(4.0);
-                                                        ui.horizontal_wrapped(|ui| {
+                                                        });
+
+                                                        settings_section(ui, "PDF revision history", "Rebuild the current PDF to remove historical Lapis incremental updates. Keeps a copy of the original alongside the PDF. Signed and encrypted PDFs are not supported.", |ui| {
+                                                        if ui.add_enabled(self.has_pdf() && self.pdf_save_job.is_none() && self.queued_pdf_save.is_none() && self.pdf_save_failure.is_none(), egui::Button::new("󰐻  Compact Lapis PDF history..."))
+                                                            .on_hover_text("Compact the current PDF (may rewrite external PDF revision history)")
+                                                            .clicked()
+                                                        {
+                                                            self.finish_sketch_edit();
+                                                            self.sync_and_save();
+                                                            self.save_session_state();
+                                                            let result = notes::compact_doc_data(
+                                                                &self.pdf_path, &self.notes, &self.annotations,
+                                                                self.blank_pages.clone(), &self.sketches,
+                                                            );
+                                                            self.toast_message = Some((
+                                                                match result {
+                                                                    Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
+                                                                    Err(err) if notes::is_external_modification(&err) => {
+                                                                        match self.merge_external_into_model() {
+                                                                            Ok(()) => "PDF changed outside Lapis; its annotations were merged. Compact again to continue".to_string(),
+                                                                            Err(err) => format!("PDF compaction failed: {err}"),
+                                                                        }
+                                                                    }
+                                                                    Err(err) => format!("PDF compaction failed: {err}"),
+                                                                },
+                                                                std::time::Instant::now(),
+                                                            ));
+                                                        }
+                                                        });
+
+                                                        settings_section(ui, "Temporary cache", &format!("Time-stretched audio for playback speeds other than 1x: {}. Re-created on demand.", human_size(stretch_size)), |ui| {
+ui.horizontal_wrapped(|ui| {
                                                             if danger_button(
                                                                 ui,
                                                                 &mut confirm,
@@ -6290,15 +7318,10 @@ impl Lapis {
                                                                 action = Some(StorageAction::ClearStretchCache);
                                                             }
                                                         });
-                                                    
-                                                        // ───────── App state ─────────
-                                                        ui.add_space(6.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("App State").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                    
-                                                        let state_path = crate::state::AppState::config_path();
+                                                        });
+
+                                                        settings_section(ui, "App state", "", |ui| {
+let state_path = crate::state::AppState::config_path();
                                                         let state_size = std::fs::metadata(&state_path).map(|m| m.len()).unwrap_or(0);
                                                         ui.add(
                                                             egui::Label::new(
@@ -6339,7 +7362,8 @@ impl Lapis {
                                                             "Audio folder: {}",
                                                             audio::AudioDocIndex::media_root().display()
                                                         ));
-                                                    
+                                                        });
+
                                                         // ───────── Esecuzione azione ─────────
                                                         if let Some(act) = action {
                                                             let report = |what: &str, name: &str, r: std::io::Result<()>| -> String {
@@ -6427,6 +7451,40 @@ impl Lapis {
                                                     
                                                         ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
                                                     }
+                                                    SettingsTab::Credits => {
+                                                        settings_page_header(ui, "Credits", "About Lapis, project links and acknowledgements.");
+                                                        settings_section(ui, "Lapis", "Advanced PDF Study & Lecture Workspace", |ui| {
+                                                            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                                                            ui.label(format!("License: {}", env!("CARGO_PKG_LICENSE")));
+                                                            ui.weak("Copyright © 2026 Enrico Di Maria");
+                                                        });
+                                                        settings_section(ui, "Project links", "", |ui| {
+                                                            ui.hyperlink_to("Source code on GitHub", "https://github.com/EnricoDiMaria/lapis");
+                                                            ui.hyperlink_to("Releases", "https://github.com/EnricoDiMaria/lapis/releases");
+                                                            ui.hyperlink_to("Report an issue", "https://github.com/EnricoDiMaria/lapis/issues");
+                                                            ui.hyperlink_to("User Guide", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/docs/USER_GUIDE.md");
+                                                            ui.hyperlink_to("Full license text", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/LICENSE");
+                                                        });
+                                                        settings_section(ui, "Built with", "Selected open-source technologies used by Lapis.", |ui| {
+                                                            for (name, url, description) in [
+                                                                ("Rust", "https://www.rust-lang.org/", "Programming language"),
+                                                                ("egui / eframe", "https://github.com/emilk/egui", "Application interface"),
+                                                                ("MuPDF", "https://mupdf.com/", "PDF rendering"),
+                                                                ("lopdf", "https://crates.io/crates/lopdf", "PDF editing"),
+                                                                ("egui_commonmark", "https://crates.io/crates/egui_commonmark", "Markdown preview"),
+                                                                ("CPAL / Rodio", "https://github.com/RustAudio", "Audio capture and playback"),
+                                                                ("parakeet-rs", "https://crates.io/crates/parakeet-rs", "Offline transcription"),
+                                                                ("spellbook", "https://crates.io/crates/spellbook", "Spellchecking"),
+                                                            ] {
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    ui.hyperlink_to(name, url);
+                                                                    ui.weak(description);
+                                                                });
+                                                            }
+                                                            ui.hyperlink_to("Full dependency manifest", "https://github.com/EnricoDiMaria/lapis/blob/HEAD/Cargo.toml");
+                                                            ui.weak("Third-party components retain their respective licenses.");
+                                                        });
+                                                    }
                                                     SettingsTab::Dictionaries => {
                                                         let confirm_id = ui.make_persistent_id("dict_confirm");
                                                         let words_cache_id = ui.make_persistent_id("dict_user_words_cache");
@@ -6435,15 +7493,14 @@ impl Lapis {
                                                             .data(|d| d.get_temp::<String>(confirm_id))
                                                             .unwrap_or_default();
                                                     
-                                                        ui.label(egui::RichText::new("Spellcheck Dictionaries").size(15.0).strong());
-                                                        ui.add_space(4.0);
-                                                        ui.weak("Enable any combination of installed Hunspell language pairs. Disabling a language keeps its files.");
-                                                        ui.add_space(8.0);
-                                                    
-                                                        if ui
-                                                            .checkbox(
+                                                        settings_page_header(ui, "Dictionaries", "Enable any combination of installed Hunspell language pairs. Disabling a language keeps its files.");
+
+                                                        settings_section(ui, "Spellcheck", "", |ui| {
+                                                        if settings_toggle(
+                                                                ui,
                                                                 &mut self.app_state.settings.spellcheck_enabled,
                                                                 "Enable offline spellcheck in Markdown notes",
+                                                                "Underlines unknown words in the notes editor; right-click one for suggestions.",
                                                             )
                                                             .changed()
                                                         {
@@ -6457,15 +7514,9 @@ impl Lapis {
                                                             self.spellchecker.loaded_languages.len(),
                                                             self.spellchecker.loaded_languages.join(", ")
                                                         ));
-                                                    
-                                                        ui.add_space(8.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                    
-                                                        // ───────── Dizionari ─────────
-                                                        ui.label(egui::RichText::new("Installed dictionaries").size(14.0).strong());
-                                                        ui.add_space(4.0);
-                                                    
+                                                        });
+
+                                                        settings_section(ui, "Installed dictionaries", "Languages used to check and suggest words in your notes.", |ui| {
                                                         egui::Frame::NONE
                                                             .fill(egui::Color32::from_black_alpha(35))
                                                             .corner_radius(egui::CornerRadius::same(6))
@@ -6597,15 +7648,9 @@ impl Lapis {
                                                             ));
                                                         }
                                                     
-                                                        // ───────── Parole personali ─────────
-                                                        ui.add_space(10.0);
-                                                        ui.separator();
-                                                        ui.add_space(6.0);
-                                                        ui.label(egui::RichText::new("Custom words").size(14.0).strong());
-                                                        ui.add_space(2.0);
-                                                        ui.weak("Words you added with “Add to dictionary” in the notes editor.");
-                                                        ui.add_space(4.0);
-                                                    
+                                                        });
+
+                                                        settings_section(ui, "Custom words", "Words you added with “Add to dictionary” in the notes editor.", |ui| {
                                                         let user_words: Vec<String> = match ui.data(|d| d.get_temp::<Vec<String>>(words_cache_id)) {
                                                             Some(v) => v,
                                                             None => {
@@ -6680,6 +7725,8 @@ impl Lapis {
                                                             });
                                                         }
                                                     
+                                                        });
+
                                                         ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
                                                     }
 
@@ -6693,8 +7740,10 @@ impl Lapis {
                                 });
                         });
                     }); // End modal vertical layout.
-                });
             });
+        if !rebinding_at_start && self.rebinding_action.is_none() && response.should_close() {
+            self.show_settings = false;
+        }
     }
 
     fn open_search(&mut self) {
@@ -6928,8 +7977,14 @@ impl Lapis {
         // Rows visible before the list scrolls. The half row shows that there is more below.
         const LIST_ROWS: f32 = 3.5;
 
+        let (search_align, search_offset) =
+            if self.app_state.settings.topbar_position == state::TopbarPosition::Bottom {
+                (egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -46.0))
+            } else {
+                (egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
+            };
         egui::Area::new(ui.make_persistent_id("global_search_popover"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 46.0))
+            .anchor(search_align, search_offset)
             .order(egui::Order::Foreground)
             .constrain(true)
             .show(&ctx, |ui| {
@@ -7196,7 +8251,7 @@ impl Lapis {
             ("mode_single", "󰈙  Switch to Single Page Mode", "View"),
             (
                 "mode_toggle_cont_single",
-                "󰍜  Toggle Continuous / Single Page [C]",
+                "󰍜  Toggle Continuous / Single Page",
                 "View",
             ),
             (
@@ -7204,12 +8259,16 @@ impl Lapis {
                 "󰐨  Enter Presentation / Slideshow Mode",
                 "View",
             ),
-            ("toggle_fullscreen", "󰊓  Toggle Fullscreen [F11]", "View"),
+            ("toggle_fullscreen", "󰊓  Toggle Fullscreen", "View"),
             (
                 "toggle_sketch",
-                "󰠱  Toggle Sketch (page scratchpad) [Alt+S]",
+                "󰠱  Toggle Sketch (page scratchpad)",
                 "View",
             ),
+            ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide", "View"),
+            ("fit_page", "󰊓  Fit PDF and Notes Layout", "View"),
+            ("fit_pdf_page", "󰊓  Fit Page", "View"),
+            ("toggle_topbar_position", "󰁝  Move Topbar to Bottom / Top", "View"),
             ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
             (
                 "insert_blank",
@@ -7282,7 +8341,29 @@ impl Lapis {
                 || q.split_whitespace()
                     .all(|tok| label.to_lowercase().contains(tok))
             {
-                filtered.push((id, label.to_string(), cat));
+                let sc = &self.app_state.shortcuts;
+                let binding = match id {
+                    "mode_continuous" => Some(&sc.view_continuous),
+                    "mode_single" => Some(&sc.view_single),
+                    "mode_book" => Some(&sc.view_twopage),
+                    "mode_toggle_cont_single" => Some(&sc.toggle_continuous_single),
+                    "mode_slideshow" => Some(&sc.view_slideshow),
+                    "toggle_fullscreen" => Some(&sc.toggle_fullscreen),
+                    "toggle_sketch" => Some(&sc.toggle_sketch),
+                    "toggle_topbar" => Some(&sc.toggle_topbar),
+                    "fit_page" => Some(&sc.fit_page),
+                    "fit_pdf_page" => Some(&sc.fit_pdf_page),
+                    "toggle_dark" => Some(&sc.toggle_night),
+                    "global_search" => Some(&sc.search_notes),
+                    "tool_cursor" => Some(&sc.select_cursor),
+                    "tool_pen" => Some(&sc.select_pen),
+                    "tool_highlight" => Some(&sc.select_highlighter),
+                    "tool_tape" => Some(&sc.select_tape),
+                    "tool_snip" => Some(&sc.select_snip),
+                    "tool_eraser" => Some(&sc.select_eraser),
+                    _ => None,
+                };
+                filtered.push((id, binding.map_or_else(|| label.to_owned(), |b| b.hint(label)), cat));
             }
         }
 
@@ -7345,10 +8426,7 @@ impl Lapis {
                                     for (idx, (id, label, cat)) in filtered.iter().enumerate() {
                                         let is_sel = idx == self.command_palette_selected;
                                         let row_resp = ui.horizontal(|ui| {
-                                            let btn = egui::Button::new(
-                                                egui::RichText::new(label).size(13.0),
-                                            )
-                                            .selected(is_sel)
+                                            let btn = crate::theme::selected_button(egui::RichText::new(label).size(13.0), is_sel, ui.visuals())
                                             .min_size(egui::vec2(ui.available_width() - 85.0, 28.0));
 
                                             let b_resp = ui.add(btn);
@@ -7405,22 +8483,28 @@ impl Lapis {
                     self.split_secondary_page = self.current_page;
                 }
             }
-            "mode_continuous" => self.view_mode = ViewMode::Continuous,
+            "mode_continuous" => self.set_view_mode(ViewMode::Continuous),
             "mode_book" => self.view_mode = ViewMode::TwoPage,
-            "mode_single" => self.view_mode = ViewMode::SinglePage,
+            "mode_single" => self.set_view_mode(ViewMode::SinglePage),
             "mode_toggle_cont_single" => {
                 if self.view_mode == ViewMode::Continuous {
-                    self.view_mode = ViewMode::SinglePage;
+                    self.set_view_mode(ViewMode::SinglePage);
                 } else if !matches!(
                     self.view_mode,
                     ViewMode::Slideshow | ViewMode::SlideshowWithNotes
                 ) {
-                    self.view_mode = ViewMode::Continuous;
-                    self.continuous_scroll_to_page = Some(self.current_page);
+                    self.set_view_mode(ViewMode::Continuous);
                 }
             }
             "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
             "toggle_sketch" => self.toggle_sketch_tab(),
+            "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
+            "fit_page" => self.request_fit_notes_layout(ctx),
+            "fit_pdf_page" => {
+                self.zoom_mode = ZoomMode::FitPage;
+                self.zoom_anchor = None;
+            }
+            "toggle_topbar_position" => self.toggle_topbar_position(),
             "toggle_fullscreen" => {
                 if !matches!(
                     self.view_mode,
@@ -7480,6 +8564,112 @@ impl Lapis {
         self.toast_message = Some((msg.into(), std::time::Instant::now()));
     }
 
+    /// Each worker owns a fresh channel and token, even when reopening the same PDF.
+    fn new_asr_job(&mut self) -> (Sender<audio::AsrJobResult>, Arc<std::sync::atomic::AtomicBool>) {
+        let tx = replace_asr_channel(&mut self.asr_rx, &mut self.asr_cancel);
+        (tx, self.asr_cancel.clone())
+    }
+
+    fn retire_asr_job(&mut self) {
+        drop(replace_asr_channel(&mut self.asr_rx, &mut self.asr_cancel));
+        self.is_transcribing = false;
+        self.asr_progress = None;
+    }
+
+    /// Finalize the recording and persist its index before releasing the document.
+    fn finish_audio_before_transition(&mut self) -> bool {
+        if !self.has_pdf() { return true; }
+        if self.audio_engine.is_recording() {
+            let dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
+            if let Err(err) = self.finish_active_recording(&dir) {
+                self.audio_toast(format!("Could not finish recording: {err}"));
+                return false;
+            }
+        }
+        if self.audio_index_pending || (self.is_transcribing && self.asr_progress.is_some()) {
+            if let Err(err) = self.audio_index.save_checked(&self.pdf_path) {
+                self.audio_toast(format!("Could not save audio index: {err}"));
+                return false;
+            }
+            self.audio_index_pending = false;
+        }
+        self.retire_asr_job();
+        self.audio_engine.shutdown_output();
+        self.memo_audio_engine.shutdown_output();
+        self.transcript_last_seg = None;
+        self.show_audio_trimmer = false;
+        self.trim_memo_target = None;
+        self.rename_memo_target = None;
+        self.show_align_panel = false;
+        self.dialogs = Dialogs::default(); // Results from old document dialogs are obsolete.
+        true
+    }
+
+    fn persist_audio_index(&mut self) -> Result<(), String> {
+        self.audio_index_pending = true;
+        self.audio_index.save_checked(&self.pdf_path)?;
+        self.audio_index_pending = false;
+        Ok(())
+    }
+
+    fn report_audio_index_result(&mut self, message: impl Into<String>) {
+        match self.persist_audio_index() {
+            Ok(()) => self.audio_toast(message),
+            Err(err) => self.audio_toast(format!("Audio index save failed: {err}")),
+        }
+    }
+
+    fn start_memo_recording(&mut self, media_dir: &Path, page: u32) {
+        let raw = audio::recording_path(media_dir, "memo_raw");
+        if let Err(err) = self.audio_engine.start_recording(raw, RecordingTarget::PageMemo(page)) {
+            self.audio_toast(format!("Mic error: {err}"));
+        }
+    }
+
+    fn finish_active_recording(&mut self, media_dir: &Path) -> Result<(), String> {
+        let target = self.audio_engine.rec_target.clone().ok_or("No active recording")?;
+        let prefix = match target {
+            RecordingTarget::Lecture => "lecture",
+            RecordingTarget::PageMemo(_) => "memo",
+        };
+        let final_wav = audio::recording_path(media_dir, prefix);
+        let (target, path, dur) = self.audio_engine.stop_recording(&final_wav)?;
+        let name = path.file_name().ok_or("Invalid recording filename")?.to_string_lossy().into_owned();
+        let raw_fallback = path != final_wav;
+        let mut replaced_lecture = None;
+        match target {
+            RecordingTarget::Lecture => {
+                replaced_lecture = self.audio_index.lecture_wav.replace(name);
+                self.audio_index.lecture_duration_ms = dur;
+                self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&path, 240);
+                self.audio_index.page_range = self.audio_index.timeline.iter().map(|t| t.1).min()
+                    .zip(self.audio_index.timeline.iter().map(|t| t.1).max());
+            }
+            RecordingTarget::PageMemo(page) => {
+                // The recording belongs to the page where the microphone was started.
+                let list = self.audio_index.page_memos.entry(page).or_default();
+                let id = (1..).map(|n| format!("Memo #{n}"))
+                    .find(|id| !list.iter().any(|m| &m.id == id)).unwrap();
+                list.push(audio::VoiceMemoEntry {
+                    id, filename: name, duration_ms: dur, transcript: None, title: None,
+                });
+            }
+        }
+        self.persist_audio_index()
+            .map_err(|err| format!("Recording kept at {}; audio index save failed: {err}", path.display()))?;
+        if let Some(old) = replaced_lecture
+            && !self.audio_index.other_lectures.iter().any(|l| l.wav.as_deref() == Some(old.as_str()))
+            && !self.audio_index.page_memos.values().flatten().any(|m| m.filename == old)
+        {
+            // Remove the replaced recording only after the new one and its index are safe.
+            let _ = remove_media_file(media_dir, &old);
+        }
+        self.preload_asr_model();
+        self.audio_toast(if raw_fallback { "Recording saved as raw WAV (conversion unavailable)" }
+            else { "Recording saved" });
+        Ok(())
+    }
+
     /// Loads the ASR model in the background so the first transcription starts right away.
     fn preload_asr_model(&self) {
         if let Some(model) = audio::find_asr_model() {
@@ -7488,31 +8678,15 @@ impl Lapis {
     }
 
     fn toggle_lecture_recording(&mut self, media_dir: &Path) {
+        if self.is_transcribing { return; }
         self.confirm_remove_lecture = false;
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
-            let name = self
-                .audio_index
-                .lecture_wav
-                .clone()
-                .unwrap_or_else(|| self.audio_index.fresh_wav_name());
-            let final_wav = media_dir.join(&name);
-            if let Some((_, dur)) = self.audio_engine.stop_recording(&final_wav) {
-                self.audio_index.lecture_wav = Some(name);
-                self.audio_index.lecture_duration_ms = dur;
-                self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&final_wav, 240);
-                self.audio_index.page_range = self
-                    .audio_index
-                    .timeline
-                    .iter()
-                    .map(|t| t.1)
-                    .min()
-                    .zip(self.audio_index.timeline.iter().map(|t| t.1).max());
-                self.audio_index.save(&self.pdf_path);
-                self.preload_asr_model();
-                self.audio_toast("󰄬 Lecture recording saved");
+            if let Err(err) = self.finish_active_recording(media_dir) {
+                self.audio_toast(format!("Could not finish recording: {err}"));
             }
         } else if !self.audio_engine.is_recording() {
-            let raw_wav = media_dir.join("lecture_raw.wav");
+            self.audio_engine.stop_and_release();
+            let raw_wav = audio::recording_path(media_dir, "lecture_raw");
             match self
                 .audio_engine
                 .start_recording(raw_wav, RecordingTarget::Lecture)
@@ -7544,6 +8718,12 @@ impl Lapis {
     }
 
     fn finish_import_lecture_media(&mut self, src_path: PathBuf, media_dir: &Path) {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording()
+            || AudioDocIndex::media_dir_for_pdf(&self.pdf_path) != media_dir
+        {
+            self.audio_toast("Audio import cancelled: document or recording changed");
+            return;
+        }
         self.confirm_remove_lecture = false;
         let name = self
             .audio_index
@@ -7578,6 +8758,8 @@ impl Lapis {
     }
 
     const AUDIO_BTN_SIZE: f32 = 22.0;
+    /// Empty space under the rendered Markdown in the notes Preview.
+    const PREVIEW_BOTTOM_PAD: f32 = 28.0;
 
     fn render_audio_dock_in_rect(&mut self, ui: &mut egui::Ui, show_ticker: bool) {
         let media_dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
@@ -7746,7 +8928,7 @@ impl Lapis {
                         let play_button = egui::Button::new(
                             egui::RichText::new(icon)
                                 .size(11.0)
-                                .color(egui::Color32::WHITE),
+                                .color(self.theme.on_accent()),
                         )
                         .fill(accent)
                         .stroke(egui::Stroke::NONE)
@@ -7896,8 +9078,7 @@ impl Lapis {
         let is_transcribing = self.is_transcribing;
         let is_recording = self.audio_engine.is_recording();
 
-        let memo_is_recording =
-            self.audio_engine.rec_target == Some(RecordingTarget::PageMemo(page));
+        let memo_is_recording = matches!(self.audio_engine.rec_target, Some(RecordingTarget::PageMemo(_)));
 
         let lesson_btn_info = self.lesson_button_state();
 
@@ -8259,10 +9440,7 @@ impl Lapis {
             if memo_is_recording {
                 self.finish_memo_recording(&media_dir);
             } else if !is_recording {
-                let raw_wav = media_dir.join("memo_raw.wav");
-                let _ = self
-                    .audio_engine
-                    .start_recording(raw_wav, RecordingTarget::PageMemo(page));
+                self.start_memo_recording(&media_dir, page);
             }
         }
 
@@ -8392,7 +9570,7 @@ impl Lapis {
                         let play_btn = egui::Button::new(
                             egui::RichText::new(play_icon)
                                 .size(16.0)
-                                .color(egui::Color32::WHITE),
+                                .color(self.theme.on_accent()),
                         )
                         .fill(rgb(self.theme.accent))
                         .stroke(egui::Stroke::NONE)
@@ -8649,8 +9827,7 @@ impl Lapis {
                         if ui
                             .add_enabled(
                                 !busy,
-                                egui::Button::new("󰆐")
-                                    .selected(trim_open)
+                                crate::theme::selected_button("󰆐", trim_open, ui.visuals())
                                     .corner_radius(egui::CornerRadius::same(6)),
                             )
                             .on_hover_text("Trim lesson start/end")
@@ -9259,7 +10436,7 @@ impl Lapis {
             return;
         }
 
-        let is_rec_memo = self.audio_engine.rec_target == Some(RecordingTarget::PageMemo(page));
+        let is_rec_memo = matches!(self.audio_engine.rec_target, Some(RecordingTarget::PageMemo(_)));
 
         // Anchor the controls 6 px above `bottom_rect.top()`.
         // Place it above the ticker when visible.
@@ -9341,10 +10518,7 @@ impl Lapis {
             if is_rec_memo {
                 self.finish_memo_recording(media_dir);
             } else if !self.audio_engine.is_recording() {
-                let raw_wav = media_dir.join("memo_raw.wav");
-                let _ = self
-                    .audio_engine
-                    .start_recording(raw_wav, RecordingTarget::PageMemo(page));
+                self.start_memo_recording(media_dir, page);
             }
         }
     }
@@ -9846,20 +11020,8 @@ impl Lapis {
     }
 
     fn finish_memo_recording(&mut self, media_dir: &Path) {
-        let page = self.current_page;
-        let list = self.audio_index.page_memos.entry(page).or_default();
-        let idx = list.len() + 1;
-        let fname = format!("memo_p{}_{}.wav", page, idx);
-        if let Some((_, dur)) = self.audio_engine.stop_recording(&media_dir.join(&fname)) {
-            list.push(audio::VoiceMemoEntry {
-                id: format!("Memo #{}", idx),
-                filename: fname,
-                duration_ms: dur,
-                transcript: None,
-                title: None,
-            });
-            self.audio_index.save(&self.pdf_path);
-            self.preload_asr_model();
+        if let Err(err) = self.finish_active_recording(media_dir) {
+            self.audio_toast(format!("Could not finish recording: {err}"));
         }
     }
 
@@ -9952,6 +11114,10 @@ impl Lapis {
         });
 
         if switch_to.is_some() || new_lec {
+            if self.audio_engine.is_recording() || self.is_transcribing {
+                self.audio_toast("Finish recording or transcription before switching lectures");
+                return;
+            }
             self.audio_engine.stop_and_release();
 
             match switch_to {
@@ -10033,7 +11199,11 @@ impl Lapis {
     }
 
     fn start_lecture_transcription(&mut self, wav_path: PathBuf, ctx: &egui::Context) {
-        if self.is_transcribing {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording() {
+            return;
+        }
+        let dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
+        if self.audio_index.lecture_wav.as_ref().map(|n| dir.join(n)).as_ref() != Some(&wav_path) {
             return;
         }
         let Some(model_dir) = self.ensure_asr_model(
@@ -10046,12 +11216,9 @@ impl Lapis {
         };
 
         self.is_transcribing = true;
-        self.asr_cancel
-            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.asr_progress = Some((0, self.audio_index.lecture_duration_ms.max(1)));
 
-        let tx = self.asr_tx.clone();
-        let cancel = self.asr_cancel.clone();
+        let (tx, cancel) = self.new_asr_job();
         let w_ctx = ctx.clone();
 
         thread::spawn(move || {
@@ -10063,7 +11230,7 @@ impl Lapis {
     }
 
     fn start_alignment(&mut self, ctx: &egui::Context) {
-        if self.is_transcribing || self.audio_index.segments.is_empty() {
+        if self.is_transcribing || self.audio_engine.is_recording() || self.audio_index.segments.is_empty() {
             return;
         }
         let (lo, hi) = (self.align_from.max(1), self.align_to.min(self.total_pages));
@@ -10075,15 +11242,21 @@ impl Lapis {
         self.asr_progress = None;
         let mut idx = self.audio_index.clone();
         let (pdf, total, notes) = (self.pdf_path.clone(), self.total_pages, self.notes.clone());
-        let (tx, ctx) = (self.asr_tx.clone(), ctx.clone());
+        let (tx, cancel) = self.new_asr_job();
+        let ctx = ctx.clone();
         thread::spawn(move || {
             let texts = extract_slide_texts(&pdf, total, &notes);
             idx.align_to_slides(&texts, (lo, hi));
-            let _ = tx.send(audio::AsrJobResult::Aligned {
-                segments: idx.segments,
-                timeline: idx.timeline,
-                range: (lo, hi),
-            });
+            let msg = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                audio::AsrJobResult::Cancelled
+            } else {
+                audio::AsrJobResult::Aligned {
+                    segments: idx.segments,
+                    timeline: idx.timeline,
+                    range: (lo, hi),
+                }
+            };
+            let _ = tx.send(msg);
             ctx.request_repaint();
         });
     }
@@ -10095,9 +11268,12 @@ impl Lapis {
         wav_path: PathBuf,
         ctx: &egui::Context,
     ) {
-        if self.is_transcribing {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording() {
             return;
         }
+        let Some(memo) = self.audio_index.page_memos.get(&page).and_then(|list| list.get(memo_idx)) else { return; };
+        let filename = memo.filename.clone();
+        if AudioDocIndex::media_dir_for_pdf(&self.pdf_path).join(&filename) != wav_path { return; }
         let Some(model_dir) = self.ensure_asr_model(
             ctx,
             AsrRetry::Memo {
@@ -10113,22 +11289,21 @@ impl Lapis {
         self.asr_progress = None;
         self.audio_toast("󱑚 Transcribing voice memo...");
 
-        let tx = self.asr_tx.clone();
+        let (tx, cancel) = self.new_asr_job();
         let w_ctx = ctx.clone();
         thread::spawn(move || {
-            let msg = audio::transcribe_memo(&model_dir, &wav_path, page, memo_idx);
+            let msg = audio::transcribe_memo(&model_dir, &wav_path, filename, &cancel);
             let _ = tx.send(msg);
             w_ctx.request_repaint();
         });
     }
 
     fn page_has_study_content(&self, page: u32) -> bool {
-        let has_note = self
-            .notes
-            .get(&page)
-            .map(|n| !n.trim().is_empty())
-            .unwrap_or(false)
-            || (page == self.note_page && !self.current_note.trim().is_empty());
+        let has_note = if page == self.note_page {
+            !self.current_note.trim().is_empty()
+        } else {
+            self.notes.get(&page).is_some_and(|n| !n.trim().is_empty())
+        };
 
         let has_anns = self
             .annotations
@@ -10144,6 +11319,7 @@ impl Lapis {
                 .any(|l| l.segments.iter().any(|s| s.page == page));
 
         has_note || has_anns || has_transcript
+            || has_extra_study_content(self.sketches.get(&page), self.audio_index.page_memos.get(&page))
     }
 
     /// Searches backwards from `page - 1` down to `1` for the most recent non-empty note.
@@ -10266,16 +11442,19 @@ impl Lapis {
         style: notes::BlankPageStyle,
         ctx: &egui::Context,
     ) {
+        if self.pdf_structure_busy() { return; }
         if !self.has_pdf() {
             return;
         }
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         // Release worker file handles before rewriting the PDF.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
 
-        match notes::insert_blank_page_with_style_into_pdf(&self.pdf_path, after_page, style) {
+        match notes::insert_blank_page_with_style_into_pdf(
+            &self.pdf_path, after_page, style, self.allow_signature_loss,
+        ) {
             Ok(new_page_num) => {
                 notes::shift_doc_data_on_insert(
                     &mut self.notes,
@@ -10368,10 +11547,14 @@ impl Lapis {
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Insert page error: {}", e),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Insert { after_page, style });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Insert page error: {}", e),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -10402,6 +11585,7 @@ impl Lapis {
     }
 
     fn delete_pdf_page_and_shift_data(&mut self, page_to_del: u32, ctx: &egui::Context) {
+        if self.pdf_structure_busy() { return; }
         if !self.has_pdf()
             || self.total_pages <= 1
             || page_to_del == 0
@@ -10415,7 +11599,7 @@ impl Lapis {
         }
 
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         // Close worker channels that may still hold the PDF open.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
@@ -10425,7 +11609,7 @@ impl Lapis {
         let old_note_page = self.note_page;
         let old_split_secondary = self.split_secondary_page;
 
-        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del) {
+        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del, self.allow_signature_loss) {
             Ok(()) => {
                 let shift = |p: u32| -> Option<u32> {
                     if p < page_to_del {
@@ -10522,15 +11706,20 @@ impl Lapis {
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Delete page failed: {e}"),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Delete { page: page_to_del });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Delete page failed: {e}"),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
 
     fn reorder_pdf_page(&mut self, from_page: u32, to_page: u32, ctx: &egui::Context) {
+        if self.pdf_structure_busy() { return; }
         if !self.has_pdf()
             || from_page == to_page
             || from_page == 0
@@ -10542,12 +11731,12 @@ impl Lapis {
         }
 
         self.finish_sketch_edit();
-        self.sync_and_save();
+        if !self.checkpoint_before_structure_change() { return; }
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
         let old_anchor_page = self.continuous_anchor_page;
         let old_anchor_frac = self.continuous_anchor_frac;
-        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page) {
+        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page, self.allow_signature_loss) {
             Ok(()) => {
                 let remap = |page: u32| -> u32 {
                     if page == from_page {
@@ -10623,10 +11812,14 @@ impl Lapis {
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰅚 Page reorder failed: {e}"),
-                    std::time::Instant::now(),
-                ));
+                if notes::is_signed_pdf_error(&e) {
+                    self.pending_signed_page_op = Some(SignedPageOp::Reorder { from: from_page, to: to_page });
+                } else {
+                    self.toast_message = Some((
+                        format!("󰅚 Page reorder failed: {e}"),
+                        std::time::Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -10764,12 +11957,43 @@ impl Lapis {
         }
     }
     fn render_sub_topbar_tools(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("sub_topbar_tools")
-            .exact_size(36.0)
+        let settings = &self.app_state.settings;
+        let bottom = settings.annotation_bar_edge() == state::TopbarPosition::Bottom;
+        let offset = if settings.annotation_bar_edge() == settings.topbar_position {
+            self.topbar_overlay_h
+        } else {
+            0.0
+        };
+        if offset > 0.0 {
+            // Reserve the revealed topbar before docking the annotation toolbar.
+            let panel = if bottom {
+                egui::Panel::bottom("subbar_topbar_space")
+            } else {
+                egui::Panel::top("subbar_topbar_space")
+            };
+            panel.exact_size(offset)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    ui.allocate_rect(ui.max_rect(), egui::Sense::hover());
+                });
+        }
+        self.draw_sub_topbar_tools(ui, bottom);
+    }
+
+    fn draw_sub_topbar_tools(&mut self, ui: &mut egui::Ui, bottom: bool) {
+        let density = self.app_state.settings.ui_density;
+        let m = density.sub_bar();
+        let panel = if bottom {
+            egui::Panel::bottom("sub_topbar_tools")
+        } else {
+            egui::Panel::top("sub_topbar_tools")
+        };
+        let panel_out = panel
+            .exact_size(m.height)
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_elevated))
-                    .inner_margin(egui::Margin::symmetric(12, 4))
+                    .inner_margin(egui::Margin::symmetric(12, m.margin_y))
                     .stroke(egui::Stroke::new(1.0, rgb(self.theme.border))),
             )
             .show(ui, |ui| {
@@ -10778,10 +12002,15 @@ impl Lapis {
                     egui::Layout::left_to_right(egui::Align::Center)
                         .with_main_align(egui::Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = m.spacing;
+                        if density != state::UiDensity::Standard {
+                            ui.spacing_mut().button_padding.y = m.pad_y;
+                        }
 
-                        let btn_sz = egui::vec2(28.0, 26.0);
+                        let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
+                        let icon_size = m.icon;
 
+                        let shortcuts = &self.app_state.shortcuts;
                         let mut bar_btn = |ui: &mut egui::Ui,
                                            icon: &str,
                                            tool: AnnotationTool,
@@ -10789,11 +12018,14 @@ impl Lapis {
                          -> bool {
                             let clicked = ui
                                 .add(
-                                    egui::Button::new(egui::RichText::new(icon).size(14.5))
-                                        .selected(self.annotation_tool == tool)
+                                    crate::theme::selected_button(
+                                        egui::RichText::new(icon).size(icon_size),
+                                        self.annotation_tool == tool,
+                                        ui.visuals(),
+                                    )
                                         .min_size(btn_sz),
                                 )
-                                .on_hover_text(tip)
+                                .on_hover_text(annotation_shortcut_hint(shortcuts, tool, tip))
                                 .clicked();
 
                             if clicked {
@@ -10824,17 +12056,19 @@ impl Lapis {
 
                         // Inline Color Swatches
                         for (col, name) in ANNOTATION_PALETTE {
-                            let is_sel = self.annotation_color == col;
+                            let is_sel = self.annotation_color() == col;
 
+                            let (sw_box, sw_fill, sw_ring) =
+                                (m.swatch_box, m.swatch_fill, m.swatch_ring);
                             let (sw_rect, sw_resp) = ui
-                                .allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+                                .allocate_exact_size(egui::vec2(sw_box, sw_box), egui::Sense::click());
 
-                            ui.painter().circle_filled(sw_rect.center(), 7.5, rgb(col));
+                            ui.painter().circle_filled(sw_rect.center(), sw_fill, rgb(col));
 
                             if is_sel || sw_resp.hovered() {
                                 ui.painter().circle_stroke(
                                     sw_rect.center(),
-                                    9.0,
+                                    sw_ring,
                                     egui::Stroke::new(
                                         if is_sel { 2.0 } else { 1.2 },
                                         rgb(self.theme.fg_primary),
@@ -10843,7 +12077,7 @@ impl Lapis {
                             }
 
                             if sw_resp.on_hover_text(name).clicked() {
-                                self.annotation_color = col;
+                                self.pending_annotation_color = Some(col);
                             }
                         }
 
@@ -10890,10 +12124,14 @@ impl Lapis {
                             ] {
                                 if ui
                                     .add(
-                                        egui::Button::new(egui::RichText::new(lbl).size(12.0))
-                                            .selected(self.shape_kind == sk)
-                                            .min_size(egui::vec2(52.0, 24.0)),
+                                        crate::theme::selected_button(
+                                            egui::RichText::new(lbl).size(12.0),
+                                            self.shape_kind == sk,
+                                            ui.visuals(),
+                                        )
+                                            .min_size(egui::vec2(52.0, m.shape_btn_h)),
                                     )
+                                    .on_hover_text(shape_shortcut_hint(&self.app_state.shortcuts, sk, lbl))
                                     .clicked()
                                 {
                                     self.shape_kind = sk;
@@ -10930,6 +12168,7 @@ impl Lapis {
                     },
                 );
             });
+        self.subbar_h = panel_out.response.rect.height();
     }
 
     fn render_radial_tools_menu(&mut self, ui: &mut egui::Ui) {
@@ -10974,23 +12213,29 @@ impl Lapis {
                 let c = box_rect.min + egui::vec2(105.0, 105.0);
                 let painter = ui.painter();
 
-                // Glass backdrop like the other popups: soft shadow, translucent fill, hairline
-                // border, then the inner ring guide.
-                for k in 0..8 {
+                // Tight, subtle shadow and a translucent surface.
+                for (radius, alpha) in [(109.0, 3), (107.0, 5), (105.0, 7), (103.0, 9)] {
                     painter.circle_filled(
-                        c + egui::vec2(0.0, 8.0),
-                        104.0 + (8 - k) as f32 * 2.5,
-                        egui::Color32::from_black_alpha(10),
+                        c + egui::vec2(0.0, 2.0),
+                        radius,
+                        egui::Color32::from_black_alpha(alpha),
                     );
                 }
                 let [gr, gg, gb] = self.theme.bg_elevated;
                 painter.circle_filled(
                     c,
                     102.0,
-                    egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
+                    egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 232),
                 );
-                painter.circle_stroke(c, 102.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
-                painter.circle_stroke(c, 52.0, egui::Stroke::new(1.0, rgb(self.theme.border)));
+                let accent = rgb(self.theme.accent);
+                painter.circle_stroke(
+                    c, 102.0,
+                    egui::Stroke::new(1.0, accent.gamma_multiply(0.65)),
+                );
+                painter.circle_stroke(
+                    c, 52.0,
+                    egui::Stroke::new(0.75, accent.gamma_multiply(0.40)),
+                );
 
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
                 let left_clicked = bg_resp.clicked_by(egui::PointerButton::Primary);
@@ -11008,12 +12253,12 @@ impl Lapis {
 
                 let in_hub = hover_pos.map(|p| p.distance(c) <= hub_r).unwrap_or(false);
 
-                painter.circle_filled(c, hub_r, rgb(self.theme.bg_elevated));
+                painter.circle_filled(
+                    c, hub_r,
+                    rgb(if in_hub && can_undo { self.theme.bg_hover } else { self.theme.bg_widget }),
+                );
                 painter.circle_stroke(c, hub_r, egui::Stroke::new(1.0, rgb(self.theme.border)));
                 let undo_pos = c;
-                if in_hub && can_undo {
-                    painter.circle_filled(undo_pos, 18.0, rgb(self.theme.bg_active));
-                }
 
                 let fg = rgb(self.theme.fg_primary);
                 let fg_dim = fg.gamma_multiply(0.35);
@@ -11032,7 +12277,7 @@ impl Lapis {
                     }
                 }
 
-                // Intenal colors ring
+                // Inner colors ring
                 if shape_pick {
                     // Choose a shape instead of a color.
                     let kinds = [
@@ -11054,9 +12299,9 @@ impl Lapis {
                             if is_sel {
                                 rgb(self.theme.accent)
                             } else if is_hov {
-                                rgb(self.theme.bg_active)
+                                rgb(self.theme.bg_hover)
                             } else {
-                                rgb(self.theme.bg_elevated)
+                                rgb(self.theme.bg_widget)
                             },
                         );
                         painter.circle_stroke(
@@ -11070,13 +12315,13 @@ impl Lapis {
                             icon,
                             egui::FontId::proportional(14.0),
                             if is_sel {
-                                egui::Color32::from_rgb(18, 20, 26)
+                                self.theme.on_accent()
                             } else {
                                 rgb(self.theme.fg_primary)
                             },
                         );
                         if is_hov {
-                            label_hover = Some(lbl.to_string());
+                            label_hover = Some(shape_shortcut_hint(&self.app_state.shortcuts, *sk, lbl));
                         }
                         if clicked && is_hov {
                             self.shape_kind = *sk;
@@ -11091,22 +12336,25 @@ impl Lapis {
                         let angle = (i as f32) * std::f32::consts::TAU / (n_cols as f32)
                             - std::f32::consts::FRAC_PI_2;
                         let pt = c + egui::vec2(angle.cos(), angle.sin()) * col_ring_r;
-                        let is_sel = self.annotation_color == col;
+                        let is_sel = self.annotation_color() == col;
                         let is_hov = hover_pos.map(|p| p.distance(pt) <= 10.0).unwrap_or(false);
 
-                        painter.circle_filled(pt, if is_hov { 9.5 } else { 8.0 }, rgb(col));
+                        painter.circle_filled(pt, 8.0, rgb(col));
                         if is_sel || is_hov {
                             painter.circle_stroke(
                                 pt,
                                 10.0,
-                                egui::Stroke::new(1.8, egui::Color32::WHITE),
+                                egui::Stroke::new(
+                                    if is_sel { 1.5 } else { 1.0 },
+                                    rgb(self.theme.fg_primary),
+                                ),
                             );
                         }
                         if is_hov {
                             label_hover = Some(name.to_string());
                         }
                         if clicked && is_hov {
-                            self.annotation_color = col;
+                            self.pending_annotation_color = Some(col);
                             close_menu = left_clicked;
                         }
                     }
@@ -11149,37 +12397,36 @@ impl Lapis {
                     let fill = if is_active {
                         rgb(self.theme.accent)
                     } else if is_hov {
-                        rgb(self.theme.bg_active)
+                        rgb(self.theme.bg_hover)
                     } else {
-                        rgb(self.theme.bg_elevated)
+                        rgb(self.theme.bg_widget)
                     };
                     painter.circle_filled(pt, node_r, fill);
-                    painter.circle_stroke(
-                        pt,
-                        node_r,
-                        egui::Stroke::new(
-                            if is_active || is_hov { 1.8 } else { 1.0 },
-                            if is_active {
-                                egui::Color32::WHITE
-                            } else {
-                                rgb(self.theme.border)
-                            },
-                        ),
-                    );
+                    if !is_active {
+                        painter.circle_stroke(
+                            pt,
+                            node_r,
+                            egui::Stroke::new(
+                                1.0,
+                                if is_hov { rgb(self.theme.accent) }
+                                else { rgb(self.theme.border).gamma_multiply(0.65) },
+                            ),
+                        );
+                    }
                     painter.text(
                         pt,
                         egui::Align2::CENTER_CENTER,
                         icon,
                         egui::FontId::proportional(15.0),
                         if is_active {
-                            egui::Color32::from_rgb(18, 20, 26)
+                            self.theme.on_accent()
                         } else {
                             rgb(self.theme.fg_primary)
                         },
                     );
 
                     if is_hov {
-                        label_hover = Some(label.to_string());
+                        label_hover = Some(annotation_shortcut_hint(&self.app_state.shortcuts, tool, label));
                     }
 
                     if clicked && is_hov {
@@ -11200,7 +12447,7 @@ impl Lapis {
                     let paste_hovered = hover_pos.map(|p| p.distance(paste_pos) <= 12.0).unwrap_or(false);
                     painter.circle_filled(
                         paste_pos, 12.0,
-                        if paste_hovered { rgb(self.theme.bg_active) } else { rgb(self.theme.bg_elevated) },
+                        if paste_hovered { rgb(self.theme.bg_hover) } else { rgb(self.theme.bg_widget) },
                     );
                     painter.circle_stroke(paste_pos, 12.0, egui::Stroke::new(1.2, rgb(self.theme.accent)));
                     painter.text(
@@ -11220,13 +12467,15 @@ impl Lapis {
                 // Label for the node under the pointer.
                 if let Some(txt) = &label_hover {
                     let pos = c + egui::vec2(0.0, 122.0);
-                    let w = txt.chars().count() as f32 * 7.0 + 20.0;
-                    let r = egui::Rect::from_center_size(pos, egui::vec2(w, 20.0));
+                    let galley = painter.layout_no_wrap(
+                        txt.clone(), egui::FontId::proportional(12.0), rgb(self.theme.fg_primary),
+                    );
+                    let r = egui::Rect::from_center_size(pos, galley.size() + egui::vec2(18.0, 8.0));
                     let [gr, gg, gb] = self.theme.bg_elevated;
                     painter.rect_filled(
                         r,
                         egui::CornerRadius::same(8),
-                        egui::Color32::from_rgba_unmultiplied(gr, gg, gb, MENU_GLASS_ALPHA),
+                        egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 232),
                     );
                     painter.rect_stroke(
                         r,
@@ -11234,13 +12483,7 @@ impl Lapis {
                         egui::Stroke::new(1.0, rgb(self.theme.border)),
                         egui::StrokeKind::Inside,
                     );
-                    painter.text(
-                        pos,
-                        egui::Align2::CENTER_CENTER,
-                        txt,
-                        egui::FontId::proportional(12.0),
-                        rgb(self.theme.fg_primary),
-                    );
+                    painter.galley(pos - galley.size() * 0.5, galley, rgb(self.theme.fg_primary));
                 }
             });
 
@@ -11281,13 +12524,15 @@ impl Lapis {
 
         let mut text_open = ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(text_popup_id));
 
+        let density = self.app_state.settings.ui_density;
+        let m = density.rail();
         egui::Panel::right("vertical_tools_rail")
             .resizable(false)
-            .exact_size(44.0)
+            .exact_size(m.width)
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_panel))
-                    .inner_margin(egui::Margin::symmetric(5, 8))
+                    .inner_margin(egui::Margin::symmetric(m.margin[0], m.margin[1]))
                     .stroke(egui::Stroke::new(1.0, rgb(self.theme.border))),
             )
             .show(ui, |ui| {
@@ -11296,10 +12541,14 @@ impl Lapis {
                     egui::Layout::top_down(egui::Align::Center)
                         .with_main_align(egui::Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.y = 5.0;
+                        ui.spacing_mut().item_spacing.y = m.spacing;
+                        if density != state::UiDensity::Standard {
+                            ui.spacing_mut().button_padding.y = m.pad_y;
+                        }
 
-                        let btn_sz = egui::vec2(32.0, 30.0);
+                        let btn_sz = egui::vec2(m.btn[0], m.btn[1]);
 
+                        let shortcuts = &self.app_state.shortcuts;
                         let mut rail_btn = |ui: &mut egui::Ui,
                                             icon: &str,
                                             tool: AnnotationTool,
@@ -11307,11 +12556,14 @@ impl Lapis {
                          -> egui::Response {
                             let resp = ui
                                 .add(
-                                    egui::Button::new(egui::RichText::new(icon).size(15.5))
-                                        .selected(self.annotation_tool == tool)
+                                    crate::theme::selected_button(
+                                        egui::RichText::new(icon).size(m.icon),
+                                        self.annotation_tool == tool,
+                                        ui.visuals(),
+                                    )
                                         .min_size(btn_sz),
                                 )
-                                .on_hover_text(tip);
+                                .on_hover_text(annotation_shortcut_hint(shortcuts, tool, tip));
 
                             if resp.clicked() {
                                 self.annotation_tool = tool;
@@ -11325,7 +12577,7 @@ impl Lapis {
                             ui,
                             "󰇀",
                             AnnotationTool::Cursor,
-                            "Cursor / Select PDF Text & Click Links",
+                            "Cursor / Select PDF Text",
                         );
 
                         rail_btn(ui, " ", AnnotationTool::Highlight, "Highlighter");
@@ -11397,7 +12649,7 @@ impl Lapis {
                         ui.painter().circle_filled(
                             c_rect.center(),
                             10.0,
-                            rgb(self.annotation_color),
+                            rgb(self.annotation_color()),
                         );
 
                         ui.painter().circle_stroke(
@@ -11508,11 +12760,14 @@ impl Lapis {
                                 ] {
                                     if ui
                                         .add(
-                                            egui::Button::new(egui::RichText::new(icon).size(15.0))
-                                                .selected(self.shape_kind == sk)
+                                            crate::theme::selected_button(
+                                                egui::RichText::new(icon).size(15.0),
+                                                self.shape_kind == sk,
+                                                ui.visuals(),
+                                            )
                                                 .min_size(egui::vec2(30.0, 28.0)),
                                         )
-                                        .on_hover_text(lbl)
+                                        .on_hover_text(shape_shortcut_hint(&self.app_state.shortcuts, sk, lbl))
                                         .clicked()
                                     {
                                         self.shape_kind = sk;
@@ -11542,7 +12797,7 @@ impl Lapis {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 for (col, name) in ANNOTATION_PALETTE {
-                                    let is_sel = self.annotation_color == col;
+                                    let is_sel = self.annotation_color() == col;
 
                                     let (sw_rect, sw_resp) = ui.allocate_exact_size(
                                         egui::vec2(22.0, 22.0),
@@ -11560,25 +12815,7 @@ impl Lapis {
                                     }
 
                                     if sw_resp.on_hover_text(name).clicked() {
-                                        self.annotation_color = col;
-
-                                        if let Some(idx) = self.selected_textbox {
-                                            if let Some(ann) = self
-                                                .annotations
-                                                .get_mut(&self.current_page)
-                                                .and_then(|v| v.get_mut(idx))
-                                            {
-                                                ann.color = col;
-                                            }
-
-                                            let _ = notes::save_doc_data(
-                                                &self.pdf_path,
-                                                &self.notes,
-                                                &self.annotations,
-                                                self.blank_pages.clone(),
-                                                &self.sketches,
-                                            );
-                                        }
+                                        self.pending_annotation_color = Some(col);
 
                                         color_open = false;
                                     }
@@ -11633,25 +12870,9 @@ impl Lapis {
 
     /// Returns true if any slide in the document has at least one flashcard.
     fn document_has_flashcards(&self) -> bool {
-        // Replace `self.slide_notes.values()` with your map field (or `.iter()` if it's a Vec)
-        self.notes.values().any(|text| {
-            let mut has_q = false;
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if let Some((l, r)) = trimmed.split_once("::")
-                    && !l.trim().is_empty()
-                    && !r.trim().is_empty()
-                {
-                    return true;
-                }
-                if trimmed.starts_with("Q:") && trimmed.len() > 2 {
-                    has_q = true;
-                } else if has_q && trimmed.starts_with("A:") && trimmed.len() > 2 {
-                    return true;
-                }
-            }
-            false
-        })
+        self.notes
+            .values()
+            .any(|text| notes::page_has_flashcards(text))
     }
 
     fn render_flashcards_modal(&mut self, ui: &mut egui::Ui) {
@@ -12345,7 +13566,10 @@ impl Lapis {
             paste_ev || v_press || v_release
         });
 
-        if ctrl_v && !any_focused && over_canvas {
+        let over_pending_primary = self.view_mode == ViewMode::SinglePage
+            && pointer.is_some_and(|p| self.canvas_rect.contains(p))
+            && cached_page(&self.page_cache, &self.thumb_cache, self.current_page).is_none();
+        if ctrl_v && !any_focused && over_canvas && !over_pending_primary {
             let (page, center) = self.page_at_pos(pointer);
             self.shots
                 .request_clipboard(ctx, ShotTarget::Pdf { page, center });
@@ -12360,6 +13584,13 @@ impl Lapis {
                 .map(|f| f.path().to_path_buf()) // Convert &Path to owned PathBuf
         });
         if let Some(path) = dropped {
+            if over_pending_primary {
+                self.toast_message = Some((
+                    "Wait for the current page before dropping an image".into(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
             let over_page =
                 pointer.is_some_and(|p| self.last_slide_rects.iter().any(|(_, r)| r.contains(p)));
             let target = if over_page {
@@ -12894,8 +14125,7 @@ impl Lapis {
                     egui::FontId::proportional(note_font_sz * 1.35),
                 );
 
-                let pre_defs = notes::preprocess_definitions(md_source);
-                let rendered_md = notes::preprocess_markdown_view(&pre_defs);
+                let rendered_md = notes::preprocess_notes_preview(md_source);
 
                 egui_commonmark::CommonMarkViewer::new()
                     .max_image_width(Some(preview_width.ceil() as usize))
@@ -13164,6 +14394,7 @@ impl Lapis {
             let button_radius =
                 egui::CornerRadius::same(self.theme.corner_radius.saturating_sub(1));
 
+            let (nav_h, mode_h) = (self.sz(23.0), self.sz(22.0));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
                 let full_width = ui.available_width();
@@ -13173,9 +14404,12 @@ impl Lapis {
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
                     .add_sized(
-                        [18.0, 23.0],
-                        egui::Button::new(egui::RichText::new(lock_icon).size(11.0))
-                            .selected(self.lock_note_page)
+                        [18.0, nav_h],
+                        crate::theme::selected_button(
+                            egui::RichText::new(lock_icon).size(11.0),
+                            self.lock_note_page,
+                            ui.visuals(),
+                        )
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13192,7 +14426,7 @@ impl Lapis {
                     .add_enabled(
                         self.note_page > 1,
                         egui::Button::new(egui::RichText::new("\u{F438}").size(11.0))
-                            .min_size(egui::vec2(17.0, 23.0))
+                            .min_size(egui::vec2(17.0, nav_h))
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13210,7 +14444,7 @@ impl Lapis {
                 };
                 if ui
                     .add_sized(
-                        [if compact { 23.0 } else { 35.0 }, 23.0],
+                        [if compact { 23.0 } else { 35.0 }, nav_h],
                         egui::Button::new(egui::RichText::new(page_label).size(10.0).strong())
                             .corner_radius(button_radius),
                     )
@@ -13226,7 +14460,7 @@ impl Lapis {
                     .add_enabled(
                         self.note_page < self.total_pages,
                         egui::Button::new(egui::RichText::new("\u{F44A}").size(11.0))
-                            .min_size(egui::vec2(17.0, 23.0))
+                            .min_size(egui::vec2(17.0, nav_h))
                             .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -13254,34 +14488,60 @@ impl Lapis {
                 let preview_label = if show_labels { "󰈈  Preview" } else { "󰈈" };
                 let mode_font_size = if show_labels { 10.0 } else { 11.0 };
 
-                if sk_on
-                    && ui
-                        .add_sized(
-                            [sketch_width, 22.0],
-                            egui::Button::new(egui::RichText::new(" ").size(11.0).strong())
-                                .selected(self.note_mode == NoteMode::Sketch)
-                                .corner_radius(button_radius),
+                if sk_on {
+                    let resp = ui.add_sized(
+                        [sketch_width, mode_h],
+                        crate::theme::selected_button(
+                            egui::RichText::new(" ").size(11.0).strong(),
+                            self.note_mode == NoteMode::Sketch,
+                            ui.visuals(),
                         )
+                        .corner_radius(button_radius),
+                    );
+                    let has_sketch = self
+                        .sketches
+                        .get(&self.note_page)
+                        .is_some_and(|s| !s.strokes.is_empty());
+                    if has_sketch {
+                        // Corner dot like Notes and Flashcards, slightly smaller for the narrow
+                        // tab. The clip is widened so the panel edge cannot crop it.
+                        let dot_center =
+                            egui::pos2(resp.rect.right_top().x - 3.0, resp.rect.right_top().y + 3.5);
+                        let painter = ui
+                            .painter()
+                            .with_clip_rect(ui.painter().clip_rect().expand(6.0));
+                        painter.circle(
+                            dot_center,
+                            2.5,
+                            theme::rgb(self.theme.accent),
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255)),
+                        );
+                    }
+                    let mut hover = self.app_state.shortcuts.toggle_sketch.hint("Sketch: a separate scratchpad for this page");
+                    if has_sketch { hover.push_str("\n(This page contains a sketch)"); }
+                    if resp
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Sketch: a separate scratchpad for this page (Alt+S)")
+                        .on_hover_text(hover)
                         .clicked()
-                {
-                    self.note_mode = NoteMode::Sketch;
+                    {
+                        self.note_mode = NoteMode::Sketch;
+                    }
                 }
 
                 if ui
                     .add_sized(
-                        [primary_width, 22.0],
-                        egui::Button::new(
+                        [primary_width, mode_h],
+                        crate::theme::selected_button(
                             egui::RichText::new(edit_label)
                                 .size(mode_font_size)
                                 .strong(),
+                            self.note_mode == NoteMode::Edit,
+                            ui.visuals(),
                         )
-                        .selected(self.note_mode == NoteMode::Edit)
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Edit your Markdown and LaTeX notes")
+                    .on_hover_text(self.app_state.shortcuts.toggle_edit_preview.hint("Edit your Markdown and LaTeX notes"))
                     .clicked()
                 {
                     self.note_mode = NoteMode::Edit;
@@ -13290,17 +14550,18 @@ impl Lapis {
 
                 if ui
                     .add_sized(
-                        [primary_width, 22.0],
-                        egui::Button::new(
+                        [primary_width, mode_h],
+                        crate::theme::selected_button(
                             egui::RichText::new(preview_label)
                                 .size(mode_font_size)
                                 .strong(),
+                            self.note_mode == NoteMode::Preview,
+                            ui.visuals(),
                         )
-                        .selected(self.note_mode == NoteMode::Preview)
                         .corner_radius(button_radius),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Preview the formatted notes")
+                    .on_hover_text(self.app_state.shortcuts.toggle_edit_preview.hint("Preview the formatted notes"))
                     .clicked()
                 {
                     self.note_mode = NoteMode::Preview;
@@ -13308,14 +14569,14 @@ impl Lapis {
             });
 
             let sketch_open = self.note_mode == NoteMode::Sketch && sk_on;
-            ui.add_space(8.0);
+            ui.add_space(self.sz(8.0));
 
             let is_edit = matches!(self.note_mode, NoteMode::Edit);
 
             // Keep the text origin and usable width identical in Edit and Preview.
             // The Edit field has zero internal margin, so this shared frame inset is
             // also the exact origin used by the Markdown viewer.
-            let text_content_margin = egui::Margin::symmetric(14, 8);
+            let text_content_margin = egui::Margin::symmetric(14, self.sz(8.0) as i8);
             let (notes_bg, notes_stroke, notes_margin) = if is_edit {
                 (
                     rgb(self.theme.bg_widget),
@@ -13349,7 +14610,7 @@ impl Lapis {
                     ui.take_available_width();
                     if self.note_mode == NoteMode::Sketch {
                         let sketch_page = self.note_page;
-                        if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches) {
+                        if sketch::show(ui, &mut self.sketch, sketch_page, &mut self.sketches, &self.app_state.shortcuts.trackpad_draw_hold) {
                             self.save_sketch_data();
                         }
                         return;
@@ -13399,7 +14660,6 @@ impl Lapis {
                                 let mut has_paste_event = false;
                                 let mut fallback_v_release = false;
                                 let mut has_copy_or_cut = false;
-                                let mut trigger_save = false;
 
                                 let ctrl_recent = screenshots::ctrl_recently_held(ui.ctx());
                                 ui.input(|i| {
@@ -13428,11 +14688,6 @@ impl Lapis {
                                             }
                                             _ => {}
                                         }
-                                    }
-                                    if (i.modifiers.ctrl || i.modifiers.command)
-                                        && i.key_pressed(egui::Key::S)
-                                    {
-                                        trigger_save = true;
                                     }
                                 });
 
@@ -13510,22 +14765,7 @@ impl Lapis {
                                     copied_or_cut_text = selected_slice;
                                 }
 
-                                if trigger_save {
-                                    self.sync_and_save();
-                                    let commit_result = if self.has_pdf() {
-                                        notes::commit_doc_data(
-                                            &self.pdf_path, &self.notes, &self.annotations,
-                                            self.blank_pages.clone(), &self.sketches,
-                                        )
-                                    } else { Ok(()) };
-                                    self.toast_message = Some((
-                                        match commit_result {
-                                            Ok(()) => "󰄬 Saved".to_string(),
-                                            Err(err) => format!("PDF save failed: {err}"),
-                                        },
-                                        std::time::Instant::now(),
-                                    ));
-                                }
+
                             }
 
                             let text_col = rgb(self.theme.fg_primary);
@@ -13570,6 +14810,8 @@ impl Lapis {
                             let mut layouter =
                                 |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
                                     let s = text.as_str();
+                                    // Code and LaTeX are never spell-checked.
+                                    let skip = notes::code_and_math_ranges(s);
                                     let mut job = egui::text::LayoutJob::default();
                                     job.wrap.max_width = wrap_width.max(1.0);
                                     // Match Preview's proportional body font so ordinary
@@ -13598,7 +14840,8 @@ impl Lapis {
                                         if !ch.is_alphabetic() && ch != '\'' {
                                             if idx > last_end {
                                                 let word = &s[last_end..idx];
-                                                let ok = checker_ref.check_word(word);
+                                                let ok = notes::in_ranges(&skip, last_end)
+                                                    || checker_ref.check_word(word);
                                                 append_highlighted(
                                                     &mut job,
                                                     s,
@@ -13637,7 +14880,8 @@ impl Lapis {
                                     }
                                     if last_end < s.len() {
                                         let word = &s[last_end..];
-                                        let ok = checker_ref.check_word(word);
+                                        let ok = notes::in_ranges(&skip, last_end)
+                                            || checker_ref.check_word(word);
                                         append_highlighted(
                                             &mut job,
                                             s,
@@ -13767,6 +15011,7 @@ impl Lapis {
                             }
 
                             if output.response.secondary_clicked() {
+                                let skip = notes::code_and_math_ranges(&self.current_note);
                                 let picked: Option<(usize, usize, String)> = ui
                                     .input(|i| i.pointer.interact_pos())
                                     .and_then(|p| {
@@ -13774,7 +15019,16 @@ impl Lapis {
                                         let idx = output.galley.cursor_from_pos(rel).index;
                                         word_at_char_index(&self.current_note, idx.into())
                                     })
-                                    .filter(|(_, _, w)| !self.spellchecker.check_word(w));
+                                    .filter(|(start, _, w)| {
+                                        // Char index -> byte offset, to look the word up in `skip`.
+                                        let byte = self
+                                            .current_note
+                                            .char_indices()
+                                            .nth(*start)
+                                            .map_or(self.current_note.len(), |(b, _)| b);
+                                        !notes::in_ranges(&skip, byte)
+                                            && !self.spellchecker.check_word(w)
+                                    });
 
                                 ui.data_mut(|d| match &picked {
                                     Some(v) => {
@@ -14020,9 +15274,7 @@ impl Lapis {
                                         egui::FontId::proportional(note_font_sz * 1.35),
                                     );
 
-                                    let pre_defs =
-                                        notes::preprocess_definitions(&self.current_note);
-                                    let rendered_md = notes::preprocess_markdown_view(&pre_defs);
+                                    let rendered_md = notes::preprocess_notes_preview(&self.current_note);
 
                                     // Capture the label selection on secondary press, before
                                     // clicking the popup (a primary click clears label selection).
@@ -14035,7 +15287,7 @@ impl Lapis {
                                         .max_image_width(Some(preview_width.ceil() as usize))
                                         .show(ui, &mut self.commonmark_cache, &rendered_md);
 
-                                    ui.add_space(28.0);
+                                    ui.add_space(Self::PREVIEW_BOTTOM_PAD);
                                 });
                                 // CommonMark uses selectable labels; egui owns their selection.
                                 // The menu's Copy command delegates to egui's native text-selection action.
@@ -14098,7 +15350,12 @@ impl Lapis {
                     let view_h = viewport_rect.height();
                     let offset_y = scroll_out.state.clamped_offset().y;
 
-                    let extra_pad = if is_edit { edit_bottom_pad } else { 0.0 };
+                    // Trailing empty space, so the arrow also clears with the audio-button allowance.
+                    let extra_pad = if is_edit {
+                        edit_bottom_pad
+                    } else {
+                        Self::PREVIEW_BOTTOM_PAD
+                    };
                     let extra_pad_audio = if self.app_state.settings.audio_dock
                         || self.app_state.settings.audio_dock
                     {
@@ -14285,7 +15542,7 @@ impl Lapis {
 
     fn render_slideshow_notes_contents(&mut self, ui: &mut egui::Ui, active_slide_note: String) {
         ui.take_available_width();
-        ui.add_space(6.0);
+        ui.add_space(self.sz(6.0));
         // A frameless header keeps the note pane aligned with the rest of the topbar.
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -14299,9 +15556,12 @@ impl Lapis {
                 let icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
                     .add_sized(
-                        [26.0, 26.0],
-                        egui::Button::new(egui::RichText::new(icon).size(13.0))
-                            .selected(self.lock_note_page)
+                        [self.sz(26.0), self.sz(26.0)],
+                        crate::theme::selected_button(
+                            egui::RichText::new(icon).size(13.0),
+                            self.lock_note_page,
+                            ui.visuals(),
+                        )
                             .corner_radius(egui::CornerRadius::same(6)),
                     )
                     .on_hover_text("Pin or unpin the current note while browsing slides")
@@ -14419,7 +15679,7 @@ impl Lapis {
                     ui.add_space(4.0);
                     let preview_lines: String =
                         next_note.lines().take(6).collect::<Vec<_>>().join("\n");
-                    let rendered = notes::preprocess_markdown_view(&preview_lines);
+                    let rendered = notes::preprocess_notes_preview(&preview_lines);
                     egui_commonmark::CommonMarkViewer::new().show(
                         ui,
                         &mut self.commonmark_cache,
@@ -14442,6 +15702,16 @@ impl Lapis {
 
 impl eframe::App for Lapis {
     fn on_exit(&mut self) {
+        if !self.allow_window_close && !self.finish_audio_before_transition() {
+            eprintln!("Lapis: could not finalize audio on forced exit; recording files retained");
+        }
+        self.audio_engine.shutdown_output();
+        self.memo_audio_engine.shutdown_output();
+        if self.allow_window_close { return; }
+        // The normal close path joins before issuing Close. Handle forced shutdown too.
+        if let Some(job) = self.pdf_save_job.take() {
+            let _ = job.worker.join();
+        }
         self.finish_sketch_edit();
         self.sync_and_save();
         if self.has_pdf() {
@@ -14457,6 +15727,32 @@ impl eframe::App for Lapis {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let win_rect = ui.ctx().content_rect();
+        ui.ctx().data_mut(|d| d.remove::<(egui::LayerId, egui::Rect)>(egui::Id::unique("annotation_cursor_target")));
+
+        // Keep the egui style in step with the interface density (a theme change resets it).
+        let density = self.app_state.settings.ui_density;
+        if !self.theme.density_applied(ui.ctx(), density) {
+            self.theme.apply(ui.ctx());
+            self.theme.apply_density(ui.ctx(), density);
+            ui.ctx().request_repaint();
+        }
+
+        if self.service_pdf_save(ui) { return; }
+        self.show_signed_page_modal(ui);
+
+        // Persist view mode and panel sizes once the pointer is released.
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        if !pointer_down && self.notes_panel_resizing {
+            self.notes_panel_resizing = false;
+            ui.ctx().request_repaint();
+        }
+        if self.has_pdf()
+            && !pointer_down
+            && (self.panel_sizes_dirty || self.reading_view_mode() != self.saved_view_mode)
+        {
+            self.panel_sizes_dirty = false;
+            self.save_session_state();
+        }
         let use_bottom_notes =
             self.app_state.settings.bottom_notes && win_rect.height() > win_rect.width();
         if let Some((kind, result)) = self.dialogs.poll() {
@@ -14513,6 +15809,7 @@ impl eframe::App for Lapis {
                 } => {
                     let n = segments.len();
                     self.audio_index.segments = segments;
+                    self.audio_index_pending = true;
                     if self.audio_index.timeline_is_live {
                         self.audio_index.assign_pages_from_timeline();
                     }
@@ -14522,8 +15819,7 @@ impl eframe::App for Lapis {
                         if !self.audio_index.timeline_is_live {
                             self.transcript_all = true;
                         }
-                        self.audio_index.save(&self.pdf_path);
-                        self.audio_toast(format!(
+                        self.report_audio_index_result(format!(
                             "󰄬 Transcribed {n} segments. Use Align to map them to slides"
                         ));
                     } else {
@@ -14542,39 +15838,31 @@ impl eframe::App for Lapis {
                     self.audio_index.timeline_is_live = false;
                     self.audio_index.page_range = Some(range);
                     self.transcript_all = false;
-                    self.audio_index.save(&self.pdf_path);
-                    self.audio_toast(format!(
+                    self.report_audio_index_result(format!(
                         "󰄬 Aligned {n} segments to pages {}–{}",
                         range.0, range.1
                     ));
                 }
-                audio::AsrJobResult::Memo {
-                    page,
-                    memo_idx,
-                    text,
-                } => {
+                audio::AsrJobResult::Memo { filename, text } => {
                     self.is_transcribing = false;
-                    if let Some(memo) = self
-                        .audio_index
-                        .page_memos
-                        .get_mut(&page)
-                        .and_then(|list| list.get_mut(memo_idx))
-                    {
-                        memo.transcript = Some(text);
-                        self.audio_index.save(&self.pdf_path);
+                    self.asr_progress = None;
+                    if self.audio_index.set_memo_transcript(&filename, text) {
+                        self.report_audio_index_result("󰄬 Voice memo transcribed!");
                     }
-                    self.audio_toast("󰄬 Voice memo transcribed!");
                 }
                 audio::AsrJobResult::Cancelled => {
                     self.is_transcribing = false;
                     self.asr_progress = None;
-                    self.audio_index.save(&self.pdf_path);
-                    self.audio_toast("󰅖 Transcription cancelled (partial transcript kept)");
+                    self.report_audio_index_result("󰅖 Transcription cancelled (partial transcript kept)");
                 }
                 audio::AsrJobResult::Error(err) => {
                     self.is_transcribing = false;
                     self.asr_progress = None;
-                    self.audio_toast(format!("󰅚 Transcription: {}", err));
+                    if self.audio_index_pending {
+                        self.report_audio_index_result(format!("󰅚 Transcription: {err} (partial transcript kept)"));
+                    } else {
+                        self.audio_toast(format!("󰅚 Transcription: {err}"));
+                    }
                 }
             }
         }
@@ -14607,14 +15895,22 @@ impl eframe::App for Lapis {
                 continue;
             }
 
+            let result_key = result.scale_key * 2 + (result.dark_mode as u32);
+            // A superseded request may finish after the viewport changes.
+            if let Some((key, wanted)) = &self.last_page_req
+                && wanted.contains(&page_num)
+                && result_key != *key
+                && self.page_is_adequate(page_num, *key)
+            {
+                continue;
+            }
             let handle = ui.ctx().load_texture(
                 format!("pdf_page_{}", page_num),
                 result.image,
                 egui::TextureOptions::LINEAR,
             );
             self.page_cache.insert(page_num, (handle.clone(), (w, h)));
-            self.page_scale
-                .insert(page_num, result.scale_key * 2 + (result.dark_mode as u32));
+            self.page_scale.insert(page_num, result_key);
 
             self.touch_cache(page_num);
             self.evict_cache();
@@ -14655,13 +15951,23 @@ impl eframe::App for Lapis {
         let mut act_save = false;
         let mut act_toggle_notes = false;
         let mut act_toggle_mode = false;
+        let mut act_view_mode: Option<ViewMode> = None;
         let mut act_toggle_sketch = false;
+        let mut act_toggle_topbar = false;
+        let mut act_fit_page = false;
+        let mut act_fit_pdf_page = false;
+        let mut act_tool = None;
+        let mut act_shape = None;
+        let mut act_fit_width = false;
+        let mut act_toggle_night = false;
+        let mut act_toggle_tools = false;
         let mut act_toggle_toc = false;
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
 
-        if self.rebinding_action.is_none() {
+        if !self.show_settings && self.rebinding_action.is_none() {
             ui.input_mut(|i| {
+                state::track_key_presses(i);
                 // 1. Trackpad pinch or Ctrl + wheel zoom
                 let z_delta = i.zoom_delta();
                 if sketch_hover {
@@ -14713,26 +16019,60 @@ impl eframe::App for Lapis {
                     self.zoom_mode = ZoomMode::Custom;
                 }
 
-                // 3. Global Ctrl shortcuts (Ctrl+S, Ctrl+E, Ctrl+N, Ctrl+T)
+                // Configurable workspace and annotation shortcuts.
                 let sc = &self.app_state.shortcuts;
-                if sc.save_notes.consume(i) {
+                let text_context = any_focused || self.show_search || self.show_command_palette || self.show_flashcards_modal;
+                let allowed = |binding: &ShortcutBinding| !text_context || binding.ctrl || binding.alt;
+                if allowed(&sc.save_notes) && sc.save_notes.consume_once(i) {
                     act_save = true;
                 }
-                if sc.toggle_edit_preview.consume(i) {
+                if allowed(&sc.toggle_edit_preview) && sc.toggle_edit_preview.consume_once(i) {
                     act_toggle_mode = true;
                 }
-                if sc.toggle_notes.consume(i) {
+                if allowed(&sc.toggle_notes) && sc.toggle_notes.consume_once(i) {
                     act_toggle_notes = true;
                 }
-                if sc.toggle_sketch.consume(i) {
+                if allowed(&sc.toggle_sketch) && sc.toggle_sketch.consume_once(i) {
                     act_toggle_sketch = true;
                 }
-                if sc.toggle_outline.consume(i) {
+                if allowed(&sc.fit_page) && sc.fit_page.consume_once(i) {
+                    act_fit_page = true;
+                }
+                if !text_context && self.has_pdf() {
+                    let mut consume = |binding: &ShortcutBinding| binding.consume_once(i);
+                    act_fit_pdf_page = consume(&sc.fit_pdf_page);
+                    act_fit_width = consume(&sc.fit_width);
+                    act_toggle_night = consume(&sc.toggle_night);
+                    act_toggle_tools = consume(&sc.toggle_tools);
+                    for (binding, tool) in [
+                        (&sc.select_cursor, AnnotationTool::Cursor),
+                        (&sc.select_pen, AnnotationTool::Draw),
+                        (&sc.select_highlighter, AnnotationTool::Highlight),
+                        (&sc.select_textbox, AnnotationTool::TextBox),
+                        (&sc.select_underline, AnnotationTool::Underline),
+                        (&sc.select_eraser, AnnotationTool::Eraser),
+                        (&sc.select_snip, AnnotationTool::Snip),
+                        (&sc.select_tape, AnnotationTool::Tape),
+                    ] {
+                        if consume(binding) { act_tool = Some(tool); }
+                    }
+                    for (binding, shape) in [
+                        (&sc.select_rectangle, ShapeKind::Rect),
+                        (&sc.select_circle, ShapeKind::Circle),
+                        (&sc.select_line, ShapeKind::Line),
+                        (&sc.select_arrow, ShapeKind::Arrow),
+                    ] {
+                        if consume(binding) { act_shape = Some(shape); }
+                    }
+                }
+                if allowed(&sc.toggle_topbar) && sc.toggle_topbar.consume_once(i) {
+                    act_toggle_topbar = true;
+                }
+                if allowed(&sc.toggle_outline) && sc.toggle_outline.consume_once(i) {
                     act_toggle_toc = true;
                 }
-                // 4. Slide navigation, including while editing notes.
-                //    Alt + Left/Right, Alt + K/J, Ctrl + PageUp/PageDown, or PageUp/PageDown
-                if sc.prev_slide_global.consume(i)
+                // Configured page navigation and fixed PageUp/PageDown controls.
+                if allowed(&sc.prev_slide_global) && sc.prev_slide_global.consume(i)
                     || i.consume_shortcut(&egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
                         egui::Key::PageUp,
@@ -14740,7 +16080,7 @@ impl eframe::App for Lapis {
                 {
                     act_prev_page = true;
                 }
-                if sc.next_slide_global.consume(i)
+                if allowed(&sc.next_slide_global) && sc.next_slide_global.consume(i)
                     || i.consume_shortcut(&egui::KeyboardShortcut::new(
                         egui::Modifiers::NONE,
                         egui::Key::PageDown,
@@ -14750,15 +16090,17 @@ impl eframe::App for Lapis {
                 }
 
                 // 5. Standard Left/Right or K/J when not typing in a text box and annotation tools
-                if !any_focused {
-                    if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::K) {
-                        act_prev_page = true;
-                    }
-                    if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::J) {
-                        act_next_page = true;
+                if !text_context {
+                    if !i.modifiers.any() {
+                        if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::K) {
+                            act_prev_page = true;
+                        }
+                        if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::J) {
+                            act_next_page = true;
+                        }
                     }
                     if self.app_state.settings.radial_menu_enabled
-                        && self.app_state.shortcuts.radial_tools_menu.consume(i)
+                        && self.app_state.shortcuts.radial_tools_menu.consume_once(i)
                     {
                         self.radial_menu_pos = if self.radial_menu_pos.is_some() {
                             None
@@ -14769,29 +16111,25 @@ impl eframe::App for Lapis {
                         };
                     }
                 }
-                // Fullscreen: F11 always works (also while typing notes); a rebinding made of a
-                // plain key only works when no text field has the focus.
+                // F11 works while typing only when it is the configured fullscreen binding.
                 {
                     let b = &self.app_state.shortcuts.toggle_fullscreen;
-                    let plain = !b.ctrl && !b.alt && !b.shift && b.extra_key.is_none();
-                    let by_binding = (!plain || !any_focused) && b.consume(i);
-                    let by_f11 = i.consume_key(egui::Modifiers::NONE, egui::Key::F11);
-                    if by_binding || by_f11 {
+                    let by_binding = (allowed(b) || b.key == "F11") && b.consume_once(i);
+                    if by_binding {
                         act_toggle_fullscreen = true;
                     }
                 }
                 // 6. View Mode Shortcuts: Alt+1 (Single), Alt+2 (Continuous), Alt+3 (TwoPage), Alt+4 (Slideshow), Alt+4 (Slideshow+Notes), Esc (Exit Slideshow)
-                if sc.view_single.consume(i) {
-                    self.view_mode = ViewMode::SinglePage;
+                if allowed(&sc.view_single) && sc.view_single.consume_once(i) {
+                    act_view_mode = Some(ViewMode::SinglePage);
                 }
-                if sc.view_continuous.consume(i) {
-                    self.view_mode = ViewMode::Continuous;
-                    self.continuous_scroll_to_page = Some(self.current_page);
+                if allowed(&sc.view_continuous) && sc.view_continuous.consume_once(i) {
+                    act_view_mode = Some(ViewMode::Continuous);
                 }
-                if sc.view_twopage.consume(i) {
+                if allowed(&sc.view_twopage) && sc.view_twopage.consume_once(i) {
                     self.view_mode = ViewMode::TwoPage;
                 }
-                if sc.view_slideshow.consume(i) {
+                if allowed(&sc.view_slideshow) && sc.view_slideshow.consume_once(i) {
                     if self.view_mode != ViewMode::Slideshow
                         && self.view_mode != ViewMode::SlideshowWithNotes
                     {
@@ -14799,7 +16137,7 @@ impl eframe::App for Lapis {
                     }
                     self.view_mode = ViewMode::Slideshow;
                 }
-                if sc.view_slideshow_notes.consume(i) {
+                if allowed(&sc.view_slideshow_notes) && sc.view_slideshow_notes.consume_once(i) {
                     if self.view_mode != ViewMode::Slideshow
                         && self.view_mode != ViewMode::SlideshowWithNotes
                     {
@@ -14820,16 +16158,14 @@ impl eframe::App for Lapis {
                     self.view_mode,
                     ViewMode::Slideshow | ViewMode::SlideshowWithNotes
                 );
-                if !any_focused && !in_show && self.has_pdf() {
+                if !text_context && !in_show && self.has_pdf() {
                     let b = &self.app_state.shortcuts.toggle_continuous_single;
-                    let chord_free = b.ctrl || !i.modifiers.command;
-                    if chord_free && b.consume(i) {
-                        if self.view_mode == ViewMode::Continuous {
-                            self.view_mode = ViewMode::SinglePage;
+                    if b.consume_once(i) {
+                        act_view_mode = Some(if self.view_mode == ViewMode::Continuous {
+                            ViewMode::SinglePage
                         } else {
-                            self.view_mode = ViewMode::Continuous;
-                            self.continuous_scroll_to_page = Some(self.current_page);
-                        }
+                            ViewMode::Continuous
+                        });
                     }
                 }
                 // 7. Continuous Viewmode arrows shortcuts
@@ -14875,7 +16211,7 @@ impl eframe::App for Lapis {
                     self.redo_annotation(self.current_page);
                 }
                 //10. Search
-                if self.app_state.shortcuts.search_notes.consume(i) {
+                if allowed(&self.app_state.shortcuts.search_notes) && self.app_state.shortcuts.search_notes.consume_once(i) {
                     if self.show_search {
                         self.close_search();
                     } else {
@@ -14896,19 +16232,15 @@ impl eframe::App for Lapis {
                 }
             });
         }
+        if let Some(mode) = act_view_mode {
+            self.set_view_mode(mode);
+        }
         if copy_triggered && let Some(text) = self.selection_text() {
             self.clipboard.set_text(&text);
         }
 
         if act_save {
-            let result = self.save_pdf_explicitly();
-            self.toast_message = Some((
-                match result {
-                    Ok(()) => "󰄬 Saved".to_string(),
-                    Err(err) => format!("PDF save failed: {err}"),
-                },
-                std::time::Instant::now(),
-            ));
+            self.request_pdf_save(AfterPdfSave::Stay, ui.ctx());
         }
         if act_toggle_toc {
             self.show_toc = !self.show_toc;
@@ -14917,11 +16249,47 @@ impl eframe::App for Lapis {
             self.show_notes = !self.show_notes;
             if self.show_notes {
                 self.note_mode = NoteMode::Edit;
-                self.focus_note_editor = true;
+                self.focus_note_editor = !self.app_state.shortcuts.toggle_notes.is_plain();
             }
         }
         if act_toggle_sketch {
             self.toggle_sketch_tab();
+        }
+        if let Some(tool) = act_tool {
+            self.annotation_tool = tool;
+        }
+        if let Some(shape) = act_shape {
+            self.shape_kind = shape;
+            self.annotation_tool = AnnotationTool::Shape;
+        }
+        if act_fit_width {
+            self.zoom_mode = ZoomMode::FitWidth;
+            self.zoom_anchor = None;
+        }
+        if act_toggle_night {
+            self.pdf_dark_mode = !self.pdf_dark_mode;
+            self.page_cache.clear();
+            self.page_scale.clear();
+            self.thumb_cache.clear();
+            self.last_page_req = None;
+            self.last_thumb_req = None;
+            self.save_session_state();
+        }
+        if act_toggle_tools {
+            self.show_tools_rail = !self.show_tools_rail;
+            if !self.show_tools_rail && self.app_state.settings.reset_tool_on_bar_close {
+                self.annotation_tool = AnnotationTool::Cursor;
+            }
+        }
+        if act_fit_pdf_page {
+            self.zoom_mode = ZoomMode::FitPage;
+            self.zoom_anchor = None;
+        }
+        if act_fit_page && !use_bottom_notes {
+            self.request_fit_notes_layout(ui.ctx());
+        }
+        if act_toggle_topbar && self.has_pdf() {
+            self.toggle_topbar();
         }
         if act_toggle_mode && self.show_notes {
             self.note_mode = match self.note_mode {
@@ -14987,23 +16355,50 @@ impl eframe::App for Lapis {
             }
         }
 
+        if in_slideshow && self.fullscreen_cmd_at.is_some_and(|t| {
+            t.elapsed() < std::time::Duration::from_millis(800)
+        }) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
+
         if !in_slideshow && self.has_pdf() {
-            egui::Panel::top("top_panel")
+            let topbar_slot = self.topbar_slot(ui);
+            // The topbar itself, drawn into whichever ui the slot provides.
+            let overlay_at_bottom =
+                self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+            let bar = self.app_state.settings.ui_density.bar();
+            let overlay_height = bar.row_h + 2.0 * f32::from(bar.margin_y);
+            let mut draw_topbar = |ui: &mut egui::Ui| -> f32 {
+                // Popups opened from the topbar set this again while they are open.
+                self.topbar_popup_open = false;
+            // Density sets the row height, margins and button padding.
+            let density = self.app_state.settings.ui_density;
+            let bar = density.bar();
+            let (bar_h, margin_y, pad_y) = (bar.row_h, bar.margin_y, bar.pad_y);
+            let at_bottom = self.app_state.settings.topbar_position == state::TopbarPosition::Bottom;
+            let panel = if at_bottom {
+                egui::Panel::bottom("top_panel")
+            } else {
+                egui::Panel::top("top_panel")
+            };
+            let panel_out = panel
             .frame(
                 egui::Frame::NONE
                     .fill(rgb(self.theme.bg_panel))
-                    .inner_margin(egui::Margin::symmetric(8, 3)),
+                    .inner_margin(egui::Margin::symmetric(8, margin_y)),
             )
             .show(ui, |ui| {
-                const BAR_H: f32 = 27.0;
-                let sq_btn = egui::vec2(BAR_H, BAR_H);
+                if density != state::UiDensity::Standard {
+                    ui.spacing_mut().button_padding.y = pad_y;
+                }
+                let sq_btn = egui::vec2(bar_h, bar_h);
 
 
             let bar_rect = ui.max_rect();
                 let bar_w = bar_rect.width();
                 // Fixed-height toolbar row: left group, right group, and title.
                 // are positioned independently at the row edges and center.
-                let row_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w, BAR_H));
+                let row_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w, bar_h));
  
                 // Compactness stage (0 = expanded, 4 = minimal), based on the previous frame.
                 let stage_id = ui.make_persistent_id("topbar_stage");
@@ -15018,16 +16413,15 @@ impl eframe::App for Lapis {
  
                 // Left control group.
                 ui.horizontal(|ui| {
-                    ui.set_height(BAR_H);
+                    ui.set_height(bar_h);
  
                     // Outline toggle
                     let toc_arrow = if self.show_toc { "" } else { "" };
-                    let toc_btn = egui::Button::new(format!(" {}", toc_arrow))
-                        .selected(self.show_toc)
-                        .min_size(egui::vec2(44.0, BAR_H));
+                    let toc_btn = crate::theme::selected_button(format!(" {}", toc_arrow), self.show_toc, ui.visuals())
+                        .min_size(egui::vec2(44.0, bar_h));
                     if ui
                         .add(toc_btn)
-                        .on_hover_text("Toggle Outline")
+                        .on_hover_text(self.app_state.shortcuts.toggle_outline.hint("Toggle Outline"))
                         .clicked()
                     {
                         self.show_toc = !self.show_toc;
@@ -15065,7 +16459,7 @@ impl eframe::App for Lapis {
                     }
                     ui.separator();
                     if ui
-                        .selectable_label(self.zoom_mode == ZoomMode::FitWidth, "󰤼  Fit Width")
+                        .selectable_label(self.zoom_mode == ZoomMode::FitWidth, self.app_state.shortcuts.fit_width.hint("󰤼  Fit Width"))
                         .clicked()
                     {
                         self.zoom_mode = ZoomMode::FitWidth;
@@ -15082,7 +16476,7 @@ impl eframe::App for Lapis {
                         ui.close();
                     }
                     if ui
-                        .selectable_label(self.zoom_mode == ZoomMode::FitPage, "󰊓  Fit Page")
+                        .selectable_label(self.zoom_mode == ZoomMode::FitPage, self.app_state.shortcuts.fit_pdf_page.hint("󰊓  Fit Page"))
                         .clicked()
                     {
                         self.zoom_mode = ZoomMode::FitPage;
@@ -15103,7 +16497,7 @@ impl eframe::App for Lapis {
                     }
                 });
 
-                let resp = zoom_menu.response.on_hover_text("Zoom Mode [Ctrl+Scroll] | Right Click: Fit Page");
+                let resp = zoom_menu.response.on_hover_text(format!("Zoom Mode [Ctrl+Scroll] | Right Click: {} | {}", self.app_state.shortcuts.fit_pdf_page.hint("Fit Page"), self.app_state.shortcuts.fit_width.hint("Fit Width")));
 
                 if resp.hovered() && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
                     self.zoom_mode = ZoomMode::FitPage;
@@ -15160,32 +16554,29 @@ impl eframe::App for Lapis {
                         .layout(egui::Layout::right_to_left(egui::Align::Center)),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+                        ui.spacing_mut().button_padding = egui::vec2(6.0, pad_y);
 
                         // Notes
-                        let page_has_note = self.notes.get(&self.current_page).map(|s| !s.trim().is_empty()).unwrap_or(false) || !self.current_note.trim().is_empty();
+                        let page_has_note = page_has_notes_or_sketch(
+                            self.current_page,
+                            self.note_page,
+                            &self.current_note,
+                            &self.notes,
+                            &self.sketches,
+                        );
  
                         let notes_arrow = if self.show_notes { "" } else { "" };
-                        let notes_btn = egui::Button::new(format!("{} 󰠮 ", notes_arrow))
-                            .selected(self.show_notes)
-                            .min_size(egui::vec2(44.0, BAR_H));
+                        let notes_btn = crate::theme::selected_button(format!("{} 󰠮 ", notes_arrow), self.show_notes, ui.visuals())
+                            .min_size(egui::vec2(44.0, bar_h));
  
                         let resp = ui.add(notes_btn);
  
                         if page_has_note {
-                            let dot_center = egui::pos2(resp.rect.right_top().x - 2.0, resp.rect.right_top().y + 2.0);                            
-                            let dot_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 255));
- 
-                            ui.painter().circle(
-                                dot_center,
-                                3.5,
-                                theme::rgb(self.theme.accent),
-                                dot_stroke,
-                            );
+                            self.paint_topbar_dot(ui, resp.rect);
                         }
  
-                        let has_notes_hover = if page_has_note {"\n(This page contains notes)"} else {""};
-                        if resp.on_hover_text(format!("Toggle Notes Panel {}", has_notes_hover)).clicked() {
+                        let has_notes_hover = if page_has_note {"\n(This page contains notes or a sketch)"} else {""};
+                        if resp.on_hover_text(format!("{}{}", self.app_state.shortcuts.toggle_notes.hint("Toggle Notes Panel"), has_notes_hover)).clicked() {
                             self.show_notes = !self.show_notes;
                             if self.show_notes && self.note_mode == NoteMode::Edit {
                                 self.focus_note_editor = true;
@@ -15206,7 +16597,7 @@ impl eframe::App for Lapis {
  
                         if ui
                             .add(egui::Button::new("󰁔").min_size(sq_btn))
-                            .on_hover_text("Next Page [→ / J / Alt+→]")
+                            .on_hover_text(self.app_state.shortcuts.next_slide_global.hint("Next Page [→ / J / PageDown]"))
                             .clicked()
                         {
                             self.next_page(ui.ctx());
@@ -15219,7 +16610,7 @@ impl eframe::App for Lapis {
  
                         let response = ui
                             .add_sized(
-                                [42.0, BAR_H - 2.0],
+                                [42.0, bar_h - 2.0],
                                 egui::DragValue::new(&mut self.target_page)
                                     .range(1..=self.total_pages)
                                     .speed(0.1),
@@ -15233,7 +16624,7 @@ impl eframe::App for Lapis {
  
                         if ui
                             .add(egui::Button::new("󰁍").min_size(sq_btn))
-                            .on_hover_text("Previous Page [← / K / Alt+←]")
+                            .on_hover_text(self.app_state.shortcuts.prev_slide_global.hint("Previous Page [← / K / PageUp]"))
                             .clicked()
                         {
                             self.prev_page(ui.ctx());
@@ -15364,7 +16755,7 @@ impl eframe::App for Lapis {
  
                 let menu_label = make_label(&chosen_title, arrow);
                 let measure_label = make_label(&chosen_title, "▾");
-                let total_size = egui::vec2(label_w(&measure_label), BAR_H);
+                let total_size = egui::vec2(label_w(&measure_label), bar_h);
                 let half = total_size.x / 2.0;
                 let lo = left_end_x + TITLE_GAP + half;
                 let hi = right_start_x - TITLE_GAP - half;
@@ -15390,8 +16781,11 @@ impl eframe::App for Lapis {
                         let btn_resp = ui
                             .add_sized(
                                 total_size,
-                                egui::Button::new(egui::RichText::new(menu_label).font(font_id))
-                                    .selected(is_open)
+                                crate::theme::selected_button(
+                                    egui::RichText::new(menu_label).font(font_id),
+                                    is_open,
+                                    ui.visuals(),
+                                )
                                     .corner_radius(egui::CornerRadius::same(
                                         self.theme.corner_radius,
                                     )),
@@ -15409,17 +16803,8 @@ impl eframe::App for Lapis {
  
                 if is_open {
                     let mut close_requested = false;
-                    let (popup_pos, popup_pivot) = if !title_fits {
-                        (
-                            egui::pos2(button_rect.left(), button_rect.bottom() + 6.0),
-                            egui::Align2::LEFT_TOP,
-                        )
-                    } else {
-                        (
-                            egui::pos2(button_rect.center().x, button_rect.bottom() + 6.0),
-                            egui::Align2::CENTER_TOP,
-                        )
-                    };
+                    let (popup_pos, popup_pivot) =
+                        self.topbar_popup_placement(button_rect, title_fits);
  
                     let area_resp = egui::Area::new(ui.make_persistent_id("file_menu_area"))
                         .fixed_pos(popup_pos)
@@ -15447,6 +16832,8 @@ impl eframe::App for Lapis {
                                         );
                                         ui.add_space(3.0);
                                     };
+                                    // Computed outside the closure so it does not keep `self` borrowed.
+                                    let menu_item_h = self.sz(26.0);
                                     let menu_item = |ui: &mut egui::Ui,
                                                      label: &str,
                                                      enabled: bool|
@@ -15454,7 +16841,7 @@ impl eframe::App for Lapis {
                                         let btn = egui::Button::new(
                                             egui::RichText::new(label).size(11.8),
                                         )
-                                        .min_size(egui::vec2(menu_width, 26.0))
+                                        .min_size(egui::vec2(menu_width, menu_item_h))
                                         .corner_radius(menu_radius);
                                         ui.add_enabled(enabled, btn)
                                             .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -15485,22 +16872,15 @@ impl eframe::App for Lapis {
                                         .on_hover_text("Close current document and return to Welcome Screen")
                                         .clicked()
                                     {
-                                        self.close_pdf();
+                                        self.request_pdf_save(AfterPdfSave::Home, ui.ctx());
                                         close_requested = true;
                                     }
 
                                     if menu_item(ui, "󰆓  Save Notes", true)
-                                        .on_hover_text("Checkpoint locally and commit the PDF")
+                                        .on_hover_text(self.app_state.shortcuts.save_notes.hint("Checkpoint locally and commit the PDF"))
                                         .clicked()
                                     {
-                                        let result = self.save_pdf_explicitly();
-                                        self.toast_message = Some((
-                                            match result {
-                                                Ok(()) => "󰄬 Saved".to_string(),
-                                                Err(err) => format!("PDF save failed: {err}"),
-                                            },
-                                            std::time::Instant::now(),
-                                        ));
+                                        self.request_pdf_save(AfterPdfSave::Stay, ui.ctx());
                                         close_requested = true;
                                     }
 
@@ -15570,10 +16950,50 @@ impl eframe::App for Lapis {
                 }
  
                 ui.data_mut(|d| *d.get_temp_mut_or_default::<bool>(menu_id) = is_open);
+                if is_open {
+                    self.topbar_popup_open = true;
+                }
 
             });
+            panel_out.response.rect.height()
+            };
+
+            // Docked, revealed as an overlay (auto-hide), or hidden.
+            let mut overlay_h = 0.0;
+            let mut dock_h = 0.0;
+            match topbar_slot {
+                TopbarSlot::Docked => dock_h = draw_topbar(ui),
+                TopbarSlot::Overlay => {
+                    let ctx = ui.ctx().clone();
+                    let screen = ctx.content_rect();
+                    let area = egui::Area::new(ui.make_persistent_id("topbar_overlay"))
+                        .order(egui::Order::Foreground)
+                        .constrain(false)
+                        .default_size(egui::vec2(screen.width(), overlay_height));
+                    let area = if overlay_at_bottom {
+                        area.anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::ZERO)
+                    } else {
+                        area.fixed_pos(screen.min)
+                    };
+                    let area = area
+                        .show(&ctx, |area_ui| {
+                            area_ui.set_width(screen.width());
+                            area_ui.set_max_height(overlay_height);
+                            draw_topbar(area_ui)
+                        });
+                    overlay_h = area.inner;
+                }
+                TopbarSlot::Hidden => {}
+            }
+            self.topbar_overlay_h = overlay_h;
+            self.topbar_dock_h = dock_h;
+        } else {
+            self.topbar_overlay_h = 0.0;
+            self.topbar_dock_h = 0.0;
         }
 
+        // Set again by the sub-topbar when it is drawn this frame.
+        self.subbar_h = 0.0;
         if self.has_pdf() && self.view_mode != ViewMode::Slideshow {
             match self.app_state.settings.tools_layout {
                 state::ToolsLayoutMode::SubTopbar => {
@@ -15591,39 +17011,51 @@ impl eframe::App for Lapis {
 
         // Left Panel (Dual-Mode Sidebar: Thumbnails Grid & Outline/Bookmarks)
         if self.show_toc && self.has_pdf() && !in_slideshow {
-            let scroll_sidebar_to_current = self.last_synced_sidebar_page != self.current_page;
+            // Also re-sync when the tab changes: the hidden tab did not scroll while the page moved.
+            let scroll_sidebar_to_current = self.last_synced_sidebar_page != self.current_page
+                || self.last_synced_sidebar_tab != self.sidebar_tab;
 
             if scroll_sidebar_to_current {
                 self.last_synced_sidebar_page = self.current_page;
+                self.last_synced_sidebar_tab = self.sidebar_tab;
             }
             egui::Panel::left("toc_panel")
                 .resizable(true)
                 .default_size(170.0)
                 .show(ui, |ui| {
                     // Top switcher: thumbnails or outline.
-                    ui.add_space(4.0);
+                    let tab_h = self.sz(26.0);
+                    ui.add_space(self.sz(4.0));
                     ui.columns(2, |cols| {
                         if cols[0]
                             .add_sized(
-                                [cols[0].available_width(), 26.0],
-                                egui::Button::new(" 󰕰 ")
-                                    .selected(self.sidebar_tab == SidebarTab::Thumbnails),
+                                [cols[0].available_width(), tab_h],
+                                crate::theme::selected_button(
+                                    " 󰕰 ",
+                                    self.sidebar_tab == SidebarTab::Thumbnails,
+                                    cols[0].visuals(),
+                                ),
                             )
                             .on_hover_text("Thumbnails")
                             .clicked()
                         {
                             self.sidebar_tab = SidebarTab::Thumbnails;
+                            cols[0].ctx().request_repaint(); // apply the sync next frame
                         }
                         if cols[1]
                             .add_sized(
-                                [cols[1].available_width(), 26.0],
-                                egui::Button::new("  ")
-                                    .selected(self.sidebar_tab == SidebarTab::Outline),
+                                [cols[1].available_width(), tab_h],
+                                crate::theme::selected_button(
+                                    "  ",
+                                    self.sidebar_tab == SidebarTab::Outline,
+                                    cols[1].visuals(),
+                                ),
                             )
                             .on_hover_text("Outline and Bookmarks")
                             .clicked()
                         {
                             self.sidebar_tab = SidebarTab::Outline;
+                            cols[1].ctx().request_repaint(); // apply the sync next frame
                         }
                     });
                     ui.separator();
@@ -16257,6 +17689,9 @@ impl eframe::App for Lapis {
                 });
         }
 
+        let fit_notes_layout = std::mem::take(&mut self.fit_notes_layout_pending)
+            && self.can_fit_notes_layout() && !use_bottom_notes;
+
         // Right Panel (Notes + Bottom Annotation Tools)
         if self.has_pdf() {
             if self.view_mode == ViewMode::SlideshowWithNotes {
@@ -16294,7 +17729,7 @@ impl eframe::App for Lapis {
                             |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
 
                         egui::Area::new(ui.make_persistent_id("slideshow_hud"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(-20.0, 20.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 20.0))
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::NONE
@@ -16352,12 +17787,26 @@ impl eframe::App for Lapis {
                             });
                     }
 
-                    egui::Panel::right("slideshow_notes_panel")
+                    let max_w = (win_rect.width() * 0.8).max(150.0);
+                    let panel = egui::Panel::right("slideshow_notes_panel")
                         .resizable(true)
                         .default_size(320.0)
-                        .show(ui, |ui| {
-                            self.render_slideshow_notes_contents(ui, active_slide_note);
-                        });
+                        .size_range(150.0..=max_w);
+                    let panel =
+                        self.restore_panel_size(panel, PanelSlot::Slideshow, 320.0, (150.0, max_w));
+                    let resp = panel.show(ui, |ui| {
+                        // Keep Markdown widgets from growing the panel's measured width.
+                        let rect = ui.max_rect();
+                        let mut child = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+                        self.render_slideshow_notes_contents(&mut child, active_slide_note);
+                        ui.allocate_rect(rect, egui::Sense::hover());
+                    });
+                    self.track_panel_size(ui, PanelSlot::Slideshow, resp.response.rect.width());
                 }
             } else if self.show_notes && !in_slideshow {
                 if use_bottom_notes {
@@ -16373,29 +17822,63 @@ impl eframe::App for Lapis {
                             egui::Frame::side_top_panel(ui.style())
                                 .inner_margin(egui::Margin::symmetric(6, 0)),
                         );
-                    notes_panel.show(ui, |ui| {
+                    let default_h = (win_rect.height() * 0.36).clamp(180.0, 420.0);
+                    let notes_panel = self.restore_panel_size(
+                        notes_panel,
+                        PanelSlot::Bottom,
+                        default_h,
+                        (120.0, max_panel_h),
+                    );
+                    let resp = notes_panel.show(ui, |ui| {
                         self.render_notes_panel_contents(ui, text_edit_id, true);
                     });
+                    self.track_panel_size(ui, PanelSlot::Bottom, resp.response.rect.height());
                 } else {
+                    let available = ui.available_rect_before_wrap();
+                    let min_w = 250.0_f32.min((available.width() - 100.0).max(1.0));
+                    let reserved_pdf_w = if self.split_view_enabled { 340.0 } else { 100.0 };
+                    let max_w = (available.width() - reserved_pdf_w).max(min_w);
+                    if fit_notes_layout {
+                        let size = self.fit_notes_target_width(available, min_w, max_w);
+                        self.panel_sizes.set(PanelSlot::Right, size);
+                        self.panel_apply[PanelSlot::Right as usize] = true;
+                        self.panel_sizes_dirty = true;
+                        self.zoom_mode = ZoomMode::FitPage;
+                        self.zoom_anchor = None;
+                        ui.ctx().request_repaint();
+                    }
                     let notes_panel = egui::Panel::right("notes_panel")
                         .resizable(true)
                         .default_size(350.0)
-                        .size_range(250.0..=520.0)
+                        .size_range(min_w..=max_w)
                         // Match the bottom-panel treatment: a stable frame across all note modes,
                         // with a modest horizontal inset around the notes content.
                         .frame(
                             egui::Frame::side_top_panel(ui.style())
                                 .inner_margin(egui::Margin::symmetric(6, 0)),
                         );
-                    notes_panel.show(ui, |ui| {
+                    let notes_panel = self.restore_panel_size(
+                        notes_panel,
+                        PanelSlot::Right,
+                        350.0,
+                        (min_w, max_w),
+                    );
+                    let resp = notes_panel.show(ui, |ui| {
                         self.render_notes_panel_contents(ui, text_edit_id, false);
                     });
+                    self.track_panel_size(ui, PanelSlot::Right, resp.response.rect.width());
+                    if !fit_notes_layout {
+                        self.handle_fit_notes_divider_double_click(ui, &resp.response, available, min_w, max_w);
+                    }
                 }
             }
         }
 
         // Central Panel (Welcome Screen when no PDF is loaded, otherwise PDF Canvas)
         // Secondary PDF Pane when Split-View is active (resizable side-by-side PDF view!)
+        if self.view_mode != ViewMode::SinglePage {
+            self.single_page_wheel = SinglePageWheel::default();
+        }
         if self.split_view_enabled && self.has_pdf() && !in_slideshow {
             egui::Panel::right("pdf_split_secondary_pane")
                 .resizable(true)
@@ -16423,7 +17906,8 @@ impl eframe::App for Lapis {
                                 );
                                 ui.separator();
 
-                                if ui.add_sized([22.0, 22.0], egui::Button::new("")).clicked()
+                                let split_h = self.sz(22.0);
+                                if ui.add_sized([split_h, split_h], egui::Button::new("")).clicked()
                                     && self.split_secondary_page > 1
                                 {
                                     self.split_secondary_page -= 1;
@@ -16432,7 +17916,7 @@ impl eframe::App for Lapis {
                                 let mut sec_p = self.split_secondary_page;
                                 if ui
                                     .add_sized(
-                                        [46.0, 22.0],
+                                        [46.0, split_h],
                                         egui::DragValue::new(&mut sec_p)
                                             .prefix("p.")
                                             .range(1..=self.total_pages.max(1))
@@ -16444,7 +17928,7 @@ impl eframe::App for Lapis {
                                         sec_p.clamp(1, self.total_pages.max(1));
                                 }
 
-                                if ui.add_sized([22.0, 22.0], egui::Button::new("")).clicked()
+                                if ui.add_sized([split_h, split_h], egui::Button::new("")).clicked()
                                     && self.split_secondary_page < self.total_pages
                                 {
                                     self.split_secondary_page += 1;
@@ -16522,10 +18006,18 @@ impl eframe::App for Lapis {
                         let disp_w = base_w * self.split_secondary_zoom;
                         let disp_h = base_h * self.split_secondary_zoom;
 
+                        // Same wheel speed and middle-button drag as the main page.
+                        let pane_rect = ui.available_rect_before_wrap();
+                        self.apply_wheel_speed(ui, pane_rect);
+                        let pane_pan = self.middle_drag_pan(ui, "split_secondary", pane_rect);
+
                         egui::ScrollArea::both()
                             .id_salt("split_secondary_scroll")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                if pane_pan != egui::Vec2::ZERO {
+                                    ui.scroll_with_delta(pane_pan);
+                                }
                                 let pad_x = ((avail.x - disp_w) * 0.5).max(0.0);
                                 let pad_y = ((avail.y - disp_h) * 0.5).max(0.0);
                                 ui.add_space(pad_y);
@@ -17286,9 +18778,21 @@ impl eframe::App for Lapis {
 
                     return;
                 }
+                // egui fades the canvas edges when the page overflows (zoomed); keep it subtle.
+                ui.spacing_mut().scroll.fade = egui::style::ScrollFadeStyle {
+                    strength: 0.12,
+                    size: 10.0,
+                };
                 let visible_w = ui.available_width();
                 let visible_h = ui.available_height();
 
+                let current_texture_ready = cached_page(&self.page_cache, &self.thumb_cache, self.current_page).is_some();
+                if matches!(self.view_mode, ViewMode::SinglePage | ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+                    if let Some((handle, dims)) = cached_page(&self.page_cache, &self.thumb_cache, self.current_page) {
+                        self.texture_handle = Some(handle.clone());
+                        self.page_dims = *dims;
+                    }
+                }
                 let page_w = self.page_dims.0 as f32;
                 let page_h = self.page_dims.1 as f32;
                 let (base_w, base_h) = if page_w > 0.0 && page_h > 0.0 {
@@ -17319,8 +18823,8 @@ impl eframe::App for Lapis {
                         (h / aspect_ratio, h)
                     }
                     ZoomMode::FitPage => {
-                        let max_w = (visible_w - EDGE_PAD).max(100.0);
-                        let max_h = (visible_h - EDGE_PAD).max(100.0);
+                        let max_w = (visible_w - EDGE_PAD).max(1.0);
+                        let max_h = (visible_h - EDGE_PAD).max(1.0);
                         let scale = (max_w / base_w).min(max_h / base_h);
                         (base_w * scale, base_h * scale)
                     }
@@ -17367,12 +18871,19 @@ impl eframe::App for Lapis {
             if !mid_down {
                 self.pdf_panning = false;
             }
-            let pan_speed = if self.view_mode == ViewMode::Continuous { 4.8 } else { 3.5 };
+            let pan_speed = self.pan_speed();
             let pan_delta = if self.pdf_panning {
                 ptr_delta * pan_speed
             } else {
                 egui::Vec2::ZERO
             };
+            // One wheel speed for every page view (single, continuous and book).
+            if !in_slideshow
+                && !self.pdf_panning
+                && ptr_pos.is_some_and(|p| self.canvas_rect.contains(p))
+            {
+                self.apply_wheel_speed(ui, self.canvas_rect);
+            }
 
                 if self.pdf_panning {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -17393,7 +18904,7 @@ impl eframe::App for Lapis {
                         };
 
                         egui::Area::new(ui.make_persistent_id("slideshow_hud"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(-20.0, 20.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 20.0))
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::NONE
@@ -17475,19 +18986,8 @@ impl eframe::App for Lapis {
                 }
 
                 else if self.view_mode == ViewMode::Continuous {
-    let hover_in_canvas = ui
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|p| self.canvas_rect.contains(p));
-    if hover_in_canvas && !self.pdf_panning {
-        ui.input_mut(|i| {
-            if !i.modifiers.ctrl && !i.modifiers.command {
-                const CONTINUOUS_WHEEL_MULT: f32 = 2.2;
-                i.smooth_scroll_delta *= CONTINUOUS_WHEEL_MULT;
-            }
-        });
-    }
     ui.spacing_mut().item_spacing.y = 0.0;
-    let gap = 14.0;
+    let gap = CONTINUOUS_GAP;
     let row_h = display_h + gap;
     let visible_doc_pages: Vec<u32> = (1..=self.total_pages)
         .filter(|p| !self.hidden_pages.contains(p))
@@ -17527,6 +19027,7 @@ impl eframe::App for Lapis {
     
 
     let just_jumped = self.continuous_scroll_to_page.is_some();
+    let switch_offset = self.mode_switch_offset.take();
 
     if let Some(target_p) = self.continuous_scroll_to_page.take() {
         let row_idx = visible_doc_pages
@@ -17534,8 +19035,13 @@ impl eframe::App for Lapis {
             .position(|&p| p >= target_p)
             .unwrap_or(0);
 
-        let offset_y = ((row_idx as f32) * row_pitch).clamp(0.0, max_scroll_y);
+        // From Single mode, keep the position inside the page.
+        let in_page_y = switch_offset.map_or(0.0, |o| o.y);
+        let offset_y = ((row_idx as f32) * row_pitch + in_page_y).clamp(0.0, max_scroll_y);
         scroll_area = scroll_area.vertical_scroll_offset(offset_y);
+        if let Some(o) = switch_offset {
+            scroll_area = scroll_area.horizontal_scroll_offset(o.x);
+        }
 
         self.jump_lock_y = Some(offset_y);
         self.jump_lock_frame = ui.ctx().cumulative_frame_nr();
@@ -17665,6 +19171,9 @@ impl eframe::App for Lapis {
             let margin = ((visible_w - display_w) * 0.5).max(0.0);
 
             ui.horizontal(|ui| {
+                if effective_zoom == ZoomMode::FitPage {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                }
                 if margin > 0.0 {
                     ui.add_space(margin);
                 }
@@ -17730,6 +19239,7 @@ impl eframe::App for Lapis {
             .is_none_or(|d| (actual_y - d.min(real_max)).abs() < 40.0);
         if content_ok && at_target {
             self.reanchor_left = 0;
+            ui.ctx().request_repaint();
         } else {
             self.reanchor_left -= 1;
             ui.ctx().request_repaint();
@@ -17763,7 +19273,8 @@ impl eframe::App for Lapis {
 
     // 3. At the bottom, select the last page;
     // otherwise select the page nearest the center.
-    if !reanchoring
+    if !self.notes_panel_resizing
+        && !reanchoring
         && !just_jumped
         && self.jump_lock_y.is_none()
         && self.continuous_scroll_to_page.is_none()
@@ -17809,8 +19320,10 @@ impl eframe::App for Lapis {
                             (h / aspect_ratio, h)
                         }
                         ZoomMode::FitPage => {
-                            let max_single_w = ((visible_w - 4.0 - spine_gap) * 0.5).max(80.0);
-                            let max_h = (visible_h - 4.0).max(80.0);
+                            let count = left_opt.iter().count() + right_opt.iter().count();
+                            let gap = if count == 2 { spine_gap } else { 0.0 };
+                            let max_single_w = ((visible_w - EDGE_PAD - gap) / count.max(1) as f32).max(1.0);
+                            let max_h = (visible_h - EDGE_PAD).max(1.0);
                             let scale = (max_single_w / base_w).min(max_h / base_h);
                             (base_w * scale, base_h * scale)
                         }
@@ -17832,10 +19345,16 @@ impl eframe::App for Lapis {
                         book_page_w
                     };
 
-                    egui::ScrollArea::both()
+                    let book_out = egui::ScrollArea::both()
                         .id_salt("pdf_book_twopage_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            if pan_delta != egui::Vec2::ZERO {
+                                ui.scroll_with_delta(pan_delta);
+                            }
+                            if effective_zoom == ZoomMode::FitPage {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                            }
                             let pad_x = ((visible_w - total_spread_w) * 0.5).max(0.0);
                             let pad_y = ((visible_h - book_page_h) * 0.5).max(0.0);
 
@@ -17941,14 +19460,10 @@ impl eframe::App for Lapis {
                                 }
                             });
                         });
+                    self.canvas_rect = book_out.inner_rect;
                     return;
                 }
                 if self.view_mode == ViewMode::SinglePage || self.view_mode == ViewMode::Slideshow || self.view_mode == ViewMode::SlideshowWithNotes  {
-                    if let Some((handle, dims)) = self.page_cache.get(&self.current_page) {
-                        self.texture_handle = Some(handle.clone());
-                        self.page_dims = *dims;
-                    }
-                    
                     let mut canvas_scroll = egui::ScrollArea::both()
                         .id_salt("pdf_canvas_scroll")
                         .auto_shrink([false, false]);
@@ -17980,6 +19495,61 @@ impl eframe::App for Lapis {
                         canvas_scroll = canvas_scroll.scroll_offset(egui::vec2(x, y));
                     }
 
+                    // Coming from Continuous mode: keep the position inside the page.
+                    let pending_offset = self.mode_switch_offset.take();
+                    if let Some(o) = pending_offset {
+                        canvas_scroll = canvas_scroll.scroll_offset(o);
+                    }
+
+                    // A wheel turn must not discard the next frame's scroll events.
+                    let wheel_reset = std::mem::take(&mut self.single_page_wheel.reset_offset);
+                    if wheel_reset && pending_offset.is_none() && zoom_fix.is_none() {
+                        canvas_scroll = canvas_scroll.scroll_offset(egui::Vec2::ZERO);
+                    }
+                    let old_offset = if wheel_reset { 0.0 } else { self.pdf_scroll_offset.y };
+                    let wheel = if self.view_mode == ViewMode::SinglePage
+                        && !zoom_changed
+                        && zoom_fix.is_none()
+                        && pending_offset.is_none()
+                        && !self.notes_panel_resizing
+                        && !self.pdf_panning
+                        && !self.trackpad_drawing_active
+                        && !self.show_settings
+                        && !self.show_search
+                        && !self.show_command_palette
+                        && !self.show_flashcards_modal
+                        && self.radial_menu_pos.is_none()
+                    {
+                        ui.input(|i| {
+                            if i.modifiers.any()
+                                || i.pointer.any_down()
+                                || self.app_state.shortcuts.trackpad_draw_hold.is_held(i)
+                            {
+                                return None;
+                            }
+                            // Include native momentum, but not egui's synthetic smoothing tail.
+                            let mut d = egui::Vec2::ZERO;
+                            for event in &i.events {
+                                if let egui::Event::MouseWheel {
+                                    unit, delta, modifiers, ..
+                                } = event
+                                    && !modifiers.any()
+                                {
+                                    let scale = match unit {
+                                        egui::MouseWheelUnit::Point => 1.0,
+                                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                                            SinglePageWheel::POINTS_PER_PAGE
+                                        }
+                                    };
+                                    d += *delta * scale;
+                                }
+                            }
+                            let speed = self.wheel_speed() / state::DEFAULT_WHEEL_SCROLL_SPEED;
+                            (d.y.abs() >= d.x.abs()).then_some((i.time, d.y * speed))
+                        })
+                    } else {
+                        None
+                    };
                     let out = canvas_scroll.show_viewport(ui, |ui, viewport| {
                         if pan_delta != egui::Vec2::ZERO {
                             ui.scroll_with_delta(pan_delta);
@@ -17992,9 +19562,16 @@ impl eframe::App for Lapis {
                                 egui::vec2(display_w, display_h),
                             );
 
-                            let sense = egui::Sense::click_and_drag();
+                            let sense = if current_texture_ready {
+                                egui::Sense::click_and_drag()
+                            } else {
+                                egui::Sense::hover()
+                            };
 
-                            // Compute horizontal and vertical padding.
+                            // Keep centering padding independent of widget spacing.
+                            if effective_zoom == ZoomMode::FitPage {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                            }
                             let pad_x = ((visible_w - display_w) * 0.5).max(0.0);
                             let pad_y = ((visible_h - display_h) * 0.5).max(0.0);
 
@@ -18004,6 +19581,9 @@ impl eframe::App for Lapis {
 
                             let img_resp = ui
                                 .horizontal(|ui| {
+                                    if effective_zoom == ZoomMode::FitPage {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                    }
                                     if pad_x > 0.0 {
                                         ui.add_space(pad_x);
                                     }
@@ -18011,12 +19591,19 @@ impl eframe::App for Lapis {
                                 })
                                 .inner;
 
-                            let slide_rect = img_resp.rect;
-                            self.handle_slide_annotations(
-                                ui,
-                                self.current_page,
-                                slide_rect,
-                                &img_resp,
+                            // The retained image is only visual; never draw or select on it.
+                            if current_texture_ready {
+                                self.handle_slide_annotations(
+                                    ui,
+                                    self.current_page,
+                                    img_resp.rect,
+                                    &img_resp,
+                                );
+                            }
+                        } else {
+                            // On first open there is no previous texture to display.
+                            ui.allocate_exact_size(
+                                egui::vec2(display_w, display_h), egui::Sense::hover(),
                             );
                         }
                     });
@@ -18025,10 +19612,43 @@ impl eframe::App for Lapis {
                     self.canvas_rect = out.inner_rect;
 
                     self.pdf_scroll_offset = clamp_scroll_offset(
-                        self.pdf_scroll_offset, 
-                        out.content_size, 
-                        out.inner_rect.size()
+                        out.state.clamped_offset(),
+                        out.content_size,
+                        out.inner_rect.size(),
                     );
+                    if let Some((time, delta)) = wheel
+                        && ui.rect_contains_pointer(out.inner_rect)
+                    {
+                        let max_y = if effective_zoom == ZoomMode::FitPage {
+                            0.0
+                        } else {
+                            (out.content_size.y - out.inner_rect.height()).max(0.0)
+                        };
+                        let offset = old_offset.clamp(0.0, max_y);
+                        let steps = self.single_page_wheel.update(time, delta, offset, max_y);
+                        if steps != 0 {
+                            let target = wheel_page_target(
+                                self.current_page,
+                                self.total_pages,
+                                &self.hidden_pages,
+                                steps,
+                            );
+                            if target != self.current_page {
+                                // Commit only the destination, not each skipped page.
+                                let mut gesture = self.single_page_wheel;
+                                self.go_to_page(target, ui.ctx());
+                                gesture.reset_offset = true;
+                                self.single_page_wheel = gesture;
+                                self.pdf_scroll_offset = egui::Vec2::ZERO;
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                                ui.ctx().request_repaint();
+                            } else {
+                                self.single_page_wheel = SinglePageWheel::default();
+                            }
+                        }
+                    } else {
+                        self.single_page_wheel = SinglePageWheel::default();
+                    }
                 }
             });
 
@@ -18097,7 +19717,7 @@ impl eframe::App for Lapis {
                 let shadow_color = egui::Color32::from_black_alpha(88).gamma_multiply(smooth_alpha);
 
                 // Slide-up in entrata e leggero slide-down in uscita
-                let y_offset = -24.0 + (1.0 - smooth_alpha) * 12.0;
+                let y_offset = -24.0 - self.bottom_bars_h() + (1.0 - smooth_alpha) * 12.0;
 
                 egui::Area::new(ui.make_persistent_id("toast_notification"))
                     .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(24.0, y_offset))
@@ -18176,12 +19796,19 @@ impl eframe::App for Lapis {
         if self.radial_menu_pos.is_some() && self.has_pdf() {
             self.render_radial_tools_menu(ui);
         }
+        self.paint_annotation_cursor(&ctx);
         // End-of-frame local-only checkpoint. A SIGKILL/pkill -9 cannot invoke
         // on_exit, so the most recent completed UI action must already be on disk.
         if self.has_pdf() {
             let snapshot = self.local_checkpoint_hash();
             if snapshot.is_some() && snapshot != self.last_local_checkpoint_hash {
-                self.sync_and_save();
+                let backing_off = self.checkpoint_failed_at
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+                if backing_off {
+                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
+                } else {
+                    self.sync_and_save();
+                }
             }
         }
     }
@@ -18228,4 +19855,198 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(|cc| Ok(Box::new(Lapis::new(cc, initial_pdf)))),
     )
+}
+
+#[cfg(test)]
+mod fit_notes_layout_tests {
+    use super::{Lapis, ZoomMode};
+
+    #[test]
+    fn divider_double_click_needs_no_adjustment_when_fitted() {
+        assert!(!Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 350.0));
+        assert!(!Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 352.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 354.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 354.0, 350.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::Custom, 350.0, 350.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitWidth, 350.0, 350.0));
+    }
+
+    #[test]
+    fn gives_unused_width_to_notes() {
+        assert_eq!(Lapis::fitted_notes_width(1600.0, 802.0, 1.0, 1, 250.0, 1500.0), 798.0);
+    }
+
+    #[test]
+    fn preserves_minimum_notes_width() {
+        assert_eq!(Lapis::fitted_notes_width(1200.0, 802.0, 2.0, 1, 250.0, 1100.0), 250.0);
+    }
+
+    #[test]
+    fn accounts_for_book_spine() {
+        assert_eq!(Lapis::fitted_notes_width(1800.0, 802.0, 0.75, 2, 250.0, 1700.0), 596.0);
+    }
+}
+
+#[cfg(test)]
+mod single_page_wheel_tests {
+    use super::{SinglePageWheel, wheel_page_target};
+    use std::collections::HashSet;
+
+    #[test]
+    fn turns_only_at_the_requested_edge() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -96.0, 20.0, 100.0), 0);
+        assert_eq!(wheel.update(1.1, 96.0, 100.0, 100.0), 0);
+        assert_eq!(wheel.update(1.2, -96.0, 100.0, 100.0), 2);
+        assert_eq!(wheel.update(1.21, 48.0, 0.0, 100.0), -1);
+    }
+
+    #[test]
+    fn preserves_remainder_without_a_cooldown() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -120.0, 0.0, 0.0), 2);
+        assert_eq!(wheel.update(1.01, -24.0, 0.0, 0.0), 1);
+        assert_eq!(wheel.update(1.02, -48.0, 0.0, 0.0), 1);
+    }
+
+    #[test]
+    fn small_trackpad_events_accumulate_like_one_large_event() {
+        let mut wheel = SinglePageWheel::default();
+        let turns: i32 = (0..24)
+            .map(|i| wheel.update(1.0 + f64::from(i) * 0.01, -8.0, 0.0, 0.0))
+            .sum();
+        assert_eq!(turns, 4);
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -192.0, 0.0, 0.0), turns);
+    }
+
+    #[test]
+    fn idle_and_reversal_discard_partial_distance() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.4, -30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.41, 30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.42, 18.0, 0.0, 0.0), -1);
+    }
+
+    #[test]
+    fn skips_hidden_pages_and_stops_at_document_boundaries() {
+        let hidden = HashSet::from([3, 5, 9]);
+        assert_eq!(wheel_page_target(2, 9, &hidden, 3), 7);
+        assert_eq!(wheel_page_target(7, 9, &hidden, -3), 2);
+        assert_eq!(wheel_page_target(7, 9, &hidden, 100), 8);
+        assert_eq!(wheel_page_target(2, 9, &hidden, -100), 1);
+        assert_eq!(wheel_page_target(8, 9, &hidden, 1), 8);
+    }
+}
+
+#[cfg(test)]
+mod release_correctness_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn retired_transcription_cannot_reach_the_next_job() {
+        let (old_tx, mut rx) = channel();
+        let old_cancel = Arc::new(AtomicBool::new(false));
+        let mut cancel = old_cancel.clone();
+        assert!(old_tx.send(audio::AsrJobResult::Cancelled).is_ok());
+        let new_tx = replace_asr_channel(&mut rx, &mut cancel);
+        assert!(old_cancel.load(Ordering::Relaxed));
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(old_tx.send(audio::AsrJobResult::Cancelled).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(new_tx.send(audio::AsrJobResult::Error("new job".into())).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(audio::AsrJobResult::Error(s)) if s == "new job"));
+        let _third = replace_asr_channel(&mut rx, &mut cancel);
+        assert!(new_tx.send(audio::AsrJobResult::Cancelled).is_err());
+    }
+
+    #[test]
+    fn import_refreshes_the_locked_note_page_not_the_pdf_page() {
+        let mut notes = HashMap::from([(1, "old one".to_owned()), (2, "old two".to_owned())]);
+        let editor = merge_imported_notes(&mut notes, [(1, "new one".to_owned())], 2);
+        assert_eq!(editor, "old two");
+        assert_eq!(notes.get(&1).unwrap(), "new one");
+        let editor = merge_imported_notes(&mut notes, [(2, "new two".to_owned())], 2);
+        assert_eq!(editor, "new two");
+    }
+
+    #[test]
+    fn lookup_never_uses_another_pages_texture() {
+        let mut pages = HashMap::from([(1, "page one")]);
+        let thumbs = HashMap::from([(2, "page two thumb")]);
+        assert_eq!(cached_page(&pages, &thumbs, 3), None);
+        assert_eq!(cached_page(&pages, &thumbs, 2), Some(&"page two thumb"));
+        pages.insert(2, "page two full");
+        assert_eq!(cached_page(&pages, &thumbs, 2), Some(&"page two full"));
+    }
+
+    #[test]
+    fn sketch_or_memo_is_study_content() {
+        let mut sketch = notes::SketchPage::new(notes::BlankPageStyle::Blank);
+        assert!(!has_extra_study_content(Some(&sketch), None));
+        sketch.strokes.push(notes::PageAnnotation {
+            kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
+            points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
+            font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+        });
+        assert!(has_extra_study_content(Some(&sketch), None));
+        let memos = vec![audio::VoiceMemoEntry {
+            id: "Memo #1".into(), filename: "memo.wav".into(), duration_ms: 100,
+            transcript: None, title: None,
+        }];
+        assert!(has_extra_study_content(None, Some(&memos)));
+        assert!(!has_extra_study_content(None, None));
+    }
+
+    #[test]
+    fn notes_dot_includes_sketches_and_respects_locked_editor() {
+        let notes = HashMap::from([(1, "saved text".to_owned())]);
+        let mut sketches = HashMap::from([(2, notes::SketchPage::new(notes::BlankPageStyle::Blank))]);
+        assert!(!page_has_notes_or_sketch(2, 1, "editing page one", &notes, &sketches));
+        assert!(page_has_notes_or_sketch(1, 1, "editing page one", &notes, &sketches));
+        assert!(!page_has_notes_or_sketch(1, 1, " ", &notes, &sketches));
+        assert!(page_has_notes_or_sketch(1, 2, "", &notes, &sketches));
+        sketches.get_mut(&2).unwrap().strokes.push(notes::PageAnnotation {
+            kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
+            points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
+            font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+        });
+        assert!(page_has_notes_or_sketch(2, 1, "", &notes, &sketches));
+    }
+
+    #[test]
+    fn opening_rejects_bad_or_empty_pdf_but_accepts_valid_pdf() {
+        use lopdf::{dictionary, Object};
+        let dir = std::env::temp_dir().join(format!("lapis-open-test-{}", docid::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.pdf");
+        assert!(inspect_pdf(&path).is_err());
+        std::fs::write(&path, b"not a PDF").unwrap();
+        assert!(inspect_pdf(&path).is_err());
+        for count in [0, 1] {
+            let mut doc = lopdf::Document::with_version("1.5");
+            let pages = doc.new_object_id();
+            let mut kids = Vec::new();
+            if count == 1 {
+                let page = doc.add_object(dictionary! {
+                    "Type" => "Page", "Parent" => Object::Reference(pages),
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => dictionary! {},
+                });
+                kids.push(Object::Reference(page));
+            }
+            doc.objects.insert(pages, Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count),
+            }));
+            let root = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages) });
+            doc.trailer.set("Root", root);
+            doc.save(&path).unwrap();
+            let result = inspect_pdf(&path);
+            if count == 0 { assert!(result.is_err()); }
+            else { assert_eq!(result.unwrap().0, 1); }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

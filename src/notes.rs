@@ -1,3 +1,4 @@
+use crate::paths::{replace_file, write_atomic, write_synced};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -20,7 +21,7 @@ pub enum AnnotationKind {
     Image,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageAnnotation {
     pub kind: AnnotationKind,
     pub color: [u8; 3],
@@ -58,7 +59,7 @@ fn default_sketch_paper() -> BlankPageStyle {
 /// It is a plain background plus strokes on an unbounded canvas: coordinates are in sketch
 /// units (1 unit = 1 px at 100 % zoom), measured from the top-left corner, so the drawing does
 /// not depend on the size or position of the panel it was drawn in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchPage {
     #[serde(default = "default_sketch_paper")]
     pub paper: BlankPageStyle,
@@ -160,10 +161,10 @@ fn find_embedded_block(bytes: &[u8]) -> Option<EmbeddedBlock> {
     for (start_tag, end_tag) in candidates {
         let mut from = 0;
         while from < bytes.len() {
-            let Some(rel) = bytes[from..].windows(start_tag.len()).position(|w| w == start_tag) else { break };
+            let Some(rel) = memchr::memmem::find(&bytes[from..], start_tag) else { break };
             let start = from + rel;
             let body_start = start + start_tag.len();
-            let Some(end_rel) = bytes[body_start..].windows(end_tag.len()).position(|w| w == end_tag) else {
+            let Some(end_rel) = memchr::memmem::find(&bytes[body_start..], end_tag) else {
                 from = start + start_tag.len();
                 continue;
             };
@@ -210,6 +211,32 @@ fn custom_data_stream(data: &DocData) -> io::Result<lopdf::Stream> {
     Ok(lopdf::Stream::new(lopdf::Dictionary::new(), payload))
 }
 
+// JSON whitespace keeps the length field fixed-width without changing its type.
+const PDF_LEN_FIELD: &[u8] = b"\"pdf_annots_file_len\":18446744073709551615";
+
+fn pending_length_stream(data: &DocData) -> io::Result<lopdf::Stream> {
+    let mut data = data.clone();
+    data.pdf_annots_file_len = u64::MAX;
+    custom_data_stream(&data)
+}
+
+fn finalize_pdf_length(output: &mut [u8], revision_start: usize) -> io::Result<u64> {
+    let len = output.len() as u64;
+    let revision = output.get_mut(revision_start..)
+        .ok_or_else(|| io::Error::other("invalid metadata revision offset"))?;
+    let block = find_embedded_block(revision)
+        .ok_or_else(|| io::Error::other("missing Lapis metadata stream"))?;
+    let body = &mut revision[block.body_start..block.body_end];
+    let pos = memchr::memmem::rfind(body, PDF_LEN_FIELD)
+        .ok_or_else(|| io::Error::other("missing reserved PDF length field"))?;
+    let start = pos + PDF_LEN_FIELD.len() - 20;
+    let field = &mut body[start..start + 20];
+    let digits = len.to_string();
+    field.fill(b' ');
+    field[..digits.len()].copy_from_slice(digits.as_bytes());
+    Ok(len)
+}
+
 /// Strip old *unreferenced* custom-stream payloads when we are already doing a
 /// full PDF rewrite (page structure changes or an explicit history compaction).
 /// Never splice bytes from an existing incremental revision: xref offsets depend on them.
@@ -229,26 +256,13 @@ fn remove_custom_data_streams(doc: &mut lopdf::Document) {
     });
 }
 
-fn replace_custom_data_stream(
-    doc: &mut lopdf::Document,
-    object_id: lopdf::ObjectId,
-    data: &DocData,
-) -> io::Result<()> {
-    let stream = custom_data_stream(data)?;
-    *doc.get_object_mut(object_id)
-        .map_err(|e| io::Error::other(format!("cannot update Lapis metadata stream: {e}")))? =
-        lopdf::Object::Stream(stream);
-    Ok(())
-}
-
 /// Put the rollback comment just before the final `startxref` keyword, not
 /// between the xref offset and `%%EOF`. lopdf's reader (and other strict PDF
 /// readers) expects the latter pair to form the unbroken final PDF trailer.
 /// The xref table/stream is earlier in the file, so inserting here does not
 /// change a single object or xref offset.
 fn insert_revision_marker_before_startxref(pdf: &mut Vec<u8>, base_len: usize) -> io::Result<()> {
-    let start = pdf.windows(b"startxref".len())
-        .rposition(|w| w == b"startxref")
+    let start = memchr::memmem::rfind(pdf, b"startxref")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PDF has no startxref"))?;
     let tail = &pdf[start + b"startxref".len()..];
     let mut lines = tail.split(|b| *b == b'\n');
@@ -329,6 +343,47 @@ fn load_lopdf(clean: &[u8], pdf_path: &Path, tag: &str) -> Result<lopdf::Documen
     }
 }
 
+/// Re-keys every per-page map of `data`; `None` drops the page.
+fn remap_doc_data_pages(data: &mut DocData, map: &dyn Fn(u32) -> Option<u32>) {
+    fn remap<V>(items: &mut HashMap<u32, V>, map: &dyn Fn(u32) -> Option<u32>) {
+        *items = std::mem::take(items)
+            .into_iter()
+            .filter_map(|(page, value)| map(page).map(|new_page| (new_page, value)))
+            .collect();
+    }
+    remap(&mut data.notes, map);
+    remap(&mut data.annotations, map);
+    remap(&mut data.sketches, map);
+    data.blank_pages = data.blank_pages.iter().filter_map(|&page| map(page)).collect();
+}
+
+/// Applies a page change to the Lapis payload of a structurally rewritten PDF. It starts from
+/// the newest of the local backup and the payload read by [`read_pdf_and_notes`], so the PDF
+/// carries the model on screen with its new page numbering, at a revision above the (not yet
+/// remapped) backup. A stop before the backup is rewritten then loses nothing.
+fn rebase_embedded_notes(pdf_path: &Path, notes: &[u8], change: impl FnOnce(&mut DocData)) -> Vec<u8> {
+    let embedded = find_embedded_block(notes)
+        .and_then(|block| parse_embedded_data(&notes[block.body_start..block.body_end]));
+    let key = crate::docid::resolve_key(pdf_path);
+    let backup = load_local_backup(pdf_path)
+        .filter(|d| d.doc_id.as_deref().is_none_or(|id| id == key));
+    let mut data = match (backup, embedded) {
+        (Some(b), Some(e)) => if b.rev >= e.rev { b } else { e },
+        (Some(d), None) | (None, Some(d)) => d,
+        (None, None) => return notes.to_vec(),
+    };
+    change(&mut data);
+    data.rev = next_rev(pdf_path);
+    data.doc_id.get_or_insert(key);
+    let mut out = Vec::new();
+    out.extend_from_slice(NOTES_START_TAG);
+    if serde_json::to_writer(&mut out, &portable(&data)).is_err() {
+        return notes.to_vec();
+    }
+    out.extend_from_slice(NOTES_END_TAG);
+    out
+}
+
 /// Write the PDF and note data to a temporary file, then replace the original atomically.
 fn save_pdf_with_notes(
     doc: &mut lopdf::Document,
@@ -337,34 +392,36 @@ fn save_pdf_with_notes(
     notes: &[u8],
 ) -> io::Result<()> {
     let tmp_path = pdf_path.with_extension(format!("{tag}_tmp.pdf"));
+    let mut adopted: Option<DocData> = None;
     let res = (|| -> io::Result<()> {
         // A structural rewrite is already non-incremental: do not carry forward
         // obsolete custom streams from previous revisions.
         remove_custom_data_streams(doc);
         let mut metadata = find_embedded_block(notes)
             .and_then(|block| parse_embedded_data(&notes[block.body_start..block.body_end]));
-        let metadata_id = if let Some(data) = metadata.as_ref() {
-            Some(doc.add_object(lopdf::Object::Stream(custom_data_stream(data)?)))
-        } else { None };
-
-        let mut output = Vec::new();
-        for _ in 0..8 {
-            output.clear();
-            doc.save_to(&mut output)
-                .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
-            let (Some(object_id), Some(data)) = (metadata_id, metadata.as_mut()) else { break; };
-            let actual_len = output.len() as u64;
-            if data.pdf_annots_file_len == actual_len { break; }
-            data.pdf_annots_file_len = actual_len;
-            replace_custom_data_stream(doc, object_id, data)?;
+        // The reserved fixed-width length field is patched in place: one serialization.
+        if let Some(data) = metadata.as_ref() {
+            doc.add_object(lopdf::Object::Stream(pending_length_stream(data)?));
         }
-        output.clear();
+        let mut output = Vec::new();
         doc.save_to(&mut output)
             .map_err(|e| io::Error::other(format!("lopdf save error: {e}")))?;
-        fs::write(&tmp_path, output)
+        if let Some(data) = metadata.as_mut() {
+            data.pdf_annots_file_len = finalize_pdf_length(&mut output, 0)?;
+        }
+        adopted = metadata;
+        write_synced(&tmp_path, &output)
     })();
-    res.and_then(|_| fs::rename(&tmp_path, pdf_path))
-        .inspect_err(|_| { let _ = fs::remove_file(&tmp_path); })
+    res.and_then(|_| replace_file(&tmp_path, pdf_path))
+        .inspect_err(|_| { let _ = fs::remove_file(&tmp_path); })?;
+    // The embedded payload already wins on its revision; this brings the backup in line.
+    if let Some(mut data) = adopted {
+        let _guard = checkpoint_lock();
+        data.pdf_annots_imported = true;
+        remember_rev(pdf_path, data.rev);
+        save_local_backup(pdf_path, &data);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -380,6 +437,7 @@ pub fn insert_blank_page_with_style_into_pdf(
     pdf_path: &Path,
     after_page: u32,
     style: BlankPageStyle,
+    allow_signature_loss: bool,
 ) -> io::Result<u32> {
     use lopdf::{Object, ObjectId, Stream, dictionary};
     use std::fmt::Write as _;
@@ -452,6 +510,7 @@ pub fn insert_blank_page_with_style_into_pdf(
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "ins").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages = doc.get_pages();
     let total = pages.len() as u32;
@@ -625,16 +684,26 @@ pub fn insert_blank_page_with_style_into_pdf(
         })
         .unwrap_or(ref_page_num + 1);
 
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
+        shift_doc_data_on_insert(
+            &mut data.notes,
+            &mut data.annotations,
+            &mut data.blank_pages,
+            &mut data.sketches,
+            actual_new_page_num,
+        );
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "ins", &notes)?;
     Ok(actual_new_page_num)
 }
 
-pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<()> {
+pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32, allow_signature_loss: bool) -> io::Result<()> {
     ensure_original_pdf_backup(pdf_path)?;
 
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "del").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages = doc.get_pages();
     if pages.len() <= 1 {
@@ -651,6 +720,13 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
     doc.delete_pages(&[page_to_delete]);
     let _ = doc.prune_objects(); // Remove orphaned objects and resources.
 
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
+        remap_doc_data_pages(data, &|page| match page.cmp(&page_to_delete) {
+            std::cmp::Ordering::Less => Some(page),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(page - 1),
+        });
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "del", &notes)
 }
 
@@ -658,7 +734,7 @@ pub fn delete_page_from_pdf(pdf_path: &Path, page_to_delete: u32) -> io::Result<
 /// page objects and their PDF links and destinations.
 /// Flatten the /Pages tree and copy inherited attributes
 /// to each page before reordering.
-pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io::Result<()> {
+pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32, allow_signature_loss: bool) -> io::Result<()> {
     use lopdf::{Object, ObjectId};
 
     if from_page == to_page {
@@ -668,6 +744,7 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     let (clean, notes) = read_pdf_and_notes(pdf_path)?;
     let mut doc = load_lopdf(&clean, pdf_path, "reorder").map_err(|e| io::Error::other(e))?;
     drop(clean);
+    ensure_not_signed(&doc, allow_signature_loss)?;
 
     let pages_map = doc.get_pages();
     let total = pages_map.len() as u32;
@@ -747,6 +824,19 @@ pub fn reorder_pages_in_pdf(pdf_path: &Path, from_page: u32, to_page: u32) -> io
     );
     root.set("Count", Object::Integer(total as i64));
 
+    let notes = rebase_embedded_notes(pdf_path, &notes, |data| {
+        remap_doc_data_pages(data, &|page| {
+            Some(if page == from_page {
+                to_page
+            } else if from_page < to_page && page > from_page && page <= to_page {
+                page - 1
+            } else if from_page > to_page && page >= to_page && page < from_page {
+                page + 1
+            } else {
+                page
+            })
+        });
+    });
     save_pdf_with_notes(&mut doc, pdf_path, "reorder", &notes)
 }
 
@@ -780,7 +870,7 @@ fn save_local_backup_checked(pdf_path: &Path, data: &DocData) -> io::Result<()> 
     let mut portable_backup = data.clone();
     portable_backup.source_path =
         Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
-    let json = serde_json::to_vec_pretty(&portable_backup)
+    let json = serde_json::to_vec(&portable_backup)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let tmp = backup_path.with_extension("json.tmp");
     let result = (|| -> io::Result<()> {
@@ -788,9 +878,10 @@ fn save_local_backup_checked(pdf_path: &Path, data: &DocData) -> io::Result<()> 
         file.write_all(&json)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, &backup_path)
+        replace_file(&tmp, &backup_path)
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
+    if result.is_ok() { remember_backup(&backup_path, portable_backup); }
     result
 }
 
@@ -800,13 +891,43 @@ fn save_local_backup(pdf_path: &Path, data: &DocData) {
     }
 }
 
+struct CachedBackup {
+    path: PathBuf,
+    stamp: PdfStamp,
+    data: DocData,
+}
+
+// The last backup this process read or wrote. It is reused only while the file's stamp (length,
+// mtime, and inode/ctime on Unix) is unchanged, so any outside change falls back to the disk.
+static BACKUP_CACHE: Mutex<Option<CachedBackup>> = Mutex::new(None);
+
+fn remember_backup(path: &Path, data: DocData) {
+    let Ok(stamp) = pdf_stamp(path) else { return; };
+    if let Ok(mut cache) = BACKUP_CACHE.lock() {
+        *cache = Some(CachedBackup { path: path.to_path_buf(), stamp, data });
+    }
+}
+
 fn load_local_backup(pdf_path: &Path) -> Option<DocData> {
     if pdf_path.as_os_str().is_empty() {
         return None;
     }
     let backup_path = get_backup_path(pdf_path);
-    let bytes = fs::read(backup_path).ok()?;
-    parse_doc_data_bytes(&bytes)
+    let stamp = pdf_stamp(&backup_path).ok()?;
+    if let Ok(cache) = BACKUP_CACHE.lock()
+        && let Some(hit) = cache.as_ref().filter(|c| c.path == backup_path && c.stamp == stamp)
+    {
+        return Some(hit.data.clone());
+    }
+    let bytes = fs::read(&backup_path).ok()?;
+    let data = parse_doc_data_bytes(&bytes)?;
+    // Cache only if the file did not change while it was being read.
+    if pdf_stamp(&backup_path).is_ok_and(|after| after == stamp)
+        && let Ok(mut cache) = BACKUP_CACHE.lock()
+    {
+        *cache = Some(CachedBackup { path: backup_path, stamp, data: data.clone() });
+    }
+    Some(data)
 }
 
 fn now_ms() -> u64 {
@@ -823,7 +944,8 @@ fn known_revs() -> &'static Mutex<HashMap<PathBuf, u64>> {
 
 fn remember_rev(pdf_path: &Path, rev: u64) {
     if let Ok(mut m) = known_revs().lock() {
-        m.insert(pdf_path.to_path_buf(), rev);
+        let last = m.entry(pdf_path.to_path_buf()).or_default();
+        *last = (*last).max(rev);
     }
 }
 
@@ -838,11 +960,106 @@ fn next_rev(pdf_path: &Path) -> u64 {
     now_ms().max(last + 1)
 }
 
+/// The PDF gained a revision Lapis has not merged yet; writing now would drop it.
+#[derive(Debug)]
+struct ExternalModification;
+
+impl std::fmt::Display for ExternalModification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the PDF was modified outside Lapis; merge its annotations before saving")
+    }
+}
+
+impl std::error::Error for ExternalModification {}
+
+pub fn is_external_modification(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<ExternalModification>())
+}
+
+/// True when `base` has bytes Lapis neither wrote nor imported. `watermark` is the PDF length
+/// recorded at the last import or commit; a Lapis tail that records the current length is ours.
+fn externally_modified(base: &[u8], watermark: u64) -> bool {
+    let len = base.len() as u64;
+    watermark != 0
+        && watermark != len
+        && !(trailing_lapis_revision(base).is_some()
+            && embedded_doc_data(base).is_some_and(|stored| stored.pdf_annots_file_len == len))
+}
+
+/// Imports annotations added by other programs into the live model (idempotent).
+pub fn merge_external_annotations(
+    pdf_path: &Path,
+    annotations: &mut HashMap<u32, Vec<PageAnnotation>>,
+) {
+    import_external_annotations(pdf_path, annotations);
+}
+
+/// Records the current PDF length as seen. Call only after the merged model is checkpointed.
+pub fn mark_pdf_observed(pdf_path: &Path) -> io::Result<()> {
+    let _guard = checkpoint_lock();
+    let Some(mut data) = load_local_backup(pdf_path) else { return Ok(()); };
+    let len = fs::metadata(pdf_path)?.len();
+    if data.pdf_annots_imported && data.pdf_annots_file_len == len { return Ok(()); }
+    data.pdf_annots_imported = true;
+    data.pdf_annots_file_len = len;
+    save_local_backup_checked(pdf_path, &data)
+}
+
+/// Test seam: runs once between the atomic PDF replacement and the backup reconciliation, the
+/// exact point where a UI checkpoint can interleave with a background commit.
+#[cfg(test)]
+static AFTER_REPLACE_HOOK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_replace_hook() {
+    let hook = AFTER_REPLACE_HOOK.lock().unwrap().take();
+    if let Some(hook) = hook { hook(); }
+}
+
+/// The PDF carries a digital signature that a page change would invalidate.
+#[derive(Debug)]
+struct SignedPdf;
+
+impl std::fmt::Display for SignedPdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this PDF is digitally signed; changing its pages invalidates the signature")
+    }
+}
+
+impl std::error::Error for SignedPdf {}
+
+pub fn is_signed_pdf_error(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<SignedPdf>())
+}
+
+/// A signature value covers byte ranges of the file (`/ByteRange`); an empty signature field
+/// does not, so it never blocks page edits.
+fn pdf_has_signed_value(doc: &lopdf::Document) -> bool {
+    doc.objects.values().any(|object| {
+        let dictionary = match object {
+            lopdf::Object::Dictionary(d) => Some(d),
+            lopdf::Object::Stream(s) => Some(&s.dict),
+            _ => None,
+        };
+        dictionary.is_some_and(|d| d.get(b"ByteRange").is_ok())
+    })
+}
+
+/// Page edits rewrite the whole file, which invalidates signatures. Checked on the freshly
+/// loaded document: pruning a deleted page can drop the signature objects. The caller decides
+/// (after asking the user) whether to proceed.
+fn ensure_not_signed(doc: &lopdf::Document, allow_signature_loss: bool) -> io::Result<()> {
+    if !allow_signature_loss && pdf_has_signed_value(doc) {
+        return Err(io::Error::other(SignedPdf));
+    }
+    Ok(())
+}
+
 fn same_content(a: &DocData, b: &DocData) -> bool {
     a.blank_pages == b.blank_pages
-        && serde_json::to_value(&a.notes).ok() == serde_json::to_value(&b.notes).ok()
-        && serde_json::to_value(&a.annotations).ok() == serde_json::to_value(&b.annotations).ok()
-        && serde_json::to_value(&a.sketches).ok() == serde_json::to_value(&b.sketches).ok()
+        && a.notes == b.notes
+        && a.annotations == b.annotations
+        && a.sketches == b.sketches
 }
 
 /// When one version wins over the other, the loser is kept (if different and not empty) as
@@ -905,11 +1122,31 @@ pub(crate) fn read_trailing_doc_id(pdf_path: &Path) -> Option<String> {
     serde_json::from_slice::<IdOnly>(json.trim_ascii()).ok()?.doc_id
 }
 
-/// Reads the newest Lapis metadata block, including legacy post-EOF data.
-fn read_trailing_doc_data(pdf_path: &Path) -> Option<DocData> {
-    let bytes = fs::read(pdf_path).ok()?;
-    let block = find_embedded_block(&bytes)?;
+fn embedded_doc_data(bytes: &[u8]) -> Option<DocData> {
+    let block = find_embedded_block(bytes)?;
     parse_embedded_data(&bytes[block.body_start..block.body_end])
+}
+
+#[cfg(test)]
+fn read_trailing_doc_data(pdf_path: &Path) -> Option<DocData> {
+    embedded_doc_data(&fs::read(pdf_path).ok()?)
+}
+
+// Cache only a complete terminal Lapis revision with matching file metadata.
+fn read_opened_doc_data(path: &Path) -> Option<DocData> {
+    let before = pdf_stamp(path).ok();
+    let bytes = fs::read(path).ok()?;
+    let data = embedded_doc_data(&bytes)?;
+    if let Some(stamp) = before
+        && pdf_stamp(path).ok().as_ref() == Some(&stamp)
+        && stamp.len == bytes.len() as u64
+        && data.pdf_annots_file_len == stamp.len
+        && data.pdf_annots_imported
+        && trailing_lapis_revision(&bytes).is_some()
+    {
+        remember_commit(path, stamp, &data);
+    }
+    Some(data)
 }
 
 /// Copy of the data without machine-specific fields, for embedding in the PDF.
@@ -923,7 +1160,12 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     if pdf_path.as_os_str().is_empty() { return DocData::default(); }
     let key = crate::docid::resolve_key(pdf_path);
     let backup_opt = load_local_backup(pdf_path);
-    let pdf_opt = read_trailing_doc_data(pdf_path);
+    let pdf_opt = read_opened_doc_data(pdf_path);
+    let committed_len = pdf_opt.as_ref().and_then(|p| {
+        let stamp = pdf_stamp(pdf_path).ok()?;
+        (p.doc_id.as_deref() == Some(key.as_str()) && committed_matches(pdf_path, &stamp, p))
+            .then_some(stamp.len)
+    });
     let imported_flag = backup_opt.as_ref().is_some_and(|d| d.pdf_annots_imported)
         || pdf_opt.as_ref().is_some_and(|d| d.pdf_annots_imported);
     let imported_len = backup_opt.as_ref().map(|d| d.pdf_annots_file_len).unwrap_or(0)
@@ -950,7 +1192,7 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     // incremental revision). Autosaves keep the last observed length so an app restart does not
     // re-import the same source annotations and undo local edits/deletions.
     data.pdf_annots_imported |= imported_flag;
-    data.pdf_annots_file_len = data.pdf_annots_file_len.max(imported_len);
+    data.pdf_annots_file_len = committed_len.unwrap_or(data.pdf_annots_file_len.max(imported_len));
     let current_pdf_len = fs::metadata(pdf_path).map(|m| m.len()).unwrap_or(0);
     if !data.pdf_annots_imported || data.pdf_annots_file_len != current_pdf_len {
         import_external_annotations(pdf_path, &mut data.annotations);
@@ -964,12 +1206,76 @@ pub fn load_doc_data(pdf_path: &Path) -> DocData {
     data
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PdfStamp {
+    len: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+fn pdf_stamp(path: &Path) -> io::Result<PdfStamp> {
+    let m = fs::metadata(path)?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(PdfStamp {
+        len: m.len(),
+        modified: m.modified()?,
+        created: m.created().ok(),
+        #[cfg(unix)]
+        identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+    })
+}
+
+struct CommittedPdf {
+    path: PathBuf,
+    stamp: PdfStamp,
+    data: DocData,
+}
+
+// Keep just the last matching terminal revision; never reuse it after a file change.
+static LAST_COMMIT: Mutex<Option<CommittedPdf>> = Mutex::new(None);
+
+fn remember_commit(path: &Path, stamp: PdfStamp, data: &DocData) {
+    if let Ok(mut cached) = LAST_COMMIT.lock() {
+        *cached = Some(CommittedPdf { path: path.to_path_buf(), stamp, data: data.clone() });
+    }
+}
+
+fn committed_matches(path: &Path, stamp: &PdfStamp, data: &DocData) -> bool {
+    LAST_COMMIT.lock().ok().is_some_and(|cached| {
+        cached.as_ref().is_some_and(|saved| {
+            saved.path == path && &saved.stamp == stamp
+                && saved.data.doc_id == data.doc_id && same_content(&saved.data, data)
+        })
+    })
+}
+
+fn checkpoint_matches(previous: Option<&DocData>, data: &DocData) -> bool {
+    previous.is_some_and(|old| {
+        old.doc_id == data.doc_id
+            && old.pdf_annots_imported == data.pdf_annots_imported
+            && old.pdf_annots_file_len == data.pdf_annots_file_len
+            && same_content(old, data)
+    })
+}
+
+fn checkpoint_if_changed(path: &Path, previous: Option<&DocData>, data: &DocData) -> io::Result<()> {
+    if !checkpoint_matches(previous, data) {
+        save_local_backup_checked(path, data)?;
+        remember_rev(path, data.rev);
+    }
+    Ok(())
+}
+
 fn collect_doc_data(
     pdf_path: &Path,
     notes: &HashMap<u32, String>,
     annotations: &HashMap<u32, Vec<PageAnnotation>>,
     blank_pages: HashSet<u32>,
     sketches: &HashMap<u32, SketchPage>,
+    previous_backup: Option<&DocData>,
 ) -> DocData {
     let mut clean_notes = notes.clone();
     clean_notes.retain(|_, v| !v.trim().is_empty());
@@ -981,8 +1287,7 @@ fn collect_doc_data(
     clean_sketches.retain(|&k, s| k != 0 && !s.is_default());
     // load_doc_data establishes this flag before the app starts autosaving; reading the PDF
     // again here would turn every autosave into an unnecessary full-file scan.
-    let previous_backup = load_local_backup(pdf_path);
-    let pdf_annots_imported = previous_backup.as_ref().is_some_and(|d| d.pdf_annots_imported);
+    let pdf_annots_imported = previous_backup.is_some_and(|d| d.pdf_annots_imported);
     let pdf_annots_file_len = previous_backup.map(|d| d.pdf_annots_file_len).unwrap_or(0);
     DocData {
         notes: clean_notes,
@@ -997,6 +1302,25 @@ fn collect_doc_data(
     }
 }
 
+// Serialize local checkpoint updates, not the expensive PDF processing.
+static CHECKPOINT_LOCK: Mutex<()> = Mutex::new(());
+
+fn checkpoint_lock() -> std::sync::MutexGuard<'static, ()> {
+    CHECKPOINT_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+// Merge only commit metadata into a newer local checkpoint, never its content.
+fn finish_pdf_checkpoint(path: &Path, committed: &DocData) -> io::Result<()> {
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(path);
+    let mut data = previous.as_ref()
+        .filter(|d| d.rev >= committed.rev && d.doc_id == committed.doc_id)
+        .cloned().unwrap_or_else(|| committed.clone());
+    data.pdf_annots_imported = committed.pdf_annots_imported;
+    data.pdf_annots_file_len = committed.pdf_annots_file_len;
+    checkpoint_if_changed(path, previous.as_ref(), &data)
+}
+
 /// Autosaves only the local backup. PDF bytes are not touched while the document is open.
 pub fn save_doc_data(
     pdf_path: &Path,
@@ -1006,15 +1330,35 @@ pub fn save_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
-    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    save_local_backup_checked(pdf_path, &data)?;
-    remember_rev(pdf_path, data.rev);
-    Ok(())
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(pdf_path);
+    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches, previous.as_ref());
+    checkpoint_if_changed(pdf_path, previous.as_ref(), &data)
 }
 
-/// Commit once when the document closes or is explicitly saved: remove only our own immediately
-/// preceding incremental revision, export PDF-standard annotations, and store custom data in
-/// an uncompressed stream object. Only a short rollback comment precedes startxref.
+/// Capture a durable, ordered snapshot before starting the save worker.
+pub fn prepare_pdf_commit(
+    pdf_path: &Path,
+    notes: &HashMap<u32, String>,
+    annotations: &HashMap<u32, Vec<PageAnnotation>>,
+    blank_pages: HashSet<u32>,
+    sketches: &HashMap<u32, SketchPage>,
+) -> io::Result<DocData> {
+    let _guard = checkpoint_lock();
+    let previous = load_local_backup(pdf_path);
+    let mut data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches, previous.as_ref());
+    data.pdf_annots_imported = true;
+    if let Some(previous) = previous.as_ref().filter(|d| d.rev > 0 && checkpoint_matches(Some(d), &data)) {
+        data.rev = previous.rev;
+    } else {
+        // Reserve the revision durably before the worker starts.
+        save_local_backup_checked(pdf_path, &data)?;
+    }
+    remember_rev(pdf_path, data.rev);
+    Ok(data)
+}
+
+/// Synchronous fallback for exit and tests.
 pub fn commit_doc_data(
     pdf_path: &Path,
     notes: &HashMap<u32, String>,
@@ -1023,85 +1367,106 @@ pub fn commit_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
-    let mut data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    data.pdf_annots_imported = true;
-    remember_rev(pdf_path, data.rev);
-
-    commit_with_base(pdf_path, data, fs::read(pdf_path)?)
+    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
+    commit_pdf_snapshot(pdf_path, data)
 }
 
-/// Keep one physical Lapis revision when it is the file's tail. Historical
-/// revisions owned by external editors are left intact unless the user explicitly
-/// requests compaction, which rewrites PDF object offsets from scratch.
-fn commit_with_base(pdf_path: &Path, mut data: DocData, mut base: Vec<u8>) -> io::Result<()> {
-    // Do not emit a new xref/metadata block on an unchanged explicit save or OS exit.
-    // The local backup can have a newer revision due to local-only autosave.
-    if trailing_lapis_revision(&base).is_some()
-        && lopdf::Document::load_mem(&base).is_ok()
-        && read_trailing_doc_data(pdf_path).as_ref().is_some_and(|stored| {
-            same_content(stored, &data)
+/// Commit the captured revision without replacing any later local edits.
+pub fn commit_pdf_snapshot(pdf_path: &Path, mut data: DocData) -> io::Result<()> {
+    let stamp = pdf_stamp(pdf_path)?;
+    if committed_matches(pdf_path, &stamp, &data) {
+        data.pdf_annots_file_len = stamp.len;
+        return finish_pdf_checkpoint(pdf_path, &data);
+    }
+    let base = fs::read(pdf_path)?;
+    if pdf_stamp(pdf_path)? != stamp {
+        return Err(io::Error::other("PDF changed while reading; retry Save"));
+    }
+    commit_with_base(pdf_path, data, base, &stamp, false)
+}
+
+/// Keep one physical Lapis revision when it is the file's tail.
+fn commit_with_base(
+    pdf_path: &Path,
+    mut data: DocData,
+    base: Vec<u8>,
+    source_stamp: &PdfStamp,
+    force_rewrite: bool,
+) -> io::Result<()> {
+    let watermark = data.pdf_annots_file_len;
+    let trailing = trailing_lapis_revision(&base);
+    // Compare the already-read metadata before parsing the PDF.
+    if !force_rewrite && trailing.is_some()
+        && embedded_doc_data(&base).is_some_and(|stored| {
+            same_content(&stored, &data)
                 && stored.doc_id == data.doc_id
                 && stored.pdf_annots_imported == data.pdf_annots_imported
                 && stored.pdf_annots_file_len == base.len() as u64
         })
+        && lopdf::Document::load_mem(&base).is_ok()
     {
         data.pdf_annots_file_len = base.len() as u64;
-        save_local_backup_checked(pdf_path, &data)?;
-        return Ok(());
-    }
-
-    data.pdf_annots_file_len = base.len() as u64;
-    // Keep the local model authoritative even if PDF writing fails.
-    save_local_backup_checked(pdf_path, &data)?;
-
-    // Roll back only our own immediately preceding incremental revision. If an
-    // external revision follows it, leave that revision and its xref offsets intact.
-    if let Some((_marker_pos, base_len)) = trailing_lapis_revision(&base) {
-        if base_len <= base.len() && lopdf::Document::load_mem(&base[..base_len]).is_ok() {
-            base.truncate(base_len);
+        if pdf_stamp(pdf_path)? == *source_stamp {
+            finish_pdf_checkpoint(pdf_path, &data)?;
+            remember_commit(pdf_path, source_stamp.clone(), &data);
+            return Ok(());
         }
-    }
-    if let Some(block) = terminal_embedded_block(&base) {
-        base.truncate(block.start);
+        return Err(io::Error::other("PDF changed while saving; retry Save"));
     }
 
-    let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(base.clone()))
-        .map_err(|e| io::Error::other(format!("cannot prepare incremental PDF update: {e}")))?;
+    if !force_rewrite && externally_modified(&base, watermark) {
+        return Err(io::Error::other(ExternalModification));
+    }
+    data.pdf_annots_file_len = base.len() as u64;
+
+    // Reuse the successful prefix parse as the incremental document.
+    let clean_len = terminal_embedded_block(&base).map_or(base.len(), |block| block.start);
+    let prefix = trailing.and_then(|(_, len)| {
+        (len <= clean_len).then_some(len).and_then(|len| {
+            lopdf::IncrementalDocument::load_from(std::io::Cursor::new(&base[..len]))
+                .ok().map(|doc| (len, doc))
+        })
+    });
+    let (base_len, mut incremental) = match prefix {
+        Some(parsed) => parsed,
+        None => (clean_len, lopdf::IncrementalDocument::load_from(std::io::Cursor::new(&base[..clean_len]))
+            .map_err(|e| io::Error::other(format!("cannot prepare incremental PDF update: {e}")))?),
+    };
+    drop(base);
     export_pdf_annotations(&mut incremental, &data.annotations)
         .map_err(|e| io::Error::other(format!("cannot export PDF annotations: {e}")))?;
 
     // Always commit an incremental revision: the uncompressed, unreferenced stream
     // carries the complete custom payload and remains discoverable by find_embedded_block.
-    let metadata_id = incremental.new_document.add_object(
-        lopdf::Object::Stream(custom_data_stream(&data)?)
-    );
+    incremental.new_document.add_object(lopdf::Object::Stream(pending_length_stream(&data)?));
     let mut output = Vec::new();
-    let mut stable = false;
-    for _ in 0..12 {
-        output.clear();
-        incremental.save_to(&mut output)
-            .map_err(|e| io::Error::other(format!("cannot save incremental PDF update: {e}")))?;
-        insert_revision_marker_before_startxref(&mut output, base.len())?;
-        let actual_len = output.len() as u64;
-        if data.pdf_annots_file_len == actual_len {
-            stable = true;
-            break;
-        }
-        data.pdf_annots_file_len = actual_len;
-        replace_custom_data_stream(&mut incremental.new_document, metadata_id, &data)?;
-    }
-    if !stable {
-        return Err(io::Error::other("Lapis metadata length did not stabilize while committing PDF"));
-    }
+    incremental.save_to(&mut output)
+        .map_err(|e| io::Error::other(format!("cannot save incremental PDF update: {e}")))?;
+    insert_revision_marker_before_startxref(&mut output, base_len)?;
+    data.pdf_annots_file_len = finalize_pdf_length(&mut output, base_len)?;
 
     // Never replace a readable source PDF with an invalid incremental revision.
     // In particular, reject xref/startxref regressions before the atomic rename.
     lopdf::Document::load_mem(&output)
         .map_err(|e| io::Error::other(format!("incremental PDF validation failed: {e}")))?;
     let tmp = pdf_path.with_extension("lapis_commit_tmp.pdf");
-    fs::write(&tmp, output)?;
-    fs::rename(&tmp, pdf_path).inspect_err(|_| { let _ = fs::remove_file(&tmp); })?;
-    save_local_backup_checked(pdf_path, &data)?;
+    let result = (|| -> io::Result<()> {
+        write_synced(&tmp, &output)?;
+        if pdf_stamp(pdf_path)? != *source_stamp {
+            return Err(io::Error::other("PDF changed while saving; retry Save"));
+        }
+        replace_file(&tmp, pdf_path)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&tmp); }
+    result?;
+    #[cfg(test)]
+    run_after_replace_hook();
+    finish_pdf_checkpoint(pdf_path, &data)?;
+    if let Ok(stamp) = pdf_stamp(pdf_path)
+        && stamp.len == data.pdf_annots_file_len
+    {
+        remember_commit(pdf_path, stamp, &data);
+    }
     Ok(())
 }
 
@@ -1117,6 +1482,7 @@ pub fn compact_doc_data(
     sketches: &HashMap<u32, SketchPage>,
 ) -> io::Result<()> {
     if pdf_path.as_os_str().is_empty() { return Ok(()); }
+    let stamp = pdf_stamp(pdf_path)?;
     let original = fs::read(pdf_path)?;
     // When Lapis was the last writer, undo its known incremental tail first.
     // This removes its metadata stream and annotation objects before lopdf's full
@@ -1130,21 +1496,8 @@ pub fn compact_doc_data(
     if doc.trailer.get(b"Encrypt").is_ok() {
         return Err(io::Error::other("encrypted PDFs are not eligible for compaction"));
     }
-    // /ByteRange, /FT /Sig and /Type /Sig can represent signed PDF objects.
     // Compaction invalidates signatures even when their appearance survives.
-    let signed = doc.objects.values().any(|object| {
-        let dictionary = match object {
-            lopdf::Object::Dictionary(d) => Some(d),
-            lopdf::Object::Stream(s) => Some(&s.dict),
-            _ => None,
-        };
-        dictionary.is_some_and(|d| {
-            d.get(b"ByteRange").is_ok()
-                || [b"Type".as_slice(), b"FT".as_slice()].iter().any(|key| {
-                    d.get(key).ok().and_then(|o| o.as_name().ok()) == Some(b"Sig".as_slice())
-                })
-        })
-    });
+    let signed = pdf_has_signed_value(&doc);
     if signed {
         return Err(io::Error::other("signed PDFs cannot be compacted without invalidating signatures"));
     }
@@ -1161,18 +1514,21 @@ pub fn compact_doc_data(
         return Err(io::Error::other("PDF page count changed during compaction"));
     }
 
+    let data = prepare_pdf_commit(pdf_path, notes, annotations, blank_pages, sketches)?;
+    // Flattening would export a model that lacks the external revision's annotations.
+    if externally_modified(&original, data.pdf_annots_file_len) {
+        return Err(io::Error::other(ExternalModification));
+    }
     // Preserve the exact bytes of the original on disk so compaction can be undone.
     let backup = pdf_path.with_extension("lapis_before_compaction.pdf");
-    if !backup.exists() { fs::write(&backup, &original)?; }
-    let data = collect_doc_data(pdf_path, notes, annotations, blank_pages, sketches);
-    commit_with_base(pdf_path, data, compacted)
+    if !backup.exists() { write_atomic(&backup, &original)?; }
+    commit_with_base(pdf_path, data, compacted, &stamp, true)
 }
 
 /// If a Lapis marker is the final trailer, return its position and the byte length of the
 /// PDF prefix that existed before that Lapis incremental revision.
 fn trailing_lapis_revision(bytes: &[u8]) -> Option<(usize, usize)> {
-    let pos = bytes.windows(LAPIS_INCREMENTAL_MARKER.len())
-        .rposition(|w| w == LAPIS_INCREMENTAL_MARKER)?;
+    let pos = memchr::memmem::rfind(bytes, LAPIS_INCREMENTAL_MARKER)?;
     let digits_start = pos + LAPIS_INCREMENTAL_MARKER.len();
     let digits_end = bytes[digits_start..].iter().position(|b| *b == b'\n')? + digits_start;
     let base_len = std::str::from_utf8(&bytes[digits_start..digits_end])
@@ -1329,11 +1685,7 @@ fn annotation_rect(doc: &lopdf::Document, dict: &lopdf::Dictionary) -> Option<[f
 
 fn pdf_text(dict: &lopdf::Dictionary, key: &[u8]) -> String {
     dict.get(key).ok().and_then(|o| match o {
-        lopdf::Object::String(bytes, _) if bytes.starts_with(&[0xFE, 0xFF]) => {
-            let words: Vec<u16> = bytes[2..].chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
-            Some(String::from_utf16_lossy(&words))
-        }
-        lopdf::Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
         _ => None,
     }).unwrap_or_default()
 }
@@ -1379,9 +1731,57 @@ fn annotation_kind_from_name(name: &str) -> Option<AnnotationKind> {
     })
 }
 
-/// Stable FNV-1a fingerprint of the annotation's semantic geometry and content.
-/// Coordinates are quantized to 1e-4 page units to tolerate PDF float serialization noise.
-fn annotation_signature(ann: &PageAnnotation) -> String {
+/// Font sizes are stored relative to an 800-unit page height (the on-screen and slide-export
+/// convention); PDF viewers read them as points, so they are scaled by the page height.
+const FONT_UNITS_PAGE_H: f32 = 800.0;
+
+/// Page size in PDF units as displayed (width and height swap on 90/270 degree pages).
+fn displayed_page_size(rect: [f32; 4], rotation: i32) -> (f32, f32) {
+    let (w, h) = ((rect[2] - rect[0]).max(1.0), (rect[3] - rect[1]).max(1.0));
+    if rotation == 90 || rotation == 270 { (h, w) } else { (w, h) }
+}
+
+fn model_to_pdf_font_size(model: f32, displayed_h: f32) -> f32 {
+    (model * displayed_h / FONT_UNITS_PAGE_H).clamp(4.0, 120.0)
+}
+
+fn pdf_to_model_font_size(points: f32, displayed_h: f32) -> f32 {
+    (points * FONT_UNITS_PAGE_H / displayed_h.max(1.0)).clamp(4.0, 200.0)
+}
+
+/// A textbox starts with one invisible character that selects its translucent background.
+const TEXTBOX_BG_MARKERS: [char; 2] = ['\u{200B}', '\u{200C}'];
+
+fn textbox_leading_marker(text: &str) -> Option<char> {
+    text.chars().next().filter(|c| TEXTBOX_BG_MARKERS.contains(c))
+}
+
+/// Background fill (color, opacity) matching the on-screen modes.
+fn textbox_background(text: &str) -> Option<([u8; 3], f32)> {
+    match textbox_leading_marker(text)? {
+        '\u{200B}' => Some(([36, 38, 46], 200.0 / 255.0)),
+        _ => Some(([245, 246, 250], 215.0 / 255.0)),
+    }
+}
+
+/// The text other PDF viewers should show: no background marker, no `__`/`~~` formatting
+/// delimiters, and a leading `- ` shown as a bullet, as the on-screen box renders it.
+fn textbox_plain_text(text: &str) -> String {
+    text.trim_start_matches(TEXTBOX_BG_MARKERS)
+        .split('\n')
+        .map(|line| {
+            let (bullet, rest) = match line.strip_prefix("- ") {
+                Some(rest) => ("\u{2022} ", rest),
+                None => ("", line),
+            };
+            format!("{bullet}{}", rest.replace("__", "").replace("~~", ""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Signature written by Lapis builds before textboxes ignored their height and markers.
+fn annotation_signature_v1(ann: &PageAnnotation) -> String {
     let canonical_box = matches!(ann.kind,
         AnnotationKind::TextBox | AnnotationKind::Highlight | AnnotationKind::Rect
         | AnnotationKind::Circle | AnnotationKind::Tape
@@ -1406,7 +1806,62 @@ fn annotation_signature(ann: &PageAnnotation) -> String {
     format!("{hash:016x}")
 }
 
-fn pdf_string_ascii(text: &str) -> String {
+/// Current signature. Textboxes ignore their bottom edge (grown to fit the wrapped text on
+/// export) and the Lapis-only markers, so an exported box matches itself after re-import.
+fn annotation_signature(ann: &PageAnnotation) -> String {
+    if ann.kind != AnnotationKind::TextBox || ann.points.is_empty() {
+        return annotation_signature_v1(ann);
+    }
+    let min_x = ann.points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let min_y = ann.points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let max_x = ann.points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let q = |v: f32| (v * 10_000.0).round() as i64;
+    let payload = format!(
+        "TextBox2|{:?}|{}|{},{}|{}",
+        ann.color, textbox_plain_text(&ann.text), q(min_x), q(min_y), q(max_x)
+    );
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in payload.as_bytes() { hash ^= *byte as u64; hash = hash.wrapping_mul(0x100000001b3); }
+    format!("{hash:016x}")
+}
+
+/// Windows-1252 byte for characters in the 0x80-0x9F block (WinAnsiEncoding).
+fn winansi_high_byte(c: char) -> Option<u8> {
+    Some(match c {
+        '\u{20AC}' => 0x80, '\u{201A}' => 0x82, '\u{0192}' => 0x83, '\u{201E}' => 0x84,
+        '\u{2026}' => 0x85, '\u{2020}' => 0x86, '\u{2021}' => 0x87, '\u{02C6}' => 0x88,
+        '\u{2030}' => 0x89, '\u{0160}' => 0x8A, '\u{2039}' => 0x8B, '\u{0152}' => 0x8C,
+        '\u{017D}' => 0x8E, '\u{2018}' => 0x91, '\u{2019}' => 0x92, '\u{201C}' => 0x93,
+        '\u{201D}' => 0x94, '\u{2022}' => 0x95, '\u{2013}' => 0x96, '\u{2014}' => 0x97,
+        '\u{02DC}' => 0x98, '\u{2122}' => 0x99, '\u{0161}' => 0x9A, '\u{203A}' => 0x9B,
+        '\u{0153}' => 0x9C, '\u{017E}' => 0x9E, '\u{0178}' => 0x9F,
+        _ => return None,
+    })
+}
+
+/// Decodes a PDF text string: UTF-16BE or UTF-8 with a BOM, UTF-8 without one (common in
+/// practice), otherwise PDFDocEncoding (Latin-1 plus the 0x80-0xA0 block).
+fn decode_pdf_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let words: Vec<u16> = bytes[2..].chunks_exact(2).map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+        return String::from_utf16_lossy(&words);
+    }
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    if let Ok(text) = std::str::from_utf8(bytes) { return text.to_owned(); }
+    const HIGH: [char; 33] = [
+        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{0192}',
+        '\u{2044}', '\u{2039}', '\u{203A}', '\u{2212}', '\u{2030}', '\u{201E}', '\u{201C}',
+        '\u{201D}', '\u{2018}', '\u{2019}', '\u{201A}', '\u{2122}', '\u{FB01}', '\u{FB02}',
+        '\u{0141}', '\u{0152}', '\u{0160}', '\u{0178}', '\u{017D}', '\u{0131}', '\u{0142}',
+        '\u{0153}', '\u{0161}', '\u{017E}', '\u{FFFD}', '\u{20AC}',
+    ];
+    bytes.iter().map(|&b| match b {
+        0x80..=0xA0 => HIGH[(b - 0x80) as usize],
+        _ => b as char,
+    }).collect()
+}
+
+fn pdf_string_winansi(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         match ch {
@@ -1414,27 +1869,45 @@ fn pdf_string_ascii(text: &str) -> String {
             '\n' | '\r' => out.push(' '),
             c if (c as u32) >= 32 && (c as u32) <= 126 => out.push(c),
             c if (160..=255).contains(&(c as u32)) => out.push_str(&format!("\\{:03o}", c as u8)),
-            _ => out.push('?'),
+            c => match winansi_high_byte(c) {
+                Some(byte) => out.push_str(&format!("\\{byte:03o}")),
+                None => out.push('?'),
+            },
         }
     }
     out
 }
 
-fn annotation_appearance_stream(text: &str, width: f32, height: f32, ann: &PageAnnotation) -> lopdf::Stream {
+fn annotation_appearance_stream(
+    text: &str,
+    width: f32,
+    height: f32,
+    font_size: f32,
+    ann: &PageAnnotation,
+    background: Option<([u8; 3], f32)>,
+) -> lopdf::Stream {
     use lopdf::{dictionary, Object};
-    let font_size = ann.font_size.clamp(6.0, 96.0);
+    let font_size = font_size.clamp(4.0, 120.0);
     let leading = font_size * 1.2;
     let x = 3.0f32;
     let baseline = (height - 3.0 - font_size).max(1.0);
-    let mut content = format!(
+    let mut content = String::new();
+    if let Some((c, _)) = background {
+        content.push_str(&format!(
+            "q /GSbg gs {:.5} {:.5} {:.5} rg 0 0 {:.3} {:.3} re f Q ",
+            c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0,
+            width.max(1.0), height.max(1.0)
+        ));
+    }
+    content.push_str(&format!(
         "BT /Helv {:.3} Tf {:.5} {:.5} {:.5} rg {:.3} {:.3} Td ",
         font_size, ann.color[0] as f32 / 255.0, ann.color[1] as f32 / 255.0,
         ann.color[2] as f32 / 255.0, x, baseline
-    );
+    ));
     for (i, line) in text.split('\n').enumerate() {
         if i > 0 { content.push_str(&format!("0 -{leading:.3} Td ")); }
         content.push('(');
-        content.push_str(&pdf_string_ascii(line));
+        content.push_str(&pdf_string_winansi(line));
         content.push_str(") Tj ");
     }
     content.push_str("ET");
@@ -1443,7 +1916,12 @@ fn annotation_appearance_stream(text: &str, width: f32, height: f32, ann: &PageA
         (false, true) => "Helvetica-Oblique", (false, false) => "Helvetica",
     };
     let font = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => base_font, "Encoding" => "WinAnsiEncoding" };
-    let resources = dictionary! { "Font" => dictionary! { "Helv" => font } };
+    let mut resources = dictionary! { "Font" => dictionary! { "Helv" => font } };
+    if let Some((_, alpha)) = background {
+        resources.set("ExtGState", dictionary! {
+            "GSbg" => dictionary! { "Type" => "ExtGState", "ca" => Object::Real(alpha) }
+        });
+    }
     lopdf::Stream::new(dictionary! {
         "Type" => "XObject", "Subtype" => "Form", "FormType" => 1,
         "BBox" => vec![0.into(), 0.into(), Object::Real(width.max(1.0)), Object::Real(height.max(1.0))],
@@ -1456,6 +1934,7 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
     let Ok(doc) = lopdf::Document::load_mem(&bytes) else { return; };
     for (page_num, page_id) in doc.get_pages() {
         let Some((page_rect, rotation)) = page_pdf_geometry(&doc,page_id) else { continue; };
+        let (_, disp_h) = displayed_page_size(page_rect, rotation);
         let Ok(page_dict) = doc.get_dictionary(page_id) else { continue; };
         let Some(annots_obj) = page_dict.get(b"Annots").ok().cloned() else { continue; };
         let annots_obj = resolve_obj(&doc,annots_obj);
@@ -1502,7 +1981,7 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
                 }
                 b"FreeText" | b"Text" => {
                     if let Some(r)=annotation_rect(&doc,dict) {
-                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:free_text_font_size(&doc,dict),bold:false,italic:false,stroke_width:2.5 });
+                        imported.push(PageAnnotation { kind:AnnotationKind::TextBox,color,points:vec![pdf_to_lapis_point((r[0],r[3]),page_rect,rotation),pdf_to_lapis_point((r[2],r[1]),page_rect,rotation)],text:pdf_text(dict,b"Contents"),font_size:pdf_to_model_font_size(free_text_font_size(&doc,dict), disp_h),bold:false,italic:false,stroke_width:2.5 });
                     }
                 }
                 _ => {}
@@ -1522,36 +2001,57 @@ fn import_external_annotations(pdf_path: &Path, target: &mut HashMap<u32, Vec<Pa
                 lopdf::Object::Name(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
                 _ => None,
             });
-            if is_lapis_exported && stored_sig.as_deref().is_some_and(|sig| {
-                imported.iter().all(|annotation| annotation_signature(annotation) == sig)
-            }) {
-                // /LapisSig intentionally fingerprints geometry, color and text, not
-                // font size. If Edge changes only the size, the signature still
-                // matches: update the existing local box without resurrecting a
-                // locally deleted annotation.
-                if let (Some(sig), Some(external)) = (stored_sig.as_deref(), imported.first()) {
-                    if let Some(local) = target.get_mut(&page_num)
-                        .and_then(|items| items.iter_mut()
-                            .find(|item| annotation_signature(item) == sig))
-                    {
-                        if local.kind == AnnotationKind::TextBox
-                            && (local.font_size - external.font_size).abs() > 0.01
-                        {
-                            local.font_size = external.font_size;
+            // Files written by older builds carry the previous signature scheme.
+            let sig_matches = |ann: &PageAnnotation, sig: &str| {
+                annotation_signature(ann) == sig || annotation_signature_v1(ann) == sig
+            };
+            if is_lapis_exported && let Some(sig) = stored_sig.as_deref() {
+                // The local annotation this object was exported from, if it still exists.
+                let local_idx = target.get(&page_num)
+                    .and_then(|items| items.iter().position(|item| sig_matches(item, sig)));
+                // Unchanged: it still has its stored signature, or the same content as the
+                // local annotation (the export grows textboxes and drops Lapis-only markers).
+                let unchanged = imported.iter().all(|a| sig_matches(a, sig))
+                    || local_idx.is_some_and(|i| {
+                        let local_sig = annotation_signature(&target[&page_num][i]);
+                        imported.iter().all(|a| annotation_signature(a) == local_sig)
+                    });
+                if unchanged {
+                    // The signature ignores the font size: if an external editor changed only
+                    // the size, update the local box without resurrecting a deleted one.
+                    if let (Some(i), Some(external)) = (local_idx, imported.first()) {
+                        let local = &mut target.get_mut(&page_num).expect("page has annotations")[i];
+                        if local.kind == AnnotationKind::TextBox && external.kind == AnnotationKind::TextBox {
+                            let model = external.font_size;
+                            // Older builds stored the PDF point size directly.
+                            let legacy = model * disp_h / FONT_UNITS_PAGE_H;
+                            if (local.font_size - model).abs() > 0.01 && (local.font_size - legacy).abs() > 0.01 {
+                                local.font_size = model;
+                            }
                         }
                     }
+                    continue;
                 }
-                continue;
+                // Edited externally: take the new content but keep what the PDF cannot hold.
+                if let Some(i) = local_idx && !imported.is_empty() {
+                    let existing = target.get_mut(&page_num).expect("page has annotations");
+                    let mut replacement = imported.remove(0);
+                    let local = &existing[i];
+                    if replacement.kind == AnnotationKind::TextBox && local.kind == AnnotationKind::TextBox {
+                        replacement.bold = local.bold;
+                        replacement.italic = local.italic;
+                        replacement.stroke_width = local.stroke_width;
+                        if let Some(marker) = textbox_leading_marker(&local.text)
+                            && textbox_leading_marker(&replacement.text).is_none()
+                        {
+                            replacement.text.insert(0, marker);
+                        }
+                    }
+                    existing[i] = replacement;
+                }
             }
             if !imported.is_empty() {
                 let existing = target.entry(page_num).or_default();
-                if is_lapis_exported {
-                    if let Some(sig) = stored_sig.as_deref() {
-                        if let Some(index) = existing.iter().position(|current| annotation_signature(current) == sig) {
-                            existing[index] = imported.remove(0);
-                        }
-                    }
-                }
                 for annotation in imported {
                     if !existing.iter().any(|current| same_page_annotation(current, &annotation)) {
                         existing.push(annotation);
@@ -1580,6 +2080,86 @@ struct PdfAnnotationObject {
     appearance: Option<lopdf::Stream>,
 }
 
+fn wrap_annotation_text(
+    text: &str,
+    width: f32,
+    font_size: f32,
+    font_name: &str,
+) -> String {
+    let font = match mupdf::Font::new(font_name) {
+        Ok(font) => Some(font),
+        Err(err) => {
+            eprintln!("Textbox font metrics unavailable: {err}");
+            None
+        }
+    };
+
+    let available = (width - 6.0).max(1.0);
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ");
+    let mut lines = Vec::new();
+
+    for paragraph in normalized.split('\n') {
+        let chars: Vec<char> = paragraph.chars().collect();
+        if chars.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let widths: Vec<f32> = chars
+            .iter()
+            .map(|&ch| {
+                font.as_ref()
+                    .and_then(|font| {
+                        font.encode_character(ch as i32)
+                            .and_then(|glyph| font.advance_glyph(glyph))
+                            .ok()
+                    })
+                    .filter(|advance| advance.is_finite() && *advance >= 0.0)
+                    // Keep text visible if font measurement fails.
+                    .unwrap_or(1.2)
+                    * font_size
+            })
+            .collect();
+
+        let mut start = 0;
+
+        while start < chars.len() {
+            let mut end = start;
+            let mut used = 0.0;
+            let mut word_break = None;
+
+            while end < chars.len() {
+                if used + widths[end] > available && end > start {
+                    break;
+                }
+
+                used += widths[end];
+                end += 1;
+
+                if chars[end - 1] == ' ' {
+                    word_break = Some(end);
+                }
+            }
+
+            if end < chars.len() {
+                if let Some(boundary) = word_break {
+                    if chars[start..boundary].iter().any(|&ch| ch != ' ') {
+                        end = boundary;
+                    }
+                }
+            }
+
+            lines.push(chars[start..end].iter().collect::<String>());
+            start = end;
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i32) -> Vec<PdfAnnotationObject> {
     use lopdf::{Object, dictionary};
     let sig = annotation_signature(ann);
@@ -1604,26 +2184,64 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
             }), appearance: None }];
         }
         AnnotationKind::TextBox => {
-            let Some(r)=pdf_rect_for_points(&ann.points,page_rect,rotation) else { return Vec::new(); };
-            let font_name = match (ann.bold, ann.italic) {
+                let Some(mut r) = pdf_rect_for_points(&ann.points, page_rect, rotation) else {
+                    return Vec::new();
+                };
+                let (_, disp_h) = displayed_page_size(page_rect, rotation);
+                let font_size = model_to_pdf_font_size(ann.font_size, disp_h);
+                let font_name = match (ann.bold, ann.italic) {
                 (true, true) => "Helvetica-BoldOblique",
                 (true, false) => "Helvetica-Bold",
                 (false, true) => "Helvetica-Oblique",
                 (false, false) => "Helvetica",
             };
-            let da = format!("/Helv {} Tf {} {} {} rg", ann.font_size.clamp(6.0,96.0),
+            let da = format!("/Helv {} Tf {} {} {} rg", font_size,
                 ann.color[0] as f32 / 255.0, ann.color[1] as f32 / 255.0, ann.color[2] as f32 / 255.0);
             let font = dictionary! { "Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>font_name, "Encoding"=>"WinAnsiEncoding" };
             let dr = dictionary! { "Font"=>dictionary! { "Helv"=>font } };
+
+            let leading = font_size * 1.2;
             let width = (r[2] - r[0]).max(1.0);
-            let height = (r[3] - r[1]).max(1.0);
-            let appearance = annotation_appearance_stream(&ann.text, width, height, ann);
-            return vec![PdfAnnotationObject { object: Object::Dictionary(dictionary!{
+            // Background markers and inline formatting delimiters are internal to Lapis.
+            let text = textbox_plain_text(&ann.text);
+            let background = textbox_background(&ann.text);
+
+            let wrapped = wrap_annotation_text(
+                &text,
+                width,
+                font_size,
+                font_name,
+            );
+
+            let line_count = wrapped.split('\n').count();
+            let required_height =
+                6.0 + font_size * 1.3 + leading * line_count.saturating_sub(1) as f32;
+            // Fit the box to its wrapped text, as on screen; a taller stored box would show
+            // as an empty band (and as extra background) in other viewers.
+            let height = required_height;
+
+            // Preserve the top edge.
+            r[1] = r[3] - height;
+
+            let appearance = annotation_appearance_stream(
+                &wrapped,
+                width,
+                height,
+                font_size,
+                ann,
+                background,
+            );
+            let mut annot = dictionary!{
                 "Type"=>"Annot", "Subtype"=>"FreeText", "Rect"=>vec![r[0].into(),r[1].into(),r[2].into(),r[3].into()],
-                "Contents"=>pdf_text_object(&ann.text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
+                "Contents"=>pdf_text_object(&text), "DA"=>Object::string_literal(da.into_bytes()), "DR"=>dr,
                 "C"=>rgb, "F"=>4, "Q"=>0, "BS"=>dictionary!{"W"=>0}, "LapisExported"=>true,
                 "LapisSig"=>Object::string_literal(sig.into_bytes()), "LapisKind"=>Object::string_literal(kind_name.as_bytes().to_vec()),
-            }), appearance: Some(appearance) }];
+            };
+            if let Some((c, _)) = background {
+                // Interior color: viewers that redraw the box keep its background.
+                annot.set("IC", vec![Object::Real(c[0] as f32 / 255.0), Object::Real(c[1] as f32 / 255.0), Object::Real(c[2] as f32 / 255.0)]);
+            }
+            return vec![PdfAnnotationObject { object: Object::Dictionary(annot), appearance: Some(appearance) }];
         }
         AnnotationKind::Rect | AnnotationKind::Tape => {
             if ann.points.len()<2 { return Vec::new(); }
@@ -1633,7 +2251,11 @@ fn annotation_to_pdf_objects(ann:&PageAnnotation, page_rect:[f32;4], rotation:i3
         AnnotationKind::Circle => {
             if ann.points.len()<2 { return Vec::new(); }
             let a=ann.points[0]; let b=*ann.points.last().unwrap();
-            let cx=(a.0+b.0)*0.5; let cy=(a.1+b.1)*0.5; let rx=(b.0-a.0).abs()*0.5; let ry=(b.1-a.1).abs()*0.5;
+            let cx=(a.0+b.0)*0.5; let cy=(a.1+b.1)*0.5;
+            // On screen the circle is inscribed in the box (the smaller side), not an ellipse.
+            let (disp_w, disp_h) = displayed_page_size(page_rect, rotation);
+            let radius = ((b.0-a.0).abs()*disp_w).min((b.1-a.1).abs()*disp_h)*0.5;
+            let (rx, ry) = (radius/disp_w, radius/disp_h);
             let path=(0..=32).map(|i| { let t=i as f32*std::f32::consts::TAU/32.0; (cx+rx*t.cos(),cy+ry*t.sin()) }).collect();
             paths.push(path);
         }
@@ -2332,101 +2954,51 @@ pub fn format_latex_expr(expr: &str) -> String {
     out.replace(['{', '}'], "").replace(':', "∶")
 }
 
-// Convert `Term :: Definition` lines into Markdown callouts.
-// Ignore code blocks and LaTeX math blocks.
-pub fn preprocess_definitions(markdown: &str) -> String {
-    let mut out = String::with_capacity(markdown.len() + 128);
-    let mut lines = markdown.lines().peekable();
-    let mut in_code_block = false;
-    let mut in_math_block = false;
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
+/// Prepare notes for Preview, using the same card boundaries as the trainer.
+pub fn preprocess_notes_preview(markdown: &str) -> String {
+    fn quote(out: &mut String, text: &str) {
+        for line in text.trim_matches('\n').lines() {
+            out.push_str("> ");
             out.push_str(line);
             out.push('\n');
-            continue;
         }
-        if trimmed.starts_with("$$") {
-            if !trimmed[2..].contains("$$") {
-                in_math_block = !in_math_block;
-            }
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if !in_code_block && !in_math_block {
-            let clean = trimmed.trim_start_matches(['-', '*', '+']).trim();
-            let q_start = clean
-                .strip_prefix("Q:")
-                .or_else(|| clean.strip_prefix("**Q:**"))
-                .or_else(|| clean.strip_prefix("D:"));
-            if let Some(q) = q_start {
-                let mut question = q.trim().to_string();
-                let mut answer = String::new();
-                let mut in_answer = false;
-                while let Some(next) = lines.peek() {
-                    let t = next.trim();
-                    if t.is_empty() && in_answer {
-                        break;
-                    }
-                    if t.starts_with("Q:")
-                        || t.starts_with("**Q:**")
-                        || t.starts_with("D:")
-                        || t.contains("::")
-                    {
-                        break;
-                    }
-                    let consumed = lines.next().unwrap().trim();
-                    if let Some(a) = consumed
-                        .strip_prefix("A:")
-                        .or_else(|| consumed.strip_prefix("**A:**"))
-                        .or_else(|| consumed.strip_prefix("R:"))
-                    {
-                        in_answer = true;
-                        answer.push_str(a.trim());
-                    } else if in_answer {
-                        if !answer.is_empty() {
-                            answer.push('\n');
-                        }
-                        answer.push_str(consumed);
-                    } else if !consumed.is_empty() {
-                        if !question.is_empty() {
-                            question.push('\n');
-                        }
-                        question.push_str(consumed);
-                    }
-                }
-                if !question.is_empty() && !answer.is_empty() {
-                    out.push_str(&format!(
-                        "\n> **Domanda**  \n> {}  \n> **Risposta**  \n> {}\n\n",
-                        question.replace('\n', "  \n> "),
-                        answer.replace('\n', "  \n> ")
-                    ));
-                    continue;
-                }
-                out.push_str(line);
-                out.push('\n');
-                continue;
-            }
-            if let Some((term, def)) = clean.split_once("::") {
-                let t = term.trim();
-                let d = def.trim();
-                let valid = !t.is_empty()
-                    && !d.is_empty()
-                    && !t.contains('$')
-                    && !t.contains('`')
-                    && !t.contains('\\')
-                    && !t.starts_with('>');
-                if valid {
-                    out.push_str(&format!("\n> **{}**  \n> {}\n\n", t, d));
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
     }
+
+    if !markdown.contains("::") && !markdown.contains("Q:") && !markdown.contains("D:") {
+        return preprocess_markdown_view(markdown);
+    }
+    let cards = flashcard_spans(0, markdown);
+    if cards.is_empty() {
+        return preprocess_markdown_view(markdown);
+    }
+    let mut out = String::with_capacity(markdown.len() + 128);
+    let mut pos = 0;
+    for (span, card, inline) in cards {
+        out.push_str(&preprocess_markdown_view(&markdown[pos..span.start]));
+        out.push('\n');
+        // Prepare math and code before adding the blockquote prefix.
+        let front = preprocess_markdown_view(&card.front);
+        let back = preprocess_markdown_view(&card.back);
+        if inline {
+            // Avoid nesting emphasis around an already formatted title.
+            let front = front.trim();
+            if !front.contains(['*', '_', '\n']) {
+                quote(&mut out, &format!("**{front}**  "));
+            } else {
+                quote(&mut out, &format!("{front}  "));
+            }
+        } else {
+            out.push_str("> **Domanda**  \n");
+            quote(&mut out, &front);
+            out.push_str(">\n> **Risposta**  \n");
+        }
+        // Separate the answer from the title, including fenced code and display math.
+        out.push_str(">\n");
+        quote(&mut out, &back);
+        out.push('\n');
+        pos = span.end;
+    }
+    out.push_str(&preprocess_markdown_view(&markdown[pos..]));
     out
 }
 
@@ -2458,7 +3030,7 @@ fn alias_code_fences(markdown: &str) -> String {
         let body = line.trim_end_matches(['\r', '\n']);
         let eol = &line[body.len()..];
         let rest = body.trim_start();
-        if rest.starts_with("```") {
+        if rest.starts_with("```") && (in_code_block || !rest.trim_start_matches('`').contains('`')) {
             in_code_block = !in_code_block;
             if in_code_block {
                 let indent = &body[..body.len() - rest.len()];
@@ -2485,68 +3057,73 @@ fn alias_code_fences(markdown: &str) -> String {
 /// Markdown preparation for on-screen rendering: math preprocessing plus code-fence language
 /// aliases, so more programming languages get syntax highlighting.
 pub fn preprocess_markdown_view(markdown: &str) -> String {
-    alias_code_fences(&preprocess_markdown_math(markdown))
+    alias_code_fences(&preprocess_markdown_math_impl(markdown, true))
 }
 
 // Convert display and inline math into styled Markdown for egui_commonmark.
 
 pub fn preprocess_markdown_math(markdown: &str) -> String {
-    let mut result = String::with_capacity(markdown.len() + 64);
-    let mut rem = markdown; // 1. Process display math blocks. 
-    while let Some(start) = rem.find("$$") {
-        result.push_str(&rem[..start]);
-        let after_start = &rem[start + 2..];
-        if let Some(end) = after_start.find("$$") {
-            let expr = &after_start[..end];
-            let formatted = format_latex_expr(expr);
-            result.push_str(&format!("\n\n**`{}`**\n\n", formatted));
-            rem = &after_start[end + 2..];
-        } else {
-            result.push_str("$$");
-            rem = after_start;
-            break;
+    preprocess_markdown_math_impl(markdown, false)
+}
+
+fn preprocess_markdown_math_impl(markdown: &str, escape_shell: bool) -> String {
+    fn push_literal(out: &mut String, text: &str, escape_shell: bool) {
+        if !escape_shell {
+            out.push_str(text);
+            return;
         }
-    }
-    result.push_str(rem);
-
-    // 2. Process inline math line by line, skipping code blocks.
-    let mut final_out = String::with_capacity(result.len());
-    let mut in_code_block = false;
-    let lines: Vec<&str> = result.lines().collect();
-
-    for (line_idx, &line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            final_out.push_str(line);
-            final_out.push('\n');
-            continue;
-        }
-
-        if in_code_block {
-            final_out.push_str(line);
-            final_out.push('\n');
-            continue;
-        }
-
-        let mut l_rem = line;
-        while let Some(s_idx) = l_rem.find('$') {
-            final_out.push_str(&l_rem[..s_idx]);
-            let after_s = &l_rem[s_idx + 1..];
-            if let Some(e_idx) = after_s.find('$') {
-                let expr = &after_s[..e_idx];
-                if !expr.is_empty() && !expr.starts_with(' ') && !expr.ends_with(' ') {
-                    let formatted = format_latex_expr(expr);
-                    final_out.push_str(&format!("`{}`", formatted));
-                    l_rem = &after_s[e_idx + 1..];
-                    continue;
+        for (i, ch) in text.char_indices() {
+            if ch == '$' && text[i..].starts_with("$@") {
+                let escapes = text.as_bytes()[..i].iter().rev().take_while(|&&b| b == b'\\').count();
+                if escapes % 2 == 0 {
+                    out.push('\\');
                 }
             }
-            final_out.push('$');
-            l_rem = after_s;
+            out.push(ch);
         }
-        final_out.push_str(l_rem);
+    }
+
+    let mut result = String::with_capacity(markdown.len() + 64);
+    let mut pos = 0;
+    for range in code_and_math_ranges(markdown) {
+        push_literal(&mut result, &markdown[pos..range.start], escape_shell);
+        let span = &markdown[range.clone()];
+        if span.starts_with("$$") {
+            let formatted = format_latex_expr(&span[2..span.len() - 2]);
+            result.push_str(&format!("\n\n**`{}`**\n\n", formatted));
+        } else if span.starts_with('$') {
+            let formatted = format_latex_expr(&span[1..span.len() - 1]);
+            result.push_str(&format!("`{}`", formatted));
+        } else {
+            result.push_str(span);
+        }
+        pos = range.end;
+    }
+    push_literal(&mut result, &markdown[pos..], escape_shell);
+
+    let mut final_out = String::with_capacity(result.len());
+    let mut fence: Option<(char, usize)> = None;
+    let lines: Vec<&str> = result.lines().collect();
+    for (line_idx, &line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if let Some(marker) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') {
+            let run = trimmed.chars().take_while(|&c| c == marker).count();
+            if let Some((open, len)) = fence {
+                if marker == open && run >= len && trimmed[run..].trim().is_empty() {
+                    fence = None;
+                    final_out.push_str(line);
+                    final_out.push('\n');
+                    continue;
+                }
+            } else if run >= 3 && (marker != '`' || !trimmed[run..].contains('`')) {
+                fence = Some((marker, run));
+            }
+        }
+        final_out.push_str(line);
+        if fence.is_some() {
+            final_out.push('\n');
+            continue;
+        }
 
         let is_blockquote = trimmed.starts_with('>');
         let next_is_blockquote = lines
@@ -2688,54 +3265,226 @@ fn strip_title_emphasis(title: &str) -> &str {
     t
 }
 
-fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
-    let mut cards = Vec::new();
-    let mut lines = content.lines().peekable();
-    while let Some(raw_line) = lines.next() {
-        let trimmed = strip_list_marker(raw_line);
+/// Byte ranges of `text` that hold code (fenced blocks, inline code) or LaTeX (`$$…$$`, `$…$`).
+/// Sorted and disjoint. Inline math follows the rules of [`preprocess_markdown_math`]; an
+/// unclosed fence runs to the end, as in Markdown, while unclosed math is plain text.
+pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    fn line_end(text: &str, pos: usize) -> usize {
+        text[pos..].find('\n').map_or(text.len(), |p| pos + p + 1)
+    }
+    /// End of the fenced block opening at the line starting at `start`, if there is one.
+    fn fence_end(text: &str, start: usize) -> Option<usize> {
+        let first_end = line_end(text, start);
+        let opening = text[start..first_end].trim_start();
+        let marker = opening.chars().next().filter(|c| *c == '`' || *c == '~')?;
+        let run = opening.chars().take_while(|&c| c == marker).count();
+        if run < 3 || (marker == '`' && opening[run..].contains('`')) {
+            return None;
+        }
+        let mut pos = first_end;
+        while pos < text.len() {
+            let end = line_end(text, pos);
+            let closing = text[pos..end].trim_start();
+            let len = closing.chars().take_while(|&c| c == marker).count();
+            if len >= run && closing[len..].trim().is_empty() {
+                return Some(end);
+            }
+            pos = end;
+        }
+        Some(text.len())
+    }
+    /// End of the first run of exactly `run` backticks in `from..limit`.
+    fn closing_backticks(bytes: &[u8], from: usize, limit: usize, run: usize) -> Option<usize> {
+        let mut j = from;
+        while j < limit {
+            if bytes[j] == b'`' {
+                let mut k = j;
+                while k < limit && bytes[k] == b'`' {
+                    k += 1;
+                }
+                if k - j == run {
+                    return Some(k);
+                }
+                j = k;
+            } else {
+                j += 1;
+            }
+        }
+        None
+    }
 
-        // 1. Check inline `Front :: Back` syntax
-        if let Some((left, right)) = trimmed.split_once("::") {
-            let f = strip_title_emphasis(left);
-            let b = right.trim();
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    let mut at_line_start = true;
+    while i < bytes.len() {
+        if at_line_start {
+            at_line_start = false;
+            if let Some(end) = fence_end(text, i) {
+                ranges.push(i..end);
+                i = end;
+                at_line_start = true;
+                continue;
+            }
+        }
+        match bytes[i] {
+            b'\n' => {
+                at_line_start = true;
+                i += 1;
+            }
+            b'\\' if matches!(bytes.get(i + 1), Some(b'$' | b'\\' | b'`')) => i += 2,
+            b'`' => {
+                let run = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+                match closing_backticks(bytes, i + run, line_end(text, i), run) {
+                    Some(end) => {
+                        ranges.push(i..end);
+                        i = end;
+                    }
+                    None => i += run,
+                }
+            }
+            b'$' if text[i..].starts_with("$@") => i += 2,
+            b'$' if text[i..].starts_with("$$") => match text[i + 2..].find("$$") {
+                Some(p) => {
+                    let end = i + 2 + p + 2;
+                    ranges.push(i..end);
+                    i = end;
+                }
+                None => i += 2,
+            },
+            b'$' => {
+                let after = i + 1;
+                let closing = text[after..line_end(text, i)]
+                    .find(['$', '`']).map(|p| after + p)
+                    .filter(|&p| bytes[p] == b'$' && !text[p..].starts_with("$@")
+                        && bytes[..p].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0);
+                match closing {
+                    Some(close)
+                        if close > after
+                            && !text[after..close].starts_with(' ')
+                            && !text[after..close].ends_with(' ') =>
+                    {
+                        ranges.push(i..close + 1);
+                        i = close + 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    ranges
+}
+
+/// Whether byte offset `byte` lies inside one of the sorted, disjoint `ranges`.
+pub fn in_ranges(ranges: &[std::ops::Range<usize>], byte: usize) -> bool {
+    let idx = ranges.partition_point(|r| r.end <= byte);
+    ranges.get(idx).is_some_and(|r| r.start <= byte)
+}
+
+/// Offset in `hay` of the first `needle` outside code and math. `base` is `hay`'s offset in the note.
+fn find_outside(
+    hay: &str,
+    base: usize,
+    needle: &str,
+    skip: &[std::ops::Range<usize>],
+) -> Option<usize> {
+    hay.match_indices(needle)
+        .map(|(i, _)| i)
+        .find(|&i| !in_ranges(skip, base + i))
+}
+
+/// Whether a note contains at least one flashcard (cheap pre-check; runs every frame).
+pub fn page_has_flashcards(content: &str) -> bool {
+    (content.contains("::") || content.contains("Q:") || content.contains("D:"))
+        && !extract_flashcards_from_page(0, content).is_empty()
+}
+
+fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
+    flashcard_spans(page, content)
+        .into_iter()
+        .map(|(_, card, _)| card)
+        .collect()
+}
+
+// The span covers the original source; the bool distinguishes inline and Q/A cards.
+fn flashcard_spans(page: u32, content: &str) -> Vec<(std::ops::Range<usize>, Flashcard, bool)> {
+    let mut cards = Vec::new();
+    // Code and math never produce cards; offsets let us tell where a marker sits.
+    let skip = code_and_math_ranges(content);
+    let mut offset = 0;
+    let mut lines = content
+        .split_inclusive('\n')
+        .map(|l| {
+            let start = offset;
+            offset += l.len();
+            (start, l)
+        })
+        .peekable();
+    while let Some((line_off, raw_line)) = lines.next() {
+        let trimmed = strip_list_marker(raw_line);
+        // `trimmed` is a subslice of `raw_line`.
+        let base = line_off + (trimmed.as_ptr() as usize - raw_line.as_ptr() as usize);
+
+        let question_start = if !in_ranges(&skip, base) {
+            trimmed.strip_prefix("Q:")
+                .or_else(|| trimmed.strip_prefix("**Q:**"))
+                .or_else(|| trimmed.strip_prefix("D:"))
+        } else {
+            None
+        };
+        // Inline cards must not split a multiline math or code span.
+        let line_end = line_off + raw_line.len();
+        let first = skip.partition_point(|r| r.end <= line_off);
+        let crosses_line = skip[first..]
+            .iter()
+            .take_while(|r| r.start < line_end)
+            .any(|r| r.start < line_off || r.end > line_end);
+        if !crosses_line && let Some(p) = find_outside(trimmed, base, "::", &skip) {
+            let f = strip_title_emphasis(&trimmed[..p]);
+            let b = trimmed[p + 2..].trim();
             if !f.is_empty() && !b.is_empty() {
-                cards.push(Flashcard {
-                    page,
-                    front: f.to_string(),
-                    back: b.to_string(),
-                });
+                cards.push((
+                    line_off..line_end,
+                    Flashcard { page, front: f.to_string(), back: b.to_string() },
+                    true,
+                ));
                 continue;
             }
         }
 
         // 2. Check `Q: ...` / `A: ...` block syntax
-        if let Some(q_start) = trimmed
-            .strip_prefix("Q:")
-            .or_else(|| trimmed.strip_prefix("**Q:**"))
-            .or_else(|| trimmed.strip_prefix("D:"))
-        {
+        if let Some(q_start) = question_start {
+            let mut end = line_off + raw_line.len();
             let mut question = q_start.trim().to_string();
             let mut answer = String::new();
             let mut in_answer = false;
 
-            while let Some(&next_raw) = lines.peek() {
+            while let Some(&(next_off, next_raw)) = lines.peek() {
                 let next_trim = next_raw.trim();
-                if next_trim.is_empty() && in_answer {
+                let lead = next_raw.len() - next_raw.trim_start().len();
+                // Markers inside a code block or math are content, not syntax.
+                let is_syntax = !in_ranges(&skip, next_off + lead);
+                if next_trim.is_empty() && in_answer && !in_ranges(&skip, next_off) {
                     break;
                 }
-                if next_trim.starts_with("Q:")
-                    || next_trim.starts_with("**Q:**")
-                    || next_trim.contains("::")
+                let a_start = if is_syntax {
+                    next_trim.strip_prefix("A:")
+                        .or_else(|| next_trim.strip_prefix("**A:**"))
+                        .or_else(|| next_trim.strip_prefix("R:"))
+                } else {
+                    None
+                };
+                if (is_syntax && (next_trim.starts_with("Q:")
+                    || next_trim.starts_with("**Q:**") || next_trim.starts_with("D:")))
+                    || (a_start.is_none() && find_outside(next_raw, next_off, "::", &skip).is_some())
                 {
                     break;
                 }
 
-                let consumed = lines.next().unwrap().trim();
-                if let Some(a_start) = consumed
-                    .strip_prefix("A:")
-                    .or_else(|| consumed.strip_prefix("**A:**"))
-                    .or_else(|| consumed.strip_prefix("R:"))
-                {
+                let consumed = lines.next().unwrap().1.trim_end_matches(['\r', '\n']);
+                end = next_off + next_raw.len();
+                if let Some(a_start) = a_start {
                     in_answer = true;
                     answer.push_str(a_start.trim());
                 } else if in_answer {
@@ -2752,11 +3501,11 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
             }
 
             if !question.is_empty() && !answer.is_empty() {
-                cards.push(Flashcard {
-                    page,
-                    front: question,
-                    back: answer,
-                });
+                cards.push((
+                    line_off..end,
+                    Flashcard { page, front: question, back: answer },
+                    false,
+                ));
             }
         }
     }
@@ -3263,8 +4012,857 @@ mod tests {
         let mut local = HashMap::from([(1, vec![sample])]);
         import_external_annotations(&path, &mut local);
         assert_eq!(local[&1].len(), 1);
-        assert_eq!(local[&1][0].font_size, 26.0);
+        // 26 pt on a 792 pt page is stored relative to the 800-unit page height.
+        assert!((local[&1][0].font_size - 26.0 * 800.0 / 792.0).abs() < 0.01);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn sample_textbox(text: &str, points: Vec<(f32, f32)>) -> PageAnnotation {
+        PageAnnotation {
+            kind: AnnotationKind::TextBox, color: [10, 20, 30], points,
+            text: text.to_owned(), font_size: 20.0, bold: true, italic: true, stroke_width: 3.0,
+        }
+    }
+
+    #[test]
+    fn textbox_plain_text_matches_the_on_screen_rendering() {
+        assert_eq!(textbox_plain_text("\u{200B}- a __b__ ~~c~~"), "\u{2022} a b c");
+        assert_eq!(textbox_plain_text("- one\ntwo\n- three"), "\u{2022} one\ntwo\n\u{2022} three");
+        // A line that starts with a delimiter is not a bullet.
+        assert_eq!(textbox_plain_text("__- x__"), "- x");
+        assert_eq!(textbox_background("\u{200B}x").map(|b| b.0), Some([36, 38, 46]));
+        assert_eq!(textbox_background("\u{200C}x").map(|b| b.0), Some([245, 246, 250]));
+        assert!(textbox_background("plain").is_none());
+    }
+
+    #[test]
+    fn textbox_signature_ignores_height_and_lapis_markers() {
+        let local = sample_textbox("\u{200B}hi __x__", vec![(0.1, 0.1), (0.4, 0.2)]);
+        // What an export-then-import produces: grown box, cleaned text.
+        let imported = sample_textbox("hi x", vec![(0.1, 0.1), (0.4, 0.5)]);
+        assert_eq!(annotation_signature(&local), annotation_signature(&imported));
+        assert_ne!(annotation_signature_v1(&local), annotation_signature_v1(&imported));
+        let moved = sample_textbox("hi x", vec![(0.2, 0.1), (0.5, 0.5)]);
+        assert_ne!(annotation_signature(&local), annotation_signature(&moved));
+        let edited = sample_textbox("hi there", vec![(0.1, 0.1), (0.4, 0.2)]);
+        assert_ne!(annotation_signature(&local), annotation_signature(&edited));
+    }
+
+    #[test]
+    fn appearance_text_uses_winansi_for_typographic_characters() {
+        assert_eq!(
+            pdf_string_winansi("\u{2019} \u{201C} \u{201D} \u{2013} \u{2022} \u{E9} ("),
+            r"\222 \223 \224 \226 \225 \351 \("
+        );
+        assert_eq!(pdf_string_winansi("\u{4E2D}"), "?");
+    }
+
+    #[test]
+    fn pdf_text_without_a_bom_is_decoded_as_utf8_or_pdfdoc() {
+        assert_eq!(decode_pdf_text(b"caf\xE9"), "caf\u{E9}");
+        assert_eq!(decode_pdf_text("caf\u{E9}".as_bytes()), "caf\u{E9}");
+        assert_eq!(decode_pdf_text(&[0xFE, 0xFF, 0x00, 0x41]), "A");
+        assert_eq!(decode_pdf_text(&[0x80, 0x90]), "\u{2022}\u{2019}");
+        assert_eq!(decode_pdf_text(&[0xEF, 0xBB, 0xBF, b'o', b'k']), "ok");
+    }
+
+    #[test]
+    fn font_sizes_follow_the_page_height() {
+        assert!((model_to_pdf_font_size(16.0, 540.0) - 10.8).abs() < 0.001);
+        assert!((model_to_pdf_font_size(16.0, 800.0) - 16.0).abs() < 0.001);
+        assert!((pdf_to_model_font_size(10.8, 540.0) - 16.0).abs() < 0.001);
+        // Rotated pages use the displayed height (the PDF width).
+        assert_eq!(displayed_page_size([0.0, 0.0, 540.0, 960.0], 90), (960.0, 540.0));
+        assert_eq!(displayed_page_size([0.0, 0.0, 540.0, 960.0], 0), (540.0, 960.0));
+    }
+
+    #[test]
+    fn exported_textbox_scales_font_and_keeps_its_background() {
+        let ann = sample_textbox("\u{200B}Hello", vec![(0.1, 0.1), (0.5, 0.2)]);
+        let objects = annotation_to_pdf_objects(&ann, [0.0, 0.0, 960.0, 540.0], 0);
+        assert_eq!(objects.len(), 1);
+        let dict = objects[0].object.as_dict().unwrap();
+        let Ok(lopdf::Object::String(da, _)) = dict.get(b"DA") else { panic!("missing /DA") };
+        let da = String::from_utf8_lossy(da).into_owned();
+        let size: f32 = da.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!((size - 20.0 * 540.0 / 800.0).abs() < 0.001, "{da}");
+        assert!(dict.get(b"IC").is_ok());
+        let appearance = objects[0].appearance.as_ref().unwrap();
+        assert!(String::from_utf8_lossy(&appearance.content).contains("/GSbg gs"));
+        let Ok(lopdf::Object::String(contents, _)) = dict.get(b"Contents") else { panic!("missing /Contents") };
+        assert_eq!(decode_pdf_text(contents), "Hello");
+    }
+
+    #[test]
+    fn exported_textbox_is_fitted_to_its_text() {
+        let page = [0.0, 0.0, 960.0, 540.0];
+        let rect_of = |ann: &PageAnnotation| -> Vec<f32> {
+            let objects = annotation_to_pdf_objects(ann, page, 0);
+            let rect = objects[0].object.as_dict().unwrap().get(b"Rect").unwrap().as_array().unwrap();
+            rect.iter().map(|o| pdf_num(o).unwrap()).collect()
+        };
+        // The sample box uses size 20, which is 13.5 pt on a 540 pt page.
+        let pt = 20.0 * 540.0 / 800.0;
+        // A tall stored box still exports at the height of one line.
+        let tall = rect_of(&sample_textbox("Hi", vec![(0.1, 0.1), (0.5, 0.9)]));
+        assert!(((tall[3] - tall[1]) - (6.0 + pt * 1.3)).abs() < 0.01);
+        // The top edge stays where it was placed.
+        assert!((tall[3] - 540.0 * 0.9).abs() < 0.01);
+        // Each extra line adds one leading (1.2 x the text size).
+        let three = rect_of(&sample_textbox("a\nb\nc", vec![(0.1, 0.1), (0.5, 0.9)]));
+        assert!(((three[3] - three[1]) - (6.0 + pt * 1.3 + pt * 1.2 * 2.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn exported_circle_is_inscribed_like_on_screen() {
+        let ann = PageAnnotation {
+            kind: AnnotationKind::Circle, color: [0, 0, 0],
+            points: vec![(0.1, 0.1), (0.5, 0.2)], text: String::new(),
+            font_size: 16.0, bold: false, italic: false, stroke_width: 2.5,
+        };
+        let objects = annotation_to_pdf_objects(&ann, [0.0, 0.0, 612.0, 792.0], 0);
+        let rect = objects[0].object.as_dict().unwrap().get(b"Rect").unwrap().as_array().unwrap();
+        let v: Vec<f32> = rect.iter().map(|o| pdf_num(o).unwrap()).collect();
+        // Box is 244.8 x 79.2 pt: the circle takes the smaller side, in both directions.
+        assert!(((v[2] - v[0]) - 79.2).abs() < 0.01 && ((v[3] - v[1]) - 79.2).abs() < 0.01);
+    }
+
+    fn export_to_file(path: &Path, annotations: &HashMap<u32, Vec<PageAnnotation>>) {
+        let base = fs::read(path).unwrap();
+        let mut incremental =
+            lopdf::IncrementalDocument::load_from(std::io::Cursor::new(base)).unwrap();
+        assert!(export_pdf_annotations(&mut incremental, annotations).unwrap());
+        let mut out = Vec::new();
+        incremental.save_to(&mut out).unwrap();
+        fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn exported_textbox_keeps_its_formatting_after_an_external_save() {
+        let root = std::env::temp_dir().join(format!("lapis_audit_tb_same_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tb.pdf");
+        valid_test_pdf(&path);
+        // A short box: the export grows it to fit the text, which used to look like an edit.
+        let ann = sample_textbox("\u{200B}- hello __world__", vec![(0.1, 0.1), (0.4, 0.11)]);
+        let annotations = HashMap::from([(1u32, vec![ann.clone()])]);
+        export_to_file(&path, &annotations);
+
+        let mut local = annotations.clone();
+        import_external_annotations(&path, &mut local);
+        assert_eq!(local[&1].len(), 1);
+        let kept = &local[&1][0];
+        assert_eq!(kept.text, ann.text);
+        assert!(kept.bold && kept.italic);
+        assert_eq!(kept.stroke_width, 3.0);
+        assert!((kept.font_size - 20.0).abs() < 0.01);
+        assert_eq!(kept.points, ann.points);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn externally_edited_textbox_text_keeps_background_and_formatting() {
+        let root = std::env::temp_dir().join(format!("lapis_audit_tb_edit_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tb.pdf");
+        valid_test_pdf(&path);
+        let ann = sample_textbox("\u{200B}original", vec![(0.1, 0.1), (0.4, 0.2)]);
+        let annotations = HashMap::from([(1u32, vec![ann])]);
+        export_to_file(&path, &annotations);
+
+        let mut doc = lopdf::Document::load(&path).unwrap();
+        for object in doc.objects.values_mut() {
+            if let lopdf::Object::Dictionary(d) = object {
+                let is_free_text = d.get(b"Subtype").ok().and_then(|o| o.as_name().ok())
+                    == Some(b"FreeText".as_slice());
+                if is_free_text { d.set("Contents", pdf_text_object("changed")); }
+            }
+        }
+        doc.save(&path).unwrap();
+
+        let mut local = annotations.clone();
+        import_external_annotations(&path, &mut local);
+        assert_eq!(local[&1].len(), 1);
+        let edited = &local[&1][0];
+        assert_eq!(edited.text, "\u{200B}changed");
+        assert!(edited.bold && edited.italic);
+        assert_eq!(edited.stroke_width, 3.0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn page_changes_remap_every_per_page_map() {
+        let mut data = DocData::default();
+        for page in 1..=3u32 {
+            data.notes.insert(page, format!("note {page}"));
+        }
+        data.annotations.insert(2, vec![sample_textbox("x", vec![(0.1, 0.1), (0.2, 0.2)])]);
+        data.blank_pages.insert(3);
+        // Delete page 2.
+        remap_doc_data_pages(&mut data, &|page| match page.cmp(&2) {
+            std::cmp::Ordering::Less => Some(page),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(page - 1),
+        });
+        assert_eq!(data.notes.len(), 2);
+        assert_eq!(data.notes[&2], "note 3");
+        assert!(data.annotations.is_empty());
+        assert!(data.blank_pages.contains(&2) && data.blank_pages.len() == 1);
+    }
+
+    #[test]
+    fn embedded_payload_is_rewritten_for_a_page_change() {
+        let mut data = DocData::default();
+        data.notes.insert(1, "first".to_owned());
+        data.notes.insert(2, "second".to_owned());
+        let mut payload = NOTES_START_TAG.to_vec();
+        serde_json::to_writer(&mut payload, &data).unwrap();
+        payload.extend_from_slice(NOTES_END_TAG);
+
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("embedded_payload");
+        let path = fixture.root.join("embedded_payload.pdf");
+        let updated = rebase_embedded_notes(&path, &payload, |d| {
+            shift_doc_data_on_insert(&mut d.notes, &mut d.annotations, &mut d.blank_pages, &mut d.sketches, 2);
+        });
+        let block = find_embedded_block(&updated).unwrap();
+        let back = parse_embedded_data(&updated[block.body_start..block.body_end]).unwrap();
+        assert_eq!(back.notes[&1], "first");
+        assert_eq!(back.notes[&3], "second");
+        assert!(!back.notes.contains_key(&2));
+        assert!(back.blank_pages.contains(&2));
+        // A payload that cannot be parsed is returned untouched.
+        assert_eq!(rebase_embedded_notes(&path, b"garbage", |_| {}), b"garbage".to_vec());
+    }
+
+    // Isolate document IDs and backups from the user's installation.
+    struct SaveTestDir {
+        root: PathBuf,
+        env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl SaveTestDir {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("lapis_save_pipeline_{name}_{}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
+            let env = ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"]
+                .into_iter().map(|key| (key, std::env::var_os(key))).collect();
+            // SAFETY: callers hold the docid test lock; run the suite with one test thread.
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", root.join("data"));
+                std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+                std::env::set_var("LOCALAPPDATA", root.join("data"));
+                std::env::set_var("APPDATA", root.join("config"));
+            }
+            Self { root, env }
+        }
+    }
+
+    impl Drop for SaveTestDir {
+        fn drop(&mut self) {
+            for (key, value) in &self.env {
+                // SAFETY: the test lock remains held until after this fixture is dropped.
+                unsafe {
+                    if let Some(value) = value { std::env::set_var(key, value); }
+                    else { std::env::remove_var(key); }
+                }
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn save_test_pdf(path: &Path, count: u32) {
+        use lopdf::{dictionary, Object, Stream};
+        let mut doc = lopdf::Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut kids = Vec::new();
+        for page in 1..=count {
+            let mut content = format!("q\n0 0 m\n1 1 l\nS\nQ\n% page {page}\n").into_bytes();
+            // Valid uncompressed page content; exercise a multi-megabyte PDF.
+            content.extend_from_slice("% synthetic page payload for save performance\n".repeat(320).as_bytes());
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => Object::Reference(pages_id),
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! {}, "Contents" => Object::Reference(content_id),
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count as i64),
+        }));
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages_id) });
+        doc.trailer.set("Root", catalog);
+        doc.save(path).unwrap();
+    }
+
+    fn save_fixture(path: &Path, data: &DocData) {
+        commit_doc_data(path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+    }
+
+    fn verify_save_fixture(path: &Path, expected: &DocData, pages: usize) {
+        let bytes = fs::read(path).unwrap();
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(pdf.get_pages().len(), pages);
+        let embedded = embedded_doc_data(&bytes).expect("missing embedded Lapis data");
+        assert!(same_content(&embedded, expected), "embedded content differs");
+        assert_eq!(embedded.pdf_annots_file_len, bytes.len() as u64);
+        assert!(same_content(&load_local_backup(path).unwrap(), expected));
+        assert!(trailing_lapis_revision(&bytes).is_some());
+    }
+
+    #[test]
+    fn save_pipeline_large_document() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("large");
+        let path = fixture.root.join("large.pdf");
+        save_test_pdf(&path, 180);
+        let mut data = load_doc_data(&path);
+        for page in (1..=180).step_by(3) {
+            data.notes.insert(page, format!("# Page {page}\n{}", "Example notes. ".repeat(32)));
+        }
+        let mut pen = sample_textbox("", vec![(0.1, 0.1), (0.2, 0.3), (0.4, 0.2)]);
+        pen.kind = AnnotationKind::Freehand;
+        let mut highlight = pen.clone();
+        highlight.kind = AnnotationKind::Highlight;
+        highlight.points.truncate(2);
+        highlight.color = [250, 204, 21];
+        data.annotations.insert(1, vec![pen.clone(), highlight, sample_textbox("Test textbox", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        let mut sketch = SketchPage::new(BlankPageStyle::Grid);
+        pen.points = vec![(12.0, 20.0), (40.0, 70.0)];
+        sketch.strokes.push(pen);
+        data.sketches.insert(80, sketch);
+        println!("Fixture: 180 pages, {} bytes", fs::metadata(&path).unwrap().len());
+
+        let start = std::time::Instant::now();
+        save_fixture(&path, &data);
+        println!("Initial modified save: {:?}", start.elapsed());
+        verify_save_fixture(&path, &data, 180);
+        let first = fs::read(&path).unwrap();
+        let stamp = pdf_stamp(&path).unwrap();
+        let backup = fs::read(get_backup_path(&path)).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..3 { save_fixture(&path, &data); }
+        println!("Three unchanged saves: {:?}", start.elapsed());
+        assert_eq!(pdf_stamp(&path).unwrap(), stamp, "unchanged save replaced the file");
+        assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup);
+
+        // Simulate a new process without the in-memory commit cache.
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert!(same_content(&reopened, &data));
+        let start = std::time::Instant::now();
+        save_fixture(&path, &reopened);
+        println!("Commit on closing a reopened, unchanged PDF: {:?}", start.elapsed());
+        assert_eq!(pdf_stamp(&path).unwrap(), stamp);
+
+        data.notes.remove(&1);
+        data.annotations.remove(&1);
+        data.sketches.remove(&80);
+        data.notes.insert(180, "Replacement note".into());
+        let start = std::time::Instant::now();
+        save_fixture(&path, &data);
+        println!("Modified save after deletions: {:?}", start.elapsed());
+        verify_save_fixture(&path, &data, 180);
+        let updated = fs::read(&path).unwrap();
+        assert_eq!(count_custom_sections(&updated), 1);
+        assert_eq!(updated.windows(LAPIS_INCREMENTAL_MARKER.len()).filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
+        assert!(same_content(&load_doc_data(&path), &data));
+
+        if let Ok(output) = std::process::Command::new("qpdf").arg("--check").arg(&path).output() {
+            assert!(output.status.success(), "qpdf: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            println!("qpdf --check: passed");
+        } else {
+            println!("qpdf not installed; lopdf validation passed");
+        }
+    }
+
+    #[test]
+    fn save_pipeline_newer_edits_survive_worker_and_reopen() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("worker");
+        let path = fixture.root.join("worker.pdf");
+        save_test_pdf(&path, 3);
+        let mut old = load_doc_data(&path);
+        old.notes.insert(1, "Before background save".into());
+        old.annotations.insert(1, vec![sample_textbox("Delete me", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        let snapshot = prepare_pdf_commit(&path, &old.notes, &old.annotations, old.blank_pages.clone(), &old.sketches).unwrap();
+        let snapshot_rev = snapshot.rev;
+        let original_bytes = fs::read(&path).unwrap();
+        let mut latest = old.clone();
+        latest.notes.insert(1, "Typed while saving".into());
+        latest.annotations.clear();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            worker_gate.wait();
+            commit_pdf_snapshot(&worker_path, snapshot)
+        });
+        // Keep the worker waiting until a newer checkpoint exists.
+        let saved = save_doc_data(&path, &latest.notes, &latest.annotations, latest.blank_pages.clone(), &latest.sketches);
+        gate.wait();
+        worker.join().unwrap().unwrap();
+        saved.unwrap();
+        let embedded = read_trailing_doc_data(&path).unwrap();
+        assert!(same_content(&embedded, &old));
+        let backup = load_local_backup(&path).unwrap();
+        assert!(backup.rev > snapshot_rev);
+        assert!(same_content(&backup, &latest));
+        assert_eq!(backup.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+
+        // Simulate interruption after PDF replacement but before backup metadata reconciliation.
+        let mut interrupted = backup;
+        interrupted.pdf_annots_file_len = original_bytes.len() as u64;
+        save_local_backup_checked(&path, &interrupted).unwrap();
+        *LAST_COMMIT.lock().unwrap() = None;
+        let recovered = load_doc_data(&path);
+        assert!(same_content(&recovered, &latest));
+        assert!(recovered.annotations.is_empty(), "deleted annotation returned");
+        // Closing or another explicit save must commit the newer content, not the old snapshot.
+        save_fixture(&path, &recovered);
+        verify_save_fixture(&path, &latest, 3);
+    }
+
+    #[test]
+    fn save_pipeline_failed_replacement_preserves_backup_and_pdf() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("failure");
+        let path = fixture.root.join("failure.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        let original = fs::read(&path).unwrap();
+        data.notes.insert(1, "Recover after failed commit".into());
+        let snapshot = prepare_pdf_commit(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        // A directory at the temporary output path forces a write error even as root.
+        let blocked = path.with_extension("lapis_commit_tmp.pdf");
+        fs::create_dir(&blocked).unwrap();
+        let worker_path = path.clone();
+        let result = std::thread::spawn(move || commit_pdf_snapshot(&worker_path, snapshot)).join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(same_content(&load_local_backup(&path).unwrap(), &data));
+        assert!(same_content(&load_doc_data(&path), &data));
+        fs::remove_dir(&blocked).unwrap();
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+    }
+
+    #[test]
+    fn save_pipeline_external_revision_is_retained() {
+        use lopdf::{dictionary, Object};
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("external");
+        let path = fixture.root.join("external.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "Original note".into());
+        save_fixture(&path, &data);
+        let saved = fs::read(&path).unwrap();
+        let stamp = pdf_stamp(&path).unwrap();
+        let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
+        let page_id = incremental.get_prev_documents().get_pages()[&2];
+        incremental.opt_clone_object_to_new_document(page_id).unwrap();
+        let annotation_id = incremental.new_document.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+            "Contents" => Object::string_literal(b"External edit".to_vec()),
+            "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
+        });
+        incremental.new_document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
+            .set("Annots", vec![Object::Reference(annotation_id)]);
+        let mut output = Vec::new();
+        incremental.save_to(&mut output).unwrap();
+        fs::write(&path, &output).unwrap();
+        assert_ne!(pdf_stamp(&path).unwrap(), stamp);
+        assert!(!committed_matches(&path, &pdf_stamp(&path).unwrap(), &data));
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Original note");
+        assert!(reopened.annotations[&2].iter().any(|a| a.text == "External edit"));
+        save_fixture(&path, &reopened);
+        verify_save_fixture(&path, &reopened, 3);
+        assert!(fs::read(&path).unwrap().starts_with(&output), "external revision was truncated");
+    }
+
+    #[test]
+    fn save_pipeline_page_structure_roundtrip() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure");
+        let path = fixture.root.join("structure.pdf");
+        save_test_pdf(&path, 4);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "Move with page".into());
+        data.sketches.insert(2, SketchPage::new(BlankPageStyle::Dotted));
+        data.annotations.insert(2, vec![sample_textbox("Move too", vec![(0.1, 0.1), (0.5, 0.3)])]);
+        save_fixture(&path, &data);
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
+        assert_eq!(inserted, 2);
+        shift_doc_data_on_insert(&mut data.notes, &mut data.annotations, &mut data.blank_pages, &mut data.sketches, inserted);
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 5);
+        assert_eq!(data.notes[&3], "Move with page");
+        reorder_pages_in_pdf(&path, 3, 1, false).unwrap();
+        remap_doc_data_pages(&mut data, &|p| Some(match p { 3 => 1, 1 | 2 => p + 1, _ => p }));
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 5);
+        delete_page_from_pdf(&path, 1, false).unwrap();
+        remap_doc_data_pages(&mut data, &|p| p.checked_sub(1).filter(|p| *p > 0));
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 4);
+        assert!(data.notes.is_empty() && data.annotations.is_empty() && data.sketches.is_empty());
+        assert!(same_content(&load_doc_data(&path), &data));
+    }
+
+    fn append_external_freetext(path: &Path, page: u32, text: &str) {
+        use lopdf::{dictionary, Object};
+        let saved = fs::read(path).unwrap();
+        let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
+        let page_id = incremental.get_prev_documents().get_pages()[&page];
+        incremental.opt_clone_object_to_new_document(page_id).unwrap();
+        let annotation_id = incremental.new_document.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "FreeText",
+            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+            "Contents" => Object::string_literal(text.as_bytes().to_vec()),
+            "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
+        });
+        incremental.new_document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
+            .set("Annots", vec![Object::Reference(annotation_id)]);
+        let mut output = Vec::new();
+        incremental.save_to(&mut output).unwrap();
+        fs::write(path, &output).unwrap();
+    }
+
+    fn save_model(path: &Path, data: &DocData) {
+        save_doc_data(path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+    }
+
+    #[test]
+    fn save_pipeline_external_annotation_is_merged_never_dropped() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("external_merge");
+        let path = fixture.root.join("external_merge.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "Original note".into());
+        save_fixture(&path, &data);
+        append_external_freetext(&path, 2, "External edit");
+        let external = fs::read(&path).unwrap();
+
+        // The live model has not seen the external revision: refuse and write nothing.
+        data.notes.insert(1, "Edited note".into());
+        let err = commit_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches)
+            .unwrap_err();
+        assert!(is_external_modification(&err), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), external, "refused commit modified the PDF");
+        assert!(!path.with_extension("lapis_commit_tmp.pdf").exists());
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "Edited note", "local edit lost");
+
+        // Merge, checkpoint, acknowledge, retry.
+        merge_external_annotations(&path, &mut data.annotations);
+        save_model(&path, &data);
+        mark_pdf_observed(&path).unwrap();
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 3);
+        assert!(data.annotations[&2].iter().any(|a| a.text == "External edit"));
+        assert!(fs::read(&path).unwrap().starts_with(&external), "external revision was truncated");
+
+        // A second commit and a reopen keep it.
+        data.notes.insert(1, "Edited again".into());
+        save_fixture(&path, &data);
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Edited again");
+        assert!(reopened.annotations[&2].iter().any(|a| a.text == "External edit"));
+    }
+
+    #[test]
+    fn save_pipeline_own_tail_after_interrupted_checkpoint_is_not_external() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("own_tail");
+        let path = fixture.root.join("own_tail.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "One".into());
+        save_fixture(&path, &data);
+        // Simulate a stop between the rename and the backup update: stale watermark.
+        let mut backup = load_local_backup(&path).unwrap();
+        backup.pdf_annots_file_len = 1;
+        save_local_backup_checked(&path, &backup).unwrap();
+        data.notes.insert(1, "Two".into());
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+    }
+
+    #[test]
+    fn save_pipeline_compaction_refuses_unmerged_external_revision() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("compact_external");
+        let path = fixture.root.join("compact_external.pdf");
+        save_test_pdf(&path, 3);
+        let data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        append_external_freetext(&path, 2, "External edit");
+        let external = fs::read(&path).unwrap();
+        let err = compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches)
+            .unwrap_err();
+        assert!(is_external_modification(&err), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), external);
+        assert!(!path.with_extension("lapis_before_compaction.pdf").exists());
+    }
+
+    #[test]
+    fn save_pipeline_stale_commit_tmp_does_not_block_a_commit() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("stale_tmp");
+        let path = fixture.root.join("stale_tmp.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        fs::write(path.with_extension("lapis_commit_tmp.pdf"), b"killed mid-write").unwrap();
+        data.notes.insert(1, "After crash".into());
+        save_fixture(&path, &data);
+        verify_save_fixture(&path, &data, 2);
+        assert!(!path.with_extension("lapis_commit_tmp.pdf").exists());
+    }
+
+    #[test]
+    fn page_structure_rewrite_survives_a_lost_backup_update() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_crash");
+        let path = fixture.root.join("structure_crash.pdf");
+        save_test_pdf(&path, 4);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "Move with page".into());
+        save_fixture(&path, &data);
+        // An edit that exists only in the local backup (never committed to the PDF).
+        data.notes.insert(1, "Latest local edit".into());
+        save_model(&path, &data);
+        let before = fs::read(get_backup_path(&path)).unwrap();
+        let rev_before = load_local_backup(&path).unwrap().rev;
+
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
+        assert_eq!(inserted, 2);
+        let after = load_local_backup(&path).unwrap();
+        assert!(after.rev > rev_before, "backup revision must advance");
+        assert_eq!(after.notes[&3], "Move with page");
+        assert_eq!(after.notes[&1], "Latest local edit");
+        assert_eq!(after.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+
+        // Stop before the backup was rewritten: the PDF's payload must win and be complete.
+        fs::write(get_backup_path(&path), &before).unwrap();
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "Latest local edit");
+        assert_eq!(reopened.notes[&3], "Move with page");
+        assert!(!reopened.notes.contains_key(&2));
+        assert!(reopened.blank_pages.contains(&2));
+    }
+
+    fn add_test_object(path: &Path, dict: lopdf::Dictionary) {
+        let mut doc = lopdf::Document::load(path).unwrap();
+        doc.add_object(dict);
+        doc.save(path).unwrap();
+    }
+
+    #[test]
+    fn page_structure_ops_ask_before_invalidating_a_signature() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_signed");
+        let path = fixture.root.join("structure_signed.pdf");
+        save_test_pdf(&path, 3);
+        add_test_object(&path, dictionary! {
+            "Type" => "Sig", "Filter" => "Adobe.PPKLite",
+            "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
+        });
+        let original = fs::read(&path).unwrap();
+        let insert = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap_err();
+        let delete = delete_page_from_pdf(&path, 1, false).unwrap_err();
+        let reorder = reorder_pages_in_pdf(&path, 1, 2, false).unwrap_err();
+        assert!(is_signed_pdf_error(&insert) && is_signed_pdf_error(&delete) && is_signed_pdf_error(&reorder));
+        assert_eq!(fs::read(&path).unwrap(), original, "a refused edit modified the PDF");
+        assert!(!path.with_extension("ins_tmp.pdf").exists());
+
+        // Once the user has confirmed, the edit proceeds and the file stays valid.
+        let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, true).unwrap();
+        assert_eq!(inserted, 2);
+        assert_eq!(lopdf::Document::load(&path).unwrap().get_pages().len(), 4);
+        delete_page_from_pdf(&path, 1, true).unwrap();
+        reorder_pages_in_pdf(&path, 1, 2, true).unwrap();
+        assert_eq!(lopdf::Document::load(&path).unwrap().get_pages().len(), 3);
+    }
+
+    #[test]
+    fn an_empty_signature_field_does_not_block_page_edits() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_sigfield");
+        let path = fixture.root.join("structure_sigfield.pdf");
+        save_test_pdf(&path, 3);
+        add_test_object(&path, dictionary! { "FT" => "Sig", "T" => lopdf::Object::string_literal("Signature1") });
+        insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
+        delete_page_from_pdf(&path, 1, false).unwrap();
+        reorder_pages_in_pdf(&path, 1, 2, false).unwrap();
+    }
+
+    #[test]
+    fn backup_cache_never_hides_an_outside_change() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("backup_cache");
+        let path = fixture.root.join("backup_cache.pdf");
+        save_test_pdf(&path, 2);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "alpha".into());
+        save_model(&path, &data);
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "alpha");
+        // Another writer replaces the file in place with a same-length value.
+        let backup = get_backup_path(&path);
+        let json = fs::read_to_string(&backup).unwrap();
+        assert!(json.contains("alpha"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&backup, json.replace("alpha", "omega")).unwrap();
+        assert_eq!(load_local_backup(&path).unwrap().notes[&1], "omega", "stale cached backup");
+        fs::remove_file(&backup).unwrap();
+        assert!(load_local_backup(&path).is_none());
+    }
+
+    #[test]
+    fn structural_rewrite_embeds_the_final_length_after_one_serialization() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("structure_len");
+        let path = fixture.root.join("structure_len.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(2, "keep".into());
+        save_fixture(&path, &data);
+        delete_page_from_pdf(&path, 1, false).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let embedded = embedded_doc_data(&bytes).unwrap();
+        assert_eq!(embedded.pdf_annots_file_len, bytes.len() as u64);
+        assert_eq!(embedded.notes[&1], "keep");
+        assert_eq!(lopdf::Document::load_mem(&bytes).unwrap().get_pages().len(), 2);
+        assert_eq!(count_custom_sections(&bytes), 1);
+    }
+
+    /// The scan used before `memchr`, kept as the oracle for the differential test.
+    fn naive_find_embedded_block(bytes: &[u8]) -> Option<EmbeddedBlock> {
+        let candidates = [
+            (NOTES_START_TAG, NOTES_END_TAG),
+            (LEGACY_NOTES_START_TAG, LEGACY_NOTES_END_TAG),
+        ];
+        let mut found: Option<EmbeddedBlock> = None;
+        for (start_tag, end_tag) in candidates {
+            let mut from = 0;
+            while from < bytes.len() {
+                let Some(rel) = bytes[from..].windows(start_tag.len()).position(|w| w == start_tag) else { break };
+                let start = from + rel;
+                let body_start = start + start_tag.len();
+                let Some(end_rel) = bytes[body_start..].windows(end_tag.len()).position(|w| w == end_tag) else {
+                    from = start + start_tag.len();
+                    continue;
+                };
+                let body_end = body_start + end_rel;
+                let end = body_end + end_tag.len();
+                let candidate = EmbeddedBlock { start, body_start, body_end, end };
+                if found.is_none_or(|old| candidate.start > old.start) { found = Some(candidate); }
+                from = end;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn fast_scans_match_the_naive_scans_on_adversarial_input() {
+        // Deterministic pseudo-random streams built from tag fragments, whole tags and noise.
+        let pieces: Vec<&[u8]> = vec![
+            NOTES_START_TAG, NOTES_END_TAG, LEGACY_NOTES_START_TAG, LEGACY_NOTES_END_TAG,
+            LAPIS_INCREMENTAL_MARKER, b"startxref\n", b"%%EOF\n", PDF_LEN_FIELD,
+            &NOTES_START_TAG[..NOTES_START_TAG.len() / 2], &NOTES_END_TAG[1..],
+            &LEGACY_NOTES_START_TAG[2..], b"\n", b"{}", b"xxxx",
+        ];
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        for _ in 0..4000 {
+            let mut bytes = Vec::new();
+            for _ in 0..(next() % 14) { bytes.extend_from_slice(pieces[(next() % pieces.len() as u64) as usize]); }
+            let (fast, slow) = (find_embedded_block(&bytes), naive_find_embedded_block(&bytes));
+            assert_eq!(
+                fast.map(|b| (b.start, b.body_start, b.body_end, b.end)),
+                slow.map(|b| (b.start, b.body_start, b.body_end, b.end)),
+                "diverged on {:?}", String::from_utf8_lossy(&bytes)
+            );
+            let naive_rfind = |needle: &[u8]| bytes.windows(needle.len()).rposition(|w| w == needle);
+            assert_eq!(memchr::memmem::rfind(&bytes, b"startxref"), naive_rfind(b"startxref"));
+            assert_eq!(memchr::memmem::rfind(&bytes, LAPIS_INCREMENTAL_MARKER), naive_rfind(LAPIS_INCREMENTAL_MARKER));
+        }
+    }
+
+    #[test]
+    fn save_pipeline_edit_between_pdf_replace_and_reconcile_is_never_lost() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("mid_commit_edit");
+        let path = fixture.root.join("mid_commit_edit.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "snapshot note".into());
+        let snapshot = prepare_pdf_commit(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        let snapshot_rev = snapshot.rev;
+
+        // The UI checkpoints a newer edit at the exact moment the worker has replaced the PDF.
+        let mut newer = data.notes.clone();
+        newer.insert(1, "edit during commit".into());
+        newer.insert(2, "second page edit".into());
+        let (hook_path, annotations, sketches) = (path.clone(), data.annotations.clone(), data.sketches.clone());
+        let hook_notes = newer.clone();
+        *AFTER_REPLACE_HOOK.lock().unwrap() = Some(Box::new(move || {
+            save_doc_data(&hook_path, &hook_notes, &annotations, HashSet::new(), &sketches).unwrap();
+        }));
+        commit_pdf_snapshot(&path, snapshot).unwrap();
+        assert!(AFTER_REPLACE_HOOK.lock().unwrap().is_none(), "hook did not run");
+
+        // The PDF holds the snapshot; the backup keeps the newer edit and the commit metadata.
+        let embedded = embedded_doc_data(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(embedded.notes[&1], "snapshot note");
+        let backup = load_local_backup(&path).unwrap();
+        assert_eq!(backup.notes[&1], "edit during commit", "newer edit overwritten by the worker");
+        assert_eq!(backup.notes[&2], "second page edit");
+        assert!(backup.rev > snapshot_rev, "backup revision went backwards");
+        assert_eq!(backup.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+        assert!(backup.pdf_annots_imported);
+
+        // Reopening prefers the newer local data, and the follow-up commit persists it.
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "edit during commit");
+        commit_doc_data(&path, &newer, &data.annotations, HashSet::new(), &data.sketches).unwrap();
+        let embedded = embedded_doc_data(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(embedded.notes[&1], "edit during commit");
+        assert_eq!(embedded.notes[&2], "second page edit");
+        assert_eq!(count_custom_sections(&fs::read(&path).unwrap()), 1);
+    }
+
+    #[test]
+    fn compaction_is_blocked_only_by_real_signature_values() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("compact_signature");
+        let path = fixture.root.join("compact_signature.pdf");
+        save_test_pdf(&path, 3);
+        let data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        // An empty signature field does not block compaction.
+        add_test_object(&path, dictionary! { "FT" => "Sig", "T" => lopdf::Object::string_literal("Signature1") });
+        mark_pdf_observed(&path).unwrap();
+        compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        // A signed value does, and the file is left alone.
+        add_test_object(&path, dictionary! {
+            "Type" => "Sig", "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
+        });
+        mark_pdf_observed(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let err = compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap_err();
+        assert!(err.to_string().contains("signed"), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -3288,9 +4886,23 @@ mod tests {
         assert_eq!(count_custom_sections(&first), 1);
         assert_eq!(first.windows(LAPIS_INCREMENTAL_MARKER.len())
             .filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
+        assert_eq!(read_trailing_doc_data(&path).unwrap().pdf_annots_file_len, first.len() as u64);
+        let backup_before = fs::read(get_backup_path(&path)).unwrap();
         // An explicit save immediately followed by an OS close is a no-op.
+        save_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup_before);
         commit_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read(get_backup_path(&path)).unwrap(), backup_before);
+        // A changed on-disk file must invalidate the fast path, even with the same notes.
+        let stamp = pdf_stamp(&path).unwrap();
+        let data = read_trailing_doc_data(&path).unwrap();
+        assert!(committed_matches(&path, &stamp, &data));
+        let mut changed = first.clone();
+        changed.push(b'\n');
+        fs::write(&path, &changed).unwrap();
+        assert!(!committed_matches(&path, &pdf_stamp(&path).unwrap(), &data));
+        fs::write(&path, &first).unwrap();
         notes.insert(1, "updated".to_owned());
         commit_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         let updated = fs::read(&path).unwrap();
@@ -3300,6 +4912,18 @@ mod tests {
         assert_eq!(read_trailing_doc_data(&path).unwrap().notes[&1], "updated");
         assert!(lopdf::Document::load_mem(&updated).is_ok());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reserved_pdf_length_preserves_stream_size_and_numeric_format() {
+        let data = DocData::default();
+        let mut payload = pending_length_stream(&data).unwrap().content;
+        let before = payload.len();
+        assert_eq!(finalize_pdf_length(&mut payload, 0).unwrap(), before as u64);
+        assert_eq!(payload.len(), before);
+        let block = find_embedded_block(&payload).unwrap();
+        assert_eq!(parse_embedded_data(&payload[block.body_start..block.body_end])
+            .unwrap().pdf_annots_file_len, before as u64);
     }
 
     #[test]
@@ -3383,6 +5007,8 @@ mod tests {
         doc.add_object(lopdf::Object::Stream(custom_data_stream(&old).unwrap()));
         doc.save(&path).unwrap();
         assert_eq!(count_custom_sections(&fs::read(&path).unwrap()), 2);
+        // The rewrite changed the length; the app acknowledges it after merging.
+        mark_pdf_observed(&path).unwrap();
         notes.insert(1, "after".to_owned());
         compact_doc_data(&path, &notes, &HashMap::new(), HashSet::new(), &HashMap::new()).unwrap();
         let output = fs::read(&path).unwrap();
@@ -3455,6 +5081,108 @@ mod tests {
             (c[0].front.as_str(), c[0].back.as_str()),
             ("What is *p?", "a pointer")
         );
+    }
+
+    fn skipped(text: &str) -> Vec<&str> {
+        code_and_math_ranges(text)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect()
+    }
+
+    #[test]
+    fn code_and_math_ranges_cover_code_and_latex_only() {
+        assert_eq!(
+            skipped("a `x y` b $m n$ c\n```\ncode\n```\nd $$\nz\n$$ e"),
+            ["`x y`", "$m n$", "```\ncode\n```\n", "$$\nz\n$$"]
+        );
+        // Currency and unmatched markers are ordinary text.
+        assert!(skipped("costs $5 and $6 total, `open and $$ open").is_empty());
+        assert_eq!(skipped("``a ` b`` and `c"), ["``a ` b``"]);
+        assert_eq!(skipped("```\nunclosed"), ["```\nunclosed"]);
+        assert_eq!(skipped("é `ü` $α$ ok"), ["`ü`", "$α$"]);
+        let r = code_and_math_ranges("a `b` c");
+        assert!(in_ranges(&r, 2) && in_ranges(&r, 4) && !in_ranges(&r, 1) && !in_ranges(&r, 5));
+    }
+
+    #[test]
+    fn markdown_math_preserves_shell_arguments_and_code() {
+        let input = "Use `$@` and `$1` with $x$.\n```sh\necho \"$@\" $$ $1\n```\n~~~sh\necho $$ $@\n~~~\n$@ and $@; $y$";
+        let rendered = preprocess_markdown_view(input);
+        assert!(rendered.contains("`$@` and `$1` with `x`."));
+        assert!(rendered.contains("```sh\necho \"$@\" $$ $1\n```"));
+        assert!(rendered.contains("~~~sh\necho $$ $@\n~~~"));
+        assert!(rendered.contains("\\$@ and \\$@; `y`"));
+        assert!(preprocess_markdown_math("$$x$$").contains("**`x`**"));
+        assert!(preprocess_markdown_math("$@ and $@").starts_with("$@ and $@"));
+        assert_eq!(skipped("$@ and $@; $x$"), ["$x$"]);
+    }
+
+    #[test]
+    fn flashcards_ignore_code_and_math() {
+        assert!(card_fronts("```cpp\nstd::cout :: x\n```").is_empty());
+        assert!(card_fronts("~~~\na :: b\n~~~").is_empty());
+        assert!(card_fronts("Use `std::vector` for arrays").is_empty());
+        assert!(card_fronts("Inline $a :: b$ math").is_empty());
+        assert!(card_fronts("$$\nx :: y\n$$").is_empty());
+        assert!(card_fronts("$$\nx\n$$ :: not an inline card").is_empty());
+        assert!(card_fronts("```\nQ: not a card\nA: still not\n```").is_empty());
+        // A real marker next to code still works.
+        assert_eq!(
+            card_fronts("`std::vector` :: dynamic array"),
+            ["`std::vector`"]
+        );
+        assert_eq!(card_fronts("Vector :: uses `a::b` inside"), ["Vector"]);
+    }
+
+    #[test]
+    fn preview_recognizes_inline_code_and_math_cards() {
+        let note = "`word` :: something\n$a::b$ :: relation\n**Term** :: `x::y`\n```a ` b``` :: code";
+        let cards = extract_flashcards_from_page(1, note);
+        assert_eq!(cards.len(), 4);
+        let preview = preprocess_notes_preview(note);
+        assert!(preview.contains("> **`word`**"));
+        assert!(preview.contains("> something"));
+        assert!(preview.contains("> **Term**"));
+        assert!(preview.contains("> `x::y`"));
+        assert!(preview.contains("> **```a ` b```**"));
+        assert!(!preview.contains(" :: relation"));
+        assert!(preview.contains("> relation"));
+    }
+
+    #[test]
+    fn preview_preserves_non_cards_and_formatted_answers() {
+        let note = "`a::b`\n$$\nx :: y\n$$\n~~~rust\nQ: a :: b\n~~~\nQ: incomplete";
+        assert!(extract_flashcards_from_page(1, note).is_empty());
+        assert_eq!(preprocess_notes_preview(note), preprocess_markdown_view(note));
+
+        let note = "Q: What is `$@`?\nA: Example $x^2$:\n```sh\n  echo \"$@\"\n\nQ: not a card\n```\n$$\ny^2\n$$\n\nD: Next\nR: Answer";
+        let cards = extract_flashcards_from_page(1, note);
+        assert_eq!(cards.len(), 2);
+        assert!(cards[0].back.contains("  echo \"$@\""));
+        let preview = preprocess_notes_preview(note);
+        assert!(preview.contains("> ```sh\n>   echo \"$@\"\n> \n> Q: not a card\n> ```"));
+        assert!(preview.contains("> **`y²`**"));
+        assert!(preview.contains("> Next"));
+        assert!(preview.contains("> Answer"));
+    }
+
+    #[test]
+    fn flashcard_answers_may_contain_code() {
+        let mut m = HashMap::new();
+        m.insert(
+            1u32,
+            "Q: Print?\nA: Use:\n```cpp\nstd::cout << 1;\n\nQ: x\n```\ndone".to_string(),
+        );
+        let c = extract_flashcards_from_notes(&m);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].front, "Print?");
+        assert_eq!(
+            c[0].back,
+            "Use:\n```cpp\nstd::cout << 1;\n\nQ: x\n```\ndone"
+        );
+        assert!(page_has_flashcards("Q: a\nA: b"));
+        assert!(!page_has_flashcards("```\na :: b\n```"));
     }
 
     #[test]
