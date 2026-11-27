@@ -290,23 +290,11 @@ fn migrate_legacy(canon: &Path, id: &str) {
     }
 }
 
-/// I test cambiano variabili d'ambiente di processo: vanno serializzati.
-#[cfg(test)]
-pub(crate) fn test_lock() -> MutexGuard<'static, ()> {
-    static TL: Mutex<()> = Mutex::new(());
-    lock(&TL)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lapis_docid_{}_{}", name, std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
-    }
+    use crate::test_support::isolated_dir;
 
     #[test]
     fn fnv_is_stable() {
@@ -324,18 +312,9 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// Un unico test sequenziale: usa variabili d'ambiente di processo.
     #[test]
     fn identity_move_copy_and_legacy_migration() {
-        let _l = test_lock();
-        let root = tmp("flow");
-        let data_home = root.join("xdg");
-        fs::create_dir_all(&data_home).unwrap();
-        // SAFETY: test sequenziale, nessun altro thread legge l'ambiente.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", &data_home);
-            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
-        }
+        let root = isolated_dir!(identity_move_copy_and_legacy_migration);
 
         // PDF "vecchio": nessun id, ma dati legacy sotto l'hash del percorso
         let pdf1 = root.join("a.pdf");
@@ -395,7 +374,5 @@ mod tests {
         // percorso inesistente / vuoto: chiave di ripiego, indice invariato
         assert!(resolve_key(&root.join("nope.pdf")).starts_with('p'));
         assert!(resolve_key(Path::new("")).starts_with('p'));
-
-        fs::remove_dir_all(&root).ok();
     }
 }

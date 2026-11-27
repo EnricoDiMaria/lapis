@@ -156,7 +156,7 @@ Lapis uses [ffmpeg](https://ffmpeg.org/) to import audio and video, change the p
 
 ## Build from source
 
-Install the [Rust toolchain](https://rustup.rs/), including `cargo` and `rustc`.
+Install the [Rust toolchain](https://rustup.rs/), including `cargo` and `rustc`. The locked GUI dependencies require Rust 1.95 or newer.
 
 ### Linux
 
@@ -192,7 +192,7 @@ To install the locally compiled binary on Linux:
 
 Native builds must be made on Windows (the PDF backend is compiled with MSBuild).
 
-1. Install Rust with the **MSVC** toolchain: `rustup default stable-x86_64-pc-windows-msvc` (Rust 1.89 or newer).
+1. Install stable Rust with the **MSVC** toolchain using `rustup default stable-x86_64-pc-windows-msvc`.
 2. Install **Visual Studio 2022 Build Tools** with the *Desktop development with C++* workload (MSVC v143 and the Windows SDK).
 3. Install **LLVM** (`winget install LLVM.LLVM`) and set `LIBCLANG_PATH` to `C:\Program Files\LLVM\bin`.
 4. Enable long paths: `git config --system core.longpaths true`.
@@ -206,7 +206,7 @@ cargo build --release
 
 The executable is `C:\t\release\lapis.exe`. To build the installer, install [Inno Setup](https://jrsoftware.org/isinfo.php) and run `iscc packaging\windows\lapis.iss /DAppVersion=<version>` (the GitHub Actions workflow `release-windows.yml` does all of this on tag push).
 
-Run the tests with `cargo test`.
+See [Development checks](#development-checks) for platform-specific test commands.
 
 ---
 
@@ -352,10 +352,50 @@ Lapis supports simultaneous full Hunspell `.dic` + `.aff` dictionary pairs in **
 
 ## Development
 
-```bash
-cargo build --release
-cargo test
+### Development checks
+
+Linux uses `cargo test --locked`. Install `qpdf` to independently validate the saved, structurally edited, and exported PDFs in the test suite. Windows uses the release test profile to match the MSVC runtimes in MuPDF and the prebuilt ONNX Runtime. CI keeps the target directory short and uses the installed LLVM tools.
+
+```powershell
+$env:CARGO_TARGET_DIR = "C:\t"
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+cargo test --release --locked
+cargo build --release --locked
 ```
+
+Disk-backed tests run in child processes with temporary Lapis data and settings directories. They exercise standard application paths without interfering with each other or with the local installation. See the [CI workflow](.github/workflows/ci.yml) and [Windows packaging workflow](.github/workflows/release-windows.yml) for their build configuration.
+
+### Persistence benchmark
+
+Run the opt-in benchmark in the release profile. Repeat the command five times and compare medians on the same machine and filesystem.
+
+```bash
+cargo test --release --locked notes::tests::persistence_benchmark_fixtures -- --ignored --exact --nocapture
+```
+
+The benchmark generates 12-, 180-, and 420-page PDFs. The medium and dense fixtures mix page sizes and rotations. The dense fixture includes notes on every page, 8,400 pen strokes, and 60 sketches. It emits milliseconds for PDF inspection and study-data load, the first CPU raster, changed and unchanged local checkpoints and PDF commits, and reopening with study data. PDF generation and independent validation are outside the timed operations. The files use the system temporary directory. Choose a temporary directory on the target filesystem to measure its write behavior.
+
+The initial baseline below uses the v1.5.0 persistence code, Linux x86-64, a Ryzen 7 3700X, Rust 1.100.0, and qpdf 12.4.2. Values are release-profile medians in milliseconds across five runs on Btrfs. The PDF bytes may already be in the page cache from fixture generation. The CPU raster measurements use the first page at scale 1.0 in fixture order. GUI startup, GPU upload, navigation and idle resource use need separate measurements.
+
+| Operation | 12 pages, 6 KiB | 180 pages, 2.6 MiB | 420 pages, 27.7 MiB |
+|---|---:|---:|---:|
+| Inspect and load study data | 16.09 | 16.98 | 52.04 |
+| First CPU raster | 4.89 | 2.06 | 2.65 |
+| Changed local checkpoint | 7.61 | 8.05 | 28.80 |
+| Unchanged local checkpoint | 0.02 | 0.08 | 2.10 |
+| Changed PDF commit | 15.58 | 31.46 | 372.32 |
+| Unchanged PDF commit | 0.03 | 0.18 | 3.82 |
+| Reopen with study data | 7.57 | 10.83 | 70.26 |
+
+### Manual release checks
+
+Use disposable copies of PDFs and media. Record the platform, display backend, scaling, window size, and whether each workflow passed.
+
+1. **Document handling and recovery.** Open from Home, the file picker, a recent entry and a file drop. Edit notes, annotations and a sketch during Save, then switch, close and reopen. Try an invalid candidate and a PDF locked by another window. Force a write failure and exercise Retry and local-backup continuation. Terminate the app after a completed edit and verify recovery on reopen.
+2. **PDF exchange and page changes.** Save standard annotations, edit them in another viewer and reopen. Include an external edit that leaves the byte length unchanged. Insert, move and delete pages with notes, bookmarks, sketches, memos and transcript markers. Check recovery, signature prompts, compaction, and the PDF export variants using an independent reader.
+3. **Worker and audio state.** Switch documents and reorder a page while an image paste is pending. Record a memo, change slides before stopping, and verify the original page association. Exercise import, trim, transcription cancellation, missing FFmpeg or model files, and a denied audio-index write. Check that an unsuccessful replacement leaves the previous recording and index usable.
+4. **Workspace and input.** Check Wayland, X11 and Windows. Include the 560 × 400 minimum window, wide and portrait layouts, 100% and fractional scaling, all three densities, both topbar positions and auto-hide, horizontal and vertical tools, side and bottom notes, Book, Split and both presentation modes. Check text selection, wheel/trackpad movement, focus, Escape, undo and redo in PDF, Sketch and Markdown.
+5. **Windows distribution.** Build on the Windows MSVC toolchain and test a clean install and an upgrade with existing data. Include Unicode and long paths, clipboard, file dialogs, an already-open PDF, and an external viewer holding the PDF open during save.
 
 Releases are built by GitHub Actions: pushing a `v*` tag builds the Windows installer and portable archive and creates a **draft** release to complete and publish by hand.
 

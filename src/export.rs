@@ -2859,6 +2859,7 @@ pub fn export_slides_with_notes(
 mod tests {
     use super::*;
     use crate::state::ExportContent;
+    use crate::test_support::{check_pdf_with_qpdf, isolated_dir};
 
     fn sample_pdf(path: &Path) {
         let mut doc = LoDocument::with_version("1.5");
@@ -2964,15 +2965,7 @@ mod tests {
 
     #[test]
     fn vector_export_keeps_pages_sizes_widths_and_modes() {
-        let _l = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_export_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        // SAFETY: tests are serialised by test_lock().
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
-        }
+        let root = isolated_dir!(vector_export_keeps_pages_sizes_widths_and_modes);
         let src = root.join("src.pdf");
         sample_pdf(&src);
 
@@ -3030,6 +3023,7 @@ mod tests {
 
         // ── annotations + notes ──
         let out = run(ExportContent::AnnotationsAndNotes, &hidden, &notes);
+        check_pdf_with_qpdf(&out);
         let sizes = page_sizes(&out);
         assert_eq!(sizes.len(), 3);
         assert_eq!(
@@ -3135,11 +3129,10 @@ mod tests {
         let fb = root.join("fallback.pdf");
         let cfg = ExportSettings::default();
         export_rasterized(&src, &fb, &notes, &anns, &HashMap::new(), &cfg, &hidden).unwrap();
+        check_pdf_with_qpdf(&fb);
         let fb_sizes = page_sizes(&fb);
         assert_eq!(fb_sizes.len(), 3);
         assert!(fb_sizes.iter().all(|s| *s == (960.0, 540.0)));
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ───────────────────────────── sketches in the export ─────────────────────────────
@@ -3174,28 +3167,14 @@ mod tests {
     }
 
     struct SketchEnv {
-        _guard: std::sync::MutexGuard<'static, ()>,
         root: std::path::PathBuf,
         src: std::path::PathBuf,
     }
 
-    fn sketch_env(name: &str) -> SketchEnv {
-        let guard = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_sketch_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        // SAFETY: tests are serialised by test_lock().
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
-        }
+    fn sketch_env(root: std::path::PathBuf) -> SketchEnv {
         let src = root.join("src.pdf");
         sample_pdf(&src);
-        SketchEnv {
-            _guard: guard,
-            root,
-            src,
-        }
+        SketchEnv { root, src }
     }
 
     fn export_with(
@@ -3298,7 +3277,7 @@ mod tests {
 
     #[test]
     fn sketch_without_notes_goes_to_the_right_of_the_slide() {
-        let env = sketch_env("beside");
+        let env = sketch_env(isolated_dir!(sketch_without_notes_goes_to_the_right_of_the_slide));
         let mut sketches = HashMap::new();
         sketches.insert(3u32, sketch_with(red_bar(120.0)));
         let out = export_with(
@@ -3321,12 +3300,11 @@ mod tests {
             "sketch in the right column"
         );
         assert!(!has_red(&img, 0..split - 4, 0..300), "none on the slide");
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     #[test]
     fn sketch_goes_under_short_notes_on_the_same_page() {
-        let env = sketch_env("below");
+        let env = sketch_env(isolated_dir!(sketch_goes_under_short_notes_on_the_same_page));
         let mut notes = HashMap::new();
         notes.insert(1u32, "A short note.".to_string());
         let mut sketches = HashMap::new();
@@ -3344,12 +3322,11 @@ mod tests {
         assert!(has_red(&img, split + 4..608, 60..780));
         // The note text comes first: the top of the column holds no sketch ink.
         assert!(!has_red(&img, split + 4..608, 0..40));
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     #[test]
     fn long_notes_move_the_sketch_to_a_page_after() {
-        let env = sketch_env("long");
+        let env = sketch_env(isolated_dir!(long_notes_move_the_sketch_to_a_page_after));
         let mut notes = HashMap::new();
         notes.insert(
             1u32,
@@ -3375,12 +3352,11 @@ mod tests {
         ));
         // Pages of the other slides keep their order.
         assert_eq!(page_sizes(&with)[n1 - 1], (400.0, 300.0));
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     #[test]
     fn a_big_sketch_gets_a_page_of_its_own_after_its_slide() {
-        let env = sketch_env("big");
+        let env = sketch_env(isolated_dir!(a_big_sketch_gets_a_page_of_its_own_after_its_slide));
         let mut sketches = HashMap::new();
         sketches.insert(1u32, sketch_with(red_bar(1500.0)));
         let out = export_with(
@@ -3402,12 +3378,11 @@ mod tests {
         assert!(has_red(&img, 0..img.0, 0..img.1));
         // The slide page itself is untouched.
         assert_eq!(render(&out, 0).3, render(&env.src, 0).3);
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     #[test]
     fn sketches_follow_the_notes_in_the_export_settings() {
-        let env = sketch_env("settings");
+        let env = sketch_env(isolated_dir!(sketches_follow_the_notes_in_the_export_settings));
         let mut sketches = HashMap::new();
         sketches.insert(3u32, sketch_with(red_bar(120.0)));
         let out = export_with(
@@ -3429,7 +3404,6 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(render(&out, 2).3, render(&env.src, 2).3);
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     // ───────────────────────── screenshots and snips in the notes ─────────────────────────
@@ -3471,7 +3445,7 @@ mod tests {
 
     #[test]
     fn screenshots_and_snips_in_the_notes_are_exported() {
-        let env = sketch_env("noteimg");
+        let env = sketch_env(isolated_dir!(screenshots_and_snips_in_the_notes_are_exported));
         // A folder with a space, as the app writes it (the snip link is not percent-encoded).
         let shot = env.root.join("my shots").join("shot.png");
         let snip = env.root.join("my shots").join("snip.png");
@@ -3547,12 +3521,11 @@ mod tests {
             has_red(&img, split_x as usize + 10..950, 30..520),
             "image in the fallback export"
         );
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 
     #[test]
     fn the_fallback_export_adds_a_page_for_a_sketch() {
-        let env = sketch_env("fallback");
+        let env = sketch_env(isolated_dir!(the_fallback_export_adds_a_page_for_a_sketch));
         let mut sketches = HashMap::new();
         sketches.insert(1u32, sketch_with(red_bar(200.0)));
         let fb = env.root.join("fb.pdf");
@@ -3570,6 +3543,5 @@ mod tests {
         assert_eq!(sizes.len(), 4);
         let img = render(&fb, 1);
         assert!(has_red(&img, 0..img.0, 0..img.1));
-        let _ = std::fs::remove_dir_all(&env.root);
     }
 }

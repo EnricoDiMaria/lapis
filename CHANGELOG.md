@@ -3,6 +3,14 @@ All notable changes to Lapis are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Development
+
+- Isolated disk-backed tests from installed app data and other tests on Linux and Windows.
+- Added regression coverage for document switching, audio-index retry, raw recording recovery, and native PDF annotations. Extended qpdf validation to page changes and both PDF export paths.
+- Added a repeatable persistence benchmark and manual release checklist. Documented the Rust 1.95 dependency minimum.
+
 ## [1.5.0] - 2026/11/27
 
 ### Added

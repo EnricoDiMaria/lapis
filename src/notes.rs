@@ -3933,6 +3933,7 @@ pub fn prepare_image_xobjects(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{check_pdf_with_qpdf, isolated_dir};
     use std::fs::OpenOptions;
 
     fn append_test_custom_data(path: &Path, data: &DocData) {
@@ -4219,9 +4220,8 @@ mod tests {
         serde_json::to_writer(&mut payload, &data).unwrap();
         payload.extend_from_slice(NOTES_END_TAG);
 
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("embedded_payload");
-        let path = fixture.root.join("embedded_payload.pdf");
+        let root = isolated_dir!(embedded_payload_is_rewritten_for_a_page_change);
+        let path = root.join("embedded_payload.pdf");
         let updated = rebase_embedded_notes(&path, &payload, |d| {
             shift_doc_data_on_insert(&mut d.notes, &mut d.annotations, &mut d.blank_pages, &mut d.sketches, 2);
         });
@@ -4235,63 +4235,47 @@ mod tests {
         assert_eq!(rebase_embedded_notes(&path, b"garbage", |_| {}), b"garbage".to_vec());
     }
 
-    // Isolate document IDs and backups from the user's installation.
-    struct SaveTestDir {
-        root: PathBuf,
-        env: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    }
-
-    impl SaveTestDir {
-        fn new(name: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("lapis_save_pipeline_{name}_{}", std::process::id()));
-            fs::create_dir_all(&root).unwrap();
-            let env = ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"]
-                .into_iter().map(|key| (key, std::env::var_os(key))).collect();
-            // SAFETY: callers hold the docid test lock; run the suite with one test thread.
-            unsafe {
-                std::env::set_var("XDG_DATA_HOME", root.join("data"));
-                std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-                std::env::set_var("LOCALAPPDATA", root.join("data"));
-                std::env::set_var("APPDATA", root.join("config"));
-            }
-            Self { root, env }
-        }
-    }
-
-    impl Drop for SaveTestDir {
-        fn drop(&mut self) {
-            for (key, value) in &self.env {
-                // SAFETY: the test lock remains held until after this fixture is dropped.
-                unsafe {
-                    if let Some(value) = value { std::env::set_var(key, value); }
-                    else { std::env::remove_var(key); }
-                }
-            }
-            let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-
     fn save_test_pdf(path: &Path, count: u32) {
-        use lopdf::{dictionary, Object, Stream};
+        write_save_fixture_pdf(path, count, 320, false);
+    }
+
+    fn write_save_fixture_pdf(path: &Path, count: u32, payload_repeats: usize, mixed_sizes: bool) {
+        use lopdf::{Object, Stream, dictionary};
         let mut doc = lopdf::Document::with_version("1.5");
         let pages_id = doc.new_object_id();
         let mut kids = Vec::new();
+        let padding = "% synthetic page payload for save performance\n".repeat(payload_repeats);
         for page in 1..=count {
             let mut content = format!("q\n0 0 m\n1 1 l\nS\nQ\n% page {page}\n").into_bytes();
             // Valid uncompressed page content; exercise a multi-megabyte PDF.
-            content.extend_from_slice("% synthetic page payload for save performance\n".repeat(320).as_bytes());
+            content.extend_from_slice(padding.as_bytes());
             let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let (width, height, rotation) = match (mixed_sizes, page % 3) {
+                (true, 1) => (960, 540, 0),
+                (true, 2) => (612, 792, 90),
+                _ => (612, 792, 0),
+            };
             let page_id = doc.add_object(dictionary! {
                 "Type" => "Page", "Parent" => Object::Reference(pages_id),
-                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
                 "Resources" => dictionary! {}, "Contents" => Object::Reference(content_id),
             });
+            if rotation != 0 {
+                doc.get_dictionary_mut(page_id)
+                    .unwrap()
+                    .set("Rotate", rotation);
+            }
             kids.push(Object::Reference(page_id));
         }
-        doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
-            "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count as i64),
-        }));
-        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages_id) });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count as i64),
+            }),
+        );
+        let catalog = doc.add_object(
+            dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages_id) },
+        );
         doc.trailer.set("Root", catalog);
         doc.save(path).unwrap();
     }
@@ -4313,9 +4297,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_large_document() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("large");
-        let path = fixture.root.join("large.pdf");
+        let root = isolated_dir!(save_pipeline_large_document);
+        let path = root.join("large.pdf");
         save_test_pdf(&path, 180);
         let mut data = load_doc_data(&path);
         for page in (1..=180).step_by(3) {
@@ -4370,19 +4353,102 @@ mod tests {
         assert_eq!(updated.windows(LAPIS_INCREMENTAL_MARKER.len()).filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
         assert!(same_content(&load_doc_data(&path), &data));
 
-        if let Ok(output) = std::process::Command::new("qpdf").arg("--check").arg(&path).output() {
-            assert!(output.status.success(), "qpdf: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            println!("qpdf --check: passed");
-        } else {
-            println!("qpdf not installed; lopdf validation passed");
+        check_pdf_with_qpdf(&path);
+    }
+
+    #[test]
+    #[ignore = "manual benchmark using synthetic PDFs"]
+    fn persistence_benchmark_fixtures() {
+        let root = isolated_dir!(persistence_benchmark_fixtures);
+        fn timed<T>(case: &str, operation: &str, work: impl FnOnce() -> T) -> T {
+            let start = std::time::Instant::now();
+            let result = work();
+            println!(
+                "{case},{operation},{:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            result
+        }
+
+        println!("case,operation,milliseconds");
+        for (name, pages, padding, mixed_sizes, study_step, strokes_per_page) in [
+            ("small", 12, 6, false, 3, 1),
+            ("medium", 180, 320, true, 3, 4),
+            ("dense", 420, 1500, true, 1, 20),
+        ] {
+            let pdf = root.join(format!("{name}.pdf"));
+            write_save_fixture_pdf(&pdf, pages, padding, mixed_sizes);
+            println!(
+                "{name}: {pages} pages, {} PDF bytes",
+                fs::metadata(&pdf).unwrap().len()
+            );
+            let mut data = timed(name, "open PDF and load study data", || {
+                assert_eq!(crate::inspect_pdf(&pdf).unwrap().0, pages);
+                load_doc_data(&pdf)
+            });
+            timed(name, "first page CPU raster", || {
+                let doc = mupdf::Document::open(pdf.to_str().unwrap()).unwrap();
+                assert!(crate::render_to_image(&doc, 0, 1.0, false).is_some());
+            });
+
+            let points = (0..40)
+                .map(|i| (0.05 + i as f32 * 0.02, 0.4 + (i % 5) as f32 * 0.02))
+                .collect();
+            let mut pen = sample_textbox("", points);
+            pen.kind = AnnotationKind::Freehand;
+            for page in (1..=pages).step_by(study_step) {
+                data.notes.insert(
+                    page,
+                    format!("# Slide {page}\n\n{}", "Example study notes.\n".repeat(48)),
+                );
+                let strokes = (0..strokes_per_page)
+                    .map(|line| {
+                        let mut stroke = pen.clone();
+                        for (_, y) in &mut stroke.points {
+                            *y += line as f32 * 0.02;
+                        }
+                        stroke
+                    })
+                    .collect();
+                data.annotations.insert(page, strokes);
+                if page % 7 == 1 {
+                    let mut sketch = SketchPage::new(BlankPageStyle::Grid);
+                    let mut stroke = pen.clone();
+                    for (x, y) in &mut stroke.points {
+                        *x *= 400.0;
+                        *y *= 300.0;
+                    }
+                    sketch.strokes.push(stroke);
+                    data.sketches.insert(page, sketch);
+                }
+            }
+
+            timed(name, "changed local checkpoint", || save_model(&pdf, &data));
+            timed(name, "unchanged local checkpoint", || {
+                save_model(&pdf, &data)
+            });
+            println!(
+                "{name}: {} local backup bytes",
+                fs::metadata(get_backup_path(&pdf)).unwrap().len()
+            );
+            timed(name, "changed PDF commit", || save_fixture(&pdf, &data));
+            let stamp = pdf_stamp(&pdf).unwrap();
+            timed(name, "unchanged PDF commit", || save_fixture(&pdf, &data));
+            assert_eq!(pdf_stamp(&pdf).unwrap(), stamp);
+            let reopened = timed(name, "reopen with study data", || {
+                assert_eq!(crate::inspect_pdf(&pdf).unwrap().0, pages);
+                load_doc_data(&pdf)
+            });
+            assert!(same_content(&reopened, &data));
+            verify_save_fixture(&pdf, &data, pages as usize);
+            check_pdf_with_qpdf(&pdf);
         }
     }
 
     #[test]
     fn save_pipeline_newer_edits_survive_worker_and_reopen() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("worker");
-        let path = fixture.root.join("worker.pdf");
+        let root = isolated_dir!(save_pipeline_newer_edits_survive_worker_and_reopen);
+        let path = root.join("worker.pdf");
         save_test_pdf(&path, 3);
         let mut old = load_doc_data(&path);
         old.notes.insert(1, "Before background save".into());
@@ -4427,9 +4493,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_failed_replacement_preserves_backup_and_pdf() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("failure");
-        let path = fixture.root.join("failure.pdf");
+        let root = isolated_dir!(save_pipeline_failed_replacement_preserves_backup_and_pdf);
+        let path = root.join("failure.pdf");
         save_test_pdf(&path, 2);
         let mut data = load_doc_data(&path);
         save_fixture(&path, &data);
@@ -4453,9 +4518,8 @@ mod tests {
     #[test]
     fn save_pipeline_external_revision_is_retained() {
         use lopdf::{dictionary, Object};
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("external");
-        let path = fixture.root.join("external.pdf");
+        let root = isolated_dir!(save_pipeline_external_revision_is_retained);
+        let path = root.join("external.pdf");
         save_test_pdf(&path, 3);
         let mut data = load_doc_data(&path);
         data.notes.insert(1, "Original note".into());
@@ -4488,9 +4552,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_page_structure_roundtrip() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("structure");
-        let path = fixture.root.join("structure.pdf");
+        let root = isolated_dir!(save_pipeline_page_structure_roundtrip);
+        let path = root.join("structure.pdf");
         save_test_pdf(&path, 4);
         let mut data = load_doc_data(&path);
         data.notes.insert(2, "Move with page".into());
@@ -4499,15 +4562,18 @@ mod tests {
         save_fixture(&path, &data);
         let inserted = insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
         assert_eq!(inserted, 2);
+        check_pdf_with_qpdf(&path);
         shift_doc_data_on_insert(&mut data.notes, &mut data.annotations, &mut data.blank_pages, &mut data.sketches, inserted);
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 5);
         assert_eq!(data.notes[&3], "Move with page");
         reorder_pages_in_pdf(&path, 3, 1, false).unwrap();
+        check_pdf_with_qpdf(&path);
         remap_doc_data_pages(&mut data, &|p| Some(match p { 3 => 1, 1 | 2 => p + 1, _ => p }));
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 5);
         delete_page_from_pdf(&path, 1, false).unwrap();
+        check_pdf_with_qpdf(&path);
         remap_doc_data_pages(&mut data, &|p| p.checked_sub(1).filter(|p| *p > 0));
         save_fixture(&path, &data);
         verify_save_fixture(&path, &data, 4);
@@ -4516,19 +4582,38 @@ mod tests {
     }
 
     fn append_external_freetext(path: &Path, page: u32, text: &str) {
-        use lopdf::{dictionary, Object};
+        use lopdf::{Object, dictionary};
+        append_external_annotation(
+            path,
+            page,
+            dictionary! {
+                "Type" => "Annot", "Subtype" => "FreeText",
+                "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+                "Contents" => Object::string_literal(text.as_bytes().to_vec()),
+                "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
+            },
+        );
+    }
+
+    fn append_external_annotation(path: &Path, page: u32, annotation: lopdf::Dictionary) {
         let saved = fs::read(path).unwrap();
-        let mut incremental = lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
+        let mut incremental =
+            lopdf::IncrementalDocument::load_from(std::io::Cursor::new(saved)).unwrap();
         let page_id = incremental.get_prev_documents().get_pages()[&page];
-        incremental.opt_clone_object_to_new_document(page_id).unwrap();
-        let annotation_id = incremental.new_document.add_object(dictionary! {
-            "Type" => "Annot", "Subtype" => "FreeText",
-            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
-            "Contents" => Object::string_literal(text.as_bytes().to_vec()),
-            "DA" => Object::string_literal(b"/Helv 12 Tf 0 0 0 rg".to_vec()), "F" => 4,
-        });
-        incremental.new_document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap()
-            .set("Annots", vec![Object::Reference(annotation_id)]);
+        incremental
+            .opt_clone_object_to_new_document(page_id)
+            .unwrap();
+        let annotation_id = incremental.new_document.add_object(annotation);
+        let page_dict = incremental
+            .new_document
+            .get_dictionary_mut(page_id)
+            .unwrap();
+        let mut annotations = page_dict
+            .get(b"Annots")
+            .map(|items| items.as_array().unwrap().clone())
+            .unwrap_or_default();
+        annotations.push(lopdf::Object::Reference(annotation_id));
+        page_dict.set("Annots", annotations);
         let mut output = Vec::new();
         incremental.save_to(&mut output).unwrap();
         fs::write(path, &output).unwrap();
@@ -4539,10 +4624,67 @@ mod tests {
     }
 
     #[test]
+    fn importing_external_annotations_can_read_an_equal_length_edit() {
+        let root = isolated_dir!(importing_external_annotations_can_read_an_equal_length_edit);
+        let path = root.join("same-length.pdf");
+        save_test_pdf(&path, 2);
+        append_external_freetext(&path, 2, "original external text");
+        let mut annotations = HashMap::new();
+        merge_external_annotations(&path, &mut annotations);
+        assert_eq!(annotations[&2][0].text, "original external text");
+
+        let mut bytes = fs::read(&path).unwrap();
+        let before = b"original external text";
+        let after = b"modified external text";
+        let offset = memchr::memmem::find(&bytes, before).expect("annotation text in fixture");
+        bytes[offset..offset + before.len()].copy_from_slice(after);
+        fs::write(&path, &bytes).unwrap();
+        let mut annotations = HashMap::new();
+        merge_external_annotations(&path, &mut annotations);
+        assert_eq!(annotations[&2][0].text, "modified external text");
+        check_pdf_with_qpdf(&path);
+    }
+
+    #[test]
+    fn commit_keeps_unconverted_native_annotation_on_an_edited_page() {
+        use lopdf::{Object, dictionary};
+
+        let root = isolated_dir!(commit_keeps_unconverted_native_annotation_on_an_edited_page);
+        let path = root.join("native.pdf");
+        save_test_pdf(&path, 2);
+        let square = dictionary! {
+            "Type" => "Annot", "Subtype" => "Square",
+            "Rect" => vec![10.into(), 20.into(), 100.into(), 60.into()],
+            "NM" => Object::string_literal("external-square"),
+            "T" => Object::string_literal("External author"),
+            "Contents" => Object::string_literal("External annotation"),
+            "F" => 4,
+        };
+        append_external_annotation(&path, 2, square.clone());
+        let mut data = load_doc_data(&path);
+        data.annotations.insert(
+            2,
+            vec![sample_textbox(
+                "New Lapis annotation",
+                vec![(0.1, 0.1), (0.5, 0.3)],
+            )],
+        );
+        save_fixture(&path, &data);
+
+        let output = lopdf::Document::load(&path).unwrap();
+        let page = output.get_dictionary(output.get_pages()[&2]).unwrap();
+        let annotations = page.get(b"Annots").unwrap().as_array().unwrap();
+        assert_eq!(annotations.len(), 2);
+        assert!(annotations.iter().any(|item| {
+            output.get_dictionary(item.as_reference().unwrap()).unwrap() == &square
+        }));
+        check_pdf_with_qpdf(&path);
+    }
+
+    #[test]
     fn save_pipeline_external_annotation_is_merged_never_dropped() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("external_merge");
-        let path = fixture.root.join("external_merge.pdf");
+        let root = isolated_dir!(save_pipeline_external_annotation_is_merged_never_dropped);
+        let path = root.join("external_merge.pdf");
         save_test_pdf(&path, 3);
         let mut data = load_doc_data(&path);
         data.notes.insert(1, "Original note".into());
@@ -4578,9 +4720,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_own_tail_after_interrupted_checkpoint_is_not_external() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("own_tail");
-        let path = fixture.root.join("own_tail.pdf");
+        let root = isolated_dir!(save_pipeline_own_tail_after_interrupted_checkpoint_is_not_external);
+        let path = root.join("own_tail.pdf");
         save_test_pdf(&path, 2);
         let mut data = load_doc_data(&path);
         data.notes.insert(1, "One".into());
@@ -4596,9 +4737,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_compaction_refuses_unmerged_external_revision() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("compact_external");
-        let path = fixture.root.join("compact_external.pdf");
+        let root = isolated_dir!(save_pipeline_compaction_refuses_unmerged_external_revision);
+        let path = root.join("compact_external.pdf");
         save_test_pdf(&path, 3);
         let data = load_doc_data(&path);
         save_fixture(&path, &data);
@@ -4613,9 +4753,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_stale_commit_tmp_does_not_block_a_commit() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("stale_tmp");
-        let path = fixture.root.join("stale_tmp.pdf");
+        let root = isolated_dir!(save_pipeline_stale_commit_tmp_does_not_block_a_commit);
+        let path = root.join("stale_tmp.pdf");
         save_test_pdf(&path, 2);
         let mut data = load_doc_data(&path);
         fs::write(path.with_extension("lapis_commit_tmp.pdf"), b"killed mid-write").unwrap();
@@ -4627,9 +4766,8 @@ mod tests {
 
     #[test]
     fn page_structure_rewrite_survives_a_lost_backup_update() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("structure_crash");
-        let path = fixture.root.join("structure_crash.pdf");
+        let root = isolated_dir!(page_structure_rewrite_survives_a_lost_backup_update);
+        let path = root.join("structure_crash.pdf");
         save_test_pdf(&path, 4);
         let mut data = load_doc_data(&path);
         data.notes.insert(2, "Move with page".into());
@@ -4667,9 +4805,8 @@ mod tests {
     #[test]
     fn page_structure_ops_ask_before_invalidating_a_signature() {
         use lopdf::dictionary;
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("structure_signed");
-        let path = fixture.root.join("structure_signed.pdf");
+        let root = isolated_dir!(page_structure_ops_ask_before_invalidating_a_signature);
+        let path = root.join("structure_signed.pdf");
         save_test_pdf(&path, 3);
         add_test_object(&path, dictionary! {
             "Type" => "Sig", "Filter" => "Adobe.PPKLite",
@@ -4695,9 +4832,8 @@ mod tests {
     #[test]
     fn an_empty_signature_field_does_not_block_page_edits() {
         use lopdf::dictionary;
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("structure_sigfield");
-        let path = fixture.root.join("structure_sigfield.pdf");
+        let root = isolated_dir!(an_empty_signature_field_does_not_block_page_edits);
+        let path = root.join("structure_sigfield.pdf");
         save_test_pdf(&path, 3);
         add_test_object(&path, dictionary! { "FT" => "Sig", "T" => lopdf::Object::string_literal("Signature1") });
         insert_blank_page_with_style_into_pdf(&path, 1, BlankPageStyle::Blank, false).unwrap();
@@ -4707,9 +4843,8 @@ mod tests {
 
     #[test]
     fn backup_cache_never_hides_an_outside_change() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("backup_cache");
-        let path = fixture.root.join("backup_cache.pdf");
+        let root = isolated_dir!(backup_cache_never_hides_an_outside_change);
+        let path = root.join("backup_cache.pdf");
         save_test_pdf(&path, 2);
         let mut data = load_doc_data(&path);
         data.notes.insert(1, "alpha".into());
@@ -4728,9 +4863,8 @@ mod tests {
 
     #[test]
     fn structural_rewrite_embeds_the_final_length_after_one_serialization() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("structure_len");
-        let path = fixture.root.join("structure_len.pdf");
+        let root = isolated_dir!(structural_rewrite_embeds_the_final_length_after_one_serialization);
+        let path = root.join("structure_len.pdf");
         save_test_pdf(&path, 3);
         let mut data = load_doc_data(&path);
         data.notes.insert(2, "keep".into());
@@ -4799,9 +4933,8 @@ mod tests {
 
     #[test]
     fn save_pipeline_edit_between_pdf_replace_and_reconcile_is_never_lost() {
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("mid_commit_edit");
-        let path = fixture.root.join("mid_commit_edit.pdf");
+        let root = isolated_dir!(save_pipeline_edit_between_pdf_replace_and_reconcile_is_never_lost);
+        let path = root.join("mid_commit_edit.pdf");
         save_test_pdf(&path, 3);
         let mut data = load_doc_data(&path);
         data.notes.insert(1, "snapshot note".into());
@@ -4844,9 +4977,8 @@ mod tests {
     #[test]
     fn compaction_is_blocked_only_by_real_signature_values() {
         use lopdf::dictionary;
-        let _guard = crate::docid::test_lock();
-        let fixture = SaveTestDir::new("compact_signature");
-        let path = fixture.root.join("compact_signature.pdf");
+        let root = isolated_dir!(compaction_is_blocked_only_by_real_signature_values);
+        let path = root.join("compact_signature.pdf");
         save_test_pdf(&path, 3);
         let data = load_doc_data(&path);
         save_fixture(&path, &data);
@@ -4867,15 +4999,7 @@ mod tests {
 
     #[test]
     fn repeated_commits_keep_one_custom_block_and_one_rollback_marker() {
-        let _guard = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_commit_bloat_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // SAFETY: serialized with the docid test lock.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-        }
+        let root = isolated_dir!(repeated_commits_keep_one_custom_block_and_one_rollback_marker);
         let path = root.join("example.pdf");
         valid_test_pdf(&path);
         let mut notes = HashMap::new();
@@ -4911,7 +5035,6 @@ mod tests {
             .filter(|w| *w == LAPIS_INCREMENTAL_MARKER).count(), 1);
         assert_eq!(read_trailing_doc_data(&path).unwrap().notes[&1], "updated");
         assert!(lopdf::Document::load_mem(&updated).is_ok());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4928,15 +5051,7 @@ mod tests {
 
     #[test]
     fn compaction_after_lapis_last_revision_keeps_one_metadata_stream() {
-        let _guard = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_compact_own_tail_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // SAFETY: serialized with the docid test lock.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-        }
+        let root = isolated_dir!(compaction_after_lapis_last_revision_keeps_one_metadata_stream);
         let path = root.join("example.pdf");
         valid_test_pdf(&path);
         let mut notes = HashMap::new();
@@ -4954,20 +5069,11 @@ mod tests {
         assert_eq!(read_trailing_doc_data(&path).unwrap().notes[&1], "latest locally");
         assert_eq!(lopdf::Document::load_mem(&output).unwrap().get_pages().len(), 1);
         assert!(path.with_extension("lapis_before_compaction.pdf").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn local_checkpoints_survive_without_a_pdf_commit() {
-        let _guard = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_local_checkpoint_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // SAFETY: serialized with the docid test lock.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-        }
+        let root = isolated_dir!(local_checkpoints_survive_without_a_pdf_commit);
         let path = root.join("example.pdf");
         valid_test_pdf(&path);
         let original = fs::read(&path).unwrap();
@@ -4980,20 +5086,11 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), original, "autosave must leave PDF untouched");
         assert_eq!(load_local_backup(&path).unwrap().notes[&1], "second edit");
         assert_eq!(load_doc_data(&path).notes[&1], "second edit");
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn compaction_removes_historical_lapis_sections_and_preserves_latest_notes() {
-        let _guard = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_compact_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // SAFETY: serialized with the docid test lock.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-        }
+        let root = isolated_dir!(compaction_removes_historical_lapis_sections_and_preserves_latest_notes);
         let path = root.join("example.pdf");
         valid_test_pdf(&path);
         let mut notes = HashMap::new();
@@ -5016,7 +5113,6 @@ mod tests {
         assert_eq!(lopdf::Document::load_mem(&output).unwrap().get_pages().len(), 1);
         assert_eq!(read_trailing_doc_data(&path).unwrap().notes[&1], "after");
         assert!(path.with_extension("lapis_before_compaction.pdf").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5336,15 +5432,7 @@ mod tests {
 
     #[test]
     fn identity_follows_the_file_and_newest_revision_wins() {
-        let _l = crate::docid::test_lock();
-        let root = std::env::temp_dir().join(format!("lapis_notes_flow_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        // SAFETY: test serializzati da test_lock(), nessun altro thread legge l'ambiente.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
-            std::env::set_var("XDG_CONFIG_HOME", root.join("cfg"));
-        }
+        let root = isolated_dir!(identity_follows_the_file_and_newest_revision_wins);
         let pdf_a = root.join("a.pdf");
         fs::write(&pdf_a, b"%PDF-1.4\n%%EOF\n").unwrap();
 
@@ -5441,6 +5529,5 @@ mod tests {
         assert_eq!(merged.notes.len(), 2);
         assert_eq!(merged.notes[&1], "in backup");
 
-        let _ = fs::remove_dir_all(&root);
     }
 }

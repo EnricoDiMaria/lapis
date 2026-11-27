@@ -1899,6 +1899,25 @@ mod output_lifecycle_tests {
 #[cfg(test)]
 mod recording_correctness_tests {
     use super::*;
+    use crate::test_support::isolated_dir;
+
+    fn recording_without_device(raw: &Path, page: u32) -> AudioEngine {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(raw, spec).unwrap();
+        for _ in 0..1600 {
+            writer.write_sample(321i16).unwrap();
+        }
+        let mut engine = AudioEngine::new();
+        engine.rec_writer = Arc::new(Mutex::new(Some(writer)));
+        engine.rec_raw_path = Some(raw.to_path_buf());
+        engine.rec_target = Some(RecordingTarget::PageMemo(page));
+        engine
+    }
 
     #[test]
     fn recording_names_do_not_depend_on_the_number_of_memos() {
@@ -1924,15 +1943,7 @@ mod recording_correctness_tests {
         let raw = dir.join("raw.wav");
         let occupied = dir.join("occupied.wav");
         fs::write(&occupied, b"existing recording").unwrap();
-        let mut writer = hound::WavWriter::create(&raw, hound::WavSpec {
-            channels: 1, sample_rate: 16000, bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        }).unwrap();
-        for _ in 0..1600 { writer.write_sample(0i16).unwrap(); }
-        let mut engine = AudioEngine::new();
-        engine.rec_writer = Arc::new(Mutex::new(Some(writer)));
-        engine.rec_raw_path = Some(raw.clone());
-        engine.rec_target = Some(RecordingTarget::PageMemo(7));
+        let mut engine = recording_without_device(&raw, 7);
         let (target, path, duration) = engine.stop_recording(&occupied).unwrap();
         assert!(target == RecordingTarget::PageMemo(7));
         assert_eq!(path, raw);
@@ -1941,6 +1952,27 @@ mod recording_correctness_tests {
         assert_eq!(wav_duration_ms(&raw), Some(100));
         assert!(engine.rec_target.is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_recording_conversion_leaves_a_readable_raw_wav() {
+        let root = isolated_dir!(failed_recording_conversion_leaves_a_readable_raw_wav);
+        let raw = root.join("raw.wav");
+        // FFmpeg cannot create the destination because its parent does not exist.
+        let converted = root.join("missing").join("converted.wav");
+        let mut engine = recording_without_device(&raw, 3);
+        let (target, path, duration) = engine.stop_recording(&converted).unwrap();
+
+        assert!(target == RecordingTarget::PageMemo(3));
+        assert_eq!(path, raw);
+        assert_eq!(duration, 100);
+        assert!(!converted.exists());
+        let mut reader = hound::WavReader::open(&raw).unwrap();
+        let samples = reader
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(samples, vec![321; 1600]);
     }
 
     #[test]

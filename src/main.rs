@@ -38,6 +38,8 @@ mod doc_lock;
 mod docid;
 mod paths;
 mod sysproc;
+#[cfg(test)]
+mod test_support;
 
 fn setup_nerd_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -19943,7 +19945,88 @@ mod single_page_wheel_tests {
 #[cfg(test)]
 mod release_correctness_tests {
     use super::*;
+    use crate::test_support::isolated_dir;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn invalid_candidate_keeps_active_document_until_successful_switch() {
+        let root = isolated_dir!(invalid_candidate_keeps_active_document_until_successful_switch);
+        let first = root.join("first.pdf");
+        let second = root.join("second.pdf");
+        let invalid = root.join("invalid.pdf");
+        notes::create_blank_study_notebook(&first).unwrap();
+        notes::create_blank_study_notebook(&second).unwrap();
+        std::fs::write(&invalid, b"not a PDF").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+        assert!(app.open_pdf(first.clone(), &ctx));
+        app.current_note = "Only in the first document".into();
+        app.sync_local_checkpoint().unwrap();
+        let (old_tx, old_cancel) = app.new_asr_job();
+
+        assert!(!app.open_pdf(invalid.clone(), &ctx));
+        assert_eq!(app.pdf_path, first);
+        assert_eq!(app.current_note, "Only in the first document");
+        assert!(!old_cancel.load(Ordering::Relaxed));
+        assert!(matches!(
+            doc_lock::acquire(&first),
+            Err(doc_lock::LockError::Busy)
+        ));
+        assert!(doc_lock::acquire(&invalid).is_ok());
+
+        old_tx.send(audio::AsrJobResult::Cancelled).unwrap();
+        assert!(app.open_pdf(second.clone(), &ctx));
+        assert_eq!(app.pdf_path, second);
+        assert!(app.current_note.is_empty());
+        assert!(old_cancel.load(Ordering::Relaxed));
+        assert!(old_tx.send(audio::AsrJobResult::Cancelled).is_err());
+        assert!(app.asr_rx.try_recv().is_err());
+        assert!(doc_lock::acquire(&first).is_ok());
+        assert!(matches!(
+            doc_lock::acquire(&second),
+            Err(doc_lock::LockError::Busy)
+        ));
+        assert_eq!(
+            notes::load_doc_data(&first).notes[&1],
+            "Only in the first document"
+        );
+    }
+
+    #[test]
+    fn failed_audio_index_write_keeps_document_open_until_retry() {
+        let root = isolated_dir!(failed_audio_index_write_keeps_document_open_until_retry);
+        let pdf = root.join("lecture.pdf");
+        notes::create_blank_study_notebook(&pdf).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+        assert!(app.open_pdf(pdf.clone(), &ctx));
+
+        let media_dir = AudioDocIndex::media_dir_for_pdf(&pdf);
+        let index = media_dir.join("audio_index.json");
+        app.audio_index.lecture_title = "Saved title".into();
+        app.persist_audio_index().unwrap();
+        let before = std::fs::read(&index).unwrap();
+        let blocked = media_dir.join(format!("audio_index.json.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocked).unwrap();
+
+        app.audio_index.lecture_title = "Pending title".into();
+        assert!(app.persist_audio_index().is_err());
+        assert!(!app.complete_pdf_save(AfterPdfSave::Home, &ctx));
+        assert!(app.audio_index_pending);
+        assert_eq!(app.pdf_path, pdf);
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+        assert!(matches!(
+            doc_lock::acquire(&pdf),
+            Err(doc_lock::LockError::Busy)
+        ));
+
+        std::fs::remove_dir(&blocked).unwrap();
+        assert!(app.complete_pdf_save(AfterPdfSave::Home, &ctx));
+        assert!(!app.has_pdf());
+        assert!(doc_lock::acquire(&pdf).is_ok());
+        assert_eq!(AudioDocIndex::load(&pdf).lecture_title, "Pending title");
+    }
 
     #[test]
     fn retired_transcription_cannot_reach_the_next_job() {
