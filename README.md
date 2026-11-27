@@ -384,6 +384,7 @@ Configurable shortcuts are grouped in **Settings → Keybindings**. Uncheck indi
 | `Alt + T` | Turn topbar auto-hide on / off |
 | `PageUp` | Previous page |
 | `PageDown` | Next page |
+| Wheel up / down over PDF | Previous / next pages in Single Page; larger scrolls jump multiple pages (at vertical edges when zoomed) |
 | `Left / Right` | Previous / Next page when not typing |
 | `K / J` | Previous / Next page when not typing |
 | `Space` | Draw without pressing the mouse button on PDF / Sketch with a drawing tool; otherwise audio play / pause when applicable |

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Single Page wheel navigation:** Scroll over the PDF to turn pages when fitted or at the corresponding vertical edge of a zoomed page. Accumulated wheel and trackpad distance supports multi-page jumps without a cooldown.
+
 - **Credits:** A dedicated page pinned to the bottom of the Advanced Settings sidebar shows the application version, license, project links and open-source acknowledgements.
 - **Annotation cursors:** Tool-specific PDF cursors with a thin pen ring, chisel-tip highlighter cursor and stable, unframed tool glyphs; the topbar tools button shows the active tool.
 - **PDF and workspace shortcuts:** Configurable single-key shortcuts for annotation tools, Fit Page (`F`), Fit Width (`W`), night mode (`M`), the annotation toolbar (`D`), notes (`N`), Edit / Preview (`X`) and outline (`G`). `Alt+F` still fits both the PDF and notes panel. Each configurable shortcut can be disabled without losing its binding. Keybindings are grouped by function, with bulk enable/disable controls and current shortcut hints in toolbars, the radial menu and the Command Palette. Former default panel bindings migrate to the new layout without replacing custom bindings.
@@ -46,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spelling suggestions:** Every valid single-letter edit (missing, extra, swapped or wrong letter, using only the letters of each dictionary) is now offered even when Hunspell does not return it, and a cut-off word ranks its completion first (`goin` → `going`). Ranking now treats a missing or wrong accent as a minor error, favors candidates that keep the first letter and the typed capitalization, and uses Hunspell's own order to break ties instead of alphabetical order. Suggestions identical to the typed word are dropped.
 
 ### Fixed
+
+- **Flashcard preview:** Use the same parser as the trainer, including inline code and LaTeX in titles, and preserve fenced code and display math in answers.
+- **Slideshow HUD:** Center the floating Exit control in both slideshow modes.
 
 - **External annotations are no longer dropped on save:** If another program adds annotations to a PDF while it is open in Lapis, the next save now merges them into the document first (with a notice) instead of silently removing them from the page. Compacting the PDF history applies the same check.
 - **Safer page insert, delete and reorder:** The rewritten PDF now embeds the latest local data, so an interruption right after a page change can no longer attach notes and annotations to the wrong pages. The change is cancelled if the local backup cannot be written, and Lapis now asks before a page change on a digitally signed PDF, because the rewrite invalidates the signature (empty signature fields are ignored, and compacting history is only blocked by real signatures).

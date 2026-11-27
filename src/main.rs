@@ -1228,6 +1228,64 @@ fn clamp_scroll_offset(off: egui::Vec2, content: egui::Vec2, view: egui::Vec2) -
     egui::vec2(off.x.clamp(0.0, max.x), off.y.clamp(0.0, max.y))
 }
 
+#[derive(Clone, Copy, Default)]
+struct SinglePageWheel {
+    accumulated: f32,
+    last_event: Option<f64>,
+    reset_offset: bool,
+}
+
+impl SinglePageWheel {
+    const POINTS_PER_PAGE: f32 = 48.0;
+
+    fn update(&mut self, time: f64, delta: f32, offset: f32, max_offset: f32) -> i32 {
+        if !delta.is_finite() {
+            self.accumulated = 0.0;
+            return 0;
+        }
+        if delta == 0.0 {
+            return 0;
+        }
+        let at_edge = (delta > 0.0 && offset <= 1.0)
+            || (delta < 0.0 && offset >= max_offset - 1.0);
+        if !at_edge {
+            self.accumulated = 0.0;
+            self.last_event = None;
+            return 0;
+        }
+        if self.last_event.is_none_or(|t| time - t > 0.3)
+            || self.accumulated.signum() != delta.signum()
+        {
+            self.accumulated = 0.0;
+        }
+        self.last_event = Some(time);
+        self.accumulated += delta;
+        let pages = (self.accumulated / Self::POINTS_PER_PAGE).trunc();
+        self.accumulated %= Self::POINTS_PER_PAGE;
+        (-pages) as i32
+    }
+}
+
+fn wheel_page_target(current: u32, total: u32, hidden: &HashSet<u32>, steps: i32) -> u32 {
+    let mut target = current;
+    let mut page = current;
+    let mut remaining = steps.unsigned_abs();
+    while remaining > 0 {
+        let Some(next) = page.checked_add_signed(steps.signum()) else {
+            break;
+        };
+        if next == 0 || next > total {
+            break;
+        }
+        page = next;
+        if !hidden.contains(&page) {
+            target = page;
+            remaining -= 1;
+        }
+    }
+    target
+}
+
 #[derive(Clone)]
 struct TocItem {
     title: String,
@@ -1502,6 +1560,7 @@ struct Lapis {
     /// Scroll offset to keep when switching between Single and Continuous:
     /// x, and y relative to the top of the current page.
     mode_switch_offset: Option<egui::Vec2>,
+    single_page_wheel: SinglePageWheel,
     continuous_scroll_delta: f32,
     render_tx: Sender<RenderRequest>,
     thumb_tx: Sender<RenderRequest>,
@@ -1736,6 +1795,7 @@ impl Lapis {
             fit_notes_layout_pending: false,
             continuous_scroll_to_page: None,
             mode_switch_offset: None,
+            single_page_wheel: SinglePageWheel::default(),
             continuous_scroll_delta: 0.0,
             render_tx: req_tx,
             thumb_tx,
@@ -2176,6 +2236,7 @@ impl Lapis {
     fn set_view_mode(&mut self, mode: ViewMode) {
         let off = self.pdf_scroll_offset;
         self.mode_switch_offset = None;
+        self.single_page_wheel = SinglePageWheel::default();
         match (self.view_mode, mode) {
             (ViewMode::SinglePage, ViewMode::Continuous) => {
                 self.continuous_scroll_to_page = Some(self.current_page);
@@ -2206,6 +2267,7 @@ impl Lapis {
             self.target_page = self.current_page;
             return;
         }
+        self.single_page_wheel = SinglePageWheel::default();
         self.sync_and_save();
 
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
@@ -3715,6 +3777,7 @@ impl Lapis {
     }
 
     fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.single_page_wheel = SinglePageWheel::default();
         // Do not open a document already locked by another window.
         // Multiple instances would overwrite notes and annotations.
         let same_doc =
@@ -3914,6 +3977,7 @@ impl Lapis {
     }
 
     fn close_pdf(&mut self) {
+        self.single_page_wheel = SinglePageWheel::default();
         if !self.has_pdf() {
             return;
         }
@@ -13855,8 +13919,7 @@ let state_path = crate::state::AppState::config_path();
                     egui::FontId::proportional(note_font_sz * 1.35),
                 );
 
-                let pre_defs = notes::preprocess_definitions(md_source);
-                let rendered_md = notes::preprocess_markdown_view(&pre_defs);
+                let rendered_md = notes::preprocess_notes_preview(md_source);
 
                 egui_commonmark::CommonMarkViewer::new()
                     .max_image_width(Some(preview_width.ceil() as usize))
@@ -15018,9 +15081,7 @@ let state_path = crate::state::AppState::config_path();
                                         egui::FontId::proportional(note_font_sz * 1.35),
                                     );
 
-                                    let pre_defs =
-                                        notes::preprocess_definitions(&self.current_note);
-                                    let rendered_md = notes::preprocess_markdown_view(&pre_defs);
+                                    let rendered_md = notes::preprocess_notes_preview(&self.current_note);
 
                                     // Capture the label selection on secondary press, before
                                     // clicking the popup (a primary click clears label selection).
@@ -15425,7 +15486,7 @@ let state_path = crate::state::AppState::config_path();
                     ui.add_space(4.0);
                     let preview_lines: String =
                         next_note.lines().take(6).collect::<Vec<_>>().join("\n");
-                    let rendered = notes::preprocess_markdown_view(&preview_lines);
+                    let rendered = notes::preprocess_notes_preview(&preview_lines);
                     egui_commonmark::CommonMarkViewer::new().show(
                         ui,
                         &mut self.commonmark_cache,
@@ -17474,7 +17535,7 @@ impl eframe::App for Lapis {
                             |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
 
                         egui::Area::new(ui.make_persistent_id("slideshow_hud"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(-20.0, 20.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 20.0))
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::NONE
@@ -17626,6 +17687,9 @@ impl eframe::App for Lapis {
 
         // Central Panel (Welcome Screen when no PDF is loaded, otherwise PDF Canvas)
         // Secondary PDF Pane when Split-View is active (resizable side-by-side PDF view!)
+        if self.view_mode != ViewMode::SinglePage {
+            self.single_page_wheel = SinglePageWheel::default();
+        }
         if self.split_view_enabled && self.has_pdf() && !in_slideshow {
             egui::Panel::right("pdf_split_secondary_pane")
                 .resizable(true)
@@ -18644,7 +18708,7 @@ impl eframe::App for Lapis {
                         };
 
                         egui::Area::new(ui.make_persistent_id("slideshow_hud"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(-20.0, 20.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 20.0))
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
                                 egui::Frame::NONE
@@ -19241,10 +19305,60 @@ impl eframe::App for Lapis {
                     }
 
                     // Coming from Continuous mode: keep the position inside the page.
-                    if let Some(o) = self.mode_switch_offset.take() {
+                    let pending_offset = self.mode_switch_offset.take();
+                    if let Some(o) = pending_offset {
                         canvas_scroll = canvas_scroll.scroll_offset(o);
                     }
 
+                    // A wheel turn must not discard the next frame's scroll events.
+                    let wheel_reset = std::mem::take(&mut self.single_page_wheel.reset_offset);
+                    if wheel_reset && pending_offset.is_none() && zoom_fix.is_none() {
+                        canvas_scroll = canvas_scroll.scroll_offset(egui::Vec2::ZERO);
+                    }
+                    let old_offset = if wheel_reset { 0.0 } else { self.pdf_scroll_offset.y };
+                    let wheel = if self.view_mode == ViewMode::SinglePage
+                        && !zoom_changed
+                        && zoom_fix.is_none()
+                        && pending_offset.is_none()
+                        && !self.notes_panel_resizing
+                        && !self.pdf_panning
+                        && !self.trackpad_drawing_active
+                        && !self.show_settings
+                        && !self.show_search
+                        && !self.show_command_palette
+                        && !self.show_flashcards_modal
+                        && self.radial_menu_pos.is_none()
+                    {
+                        ui.input(|i| {
+                            if i.modifiers.any()
+                                || i.pointer.any_down()
+                                || self.app_state.shortcuts.trackpad_draw_hold.is_held(i)
+                            {
+                                return None;
+                            }
+                            // Include native momentum, but not egui's synthetic smoothing tail.
+                            let mut d = egui::Vec2::ZERO;
+                            for event in &i.events {
+                                if let egui::Event::MouseWheel {
+                                    unit, delta, modifiers, ..
+                                } = event
+                                    && !modifiers.any()
+                                {
+                                    let scale = match unit {
+                                        egui::MouseWheelUnit::Point => 1.0,
+                                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                                            SinglePageWheel::POINTS_PER_PAGE
+                                        }
+                                    };
+                                    d += *delta * scale;
+                                }
+                            }
+                            let speed = self.wheel_speed() / state::DEFAULT_WHEEL_SCROLL_SPEED;
+                            (d.y.abs() >= d.x.abs()).then_some((i.time, d.y * speed))
+                        })
+                    } else {
+                        None
+                    };
                     let out = canvas_scroll.show_viewport(ui, |ui, viewport| {
                         if pan_delta != egui::Vec2::ZERO {
                             ui.scroll_with_delta(pan_delta);
@@ -19296,10 +19410,43 @@ impl eframe::App for Lapis {
                     self.canvas_rect = out.inner_rect;
 
                     self.pdf_scroll_offset = clamp_scroll_offset(
-                        self.pdf_scroll_offset, 
-                        out.content_size, 
-                        out.inner_rect.size()
+                        out.state.clamped_offset(),
+                        out.content_size,
+                        out.inner_rect.size(),
                     );
+                    if let Some((time, delta)) = wheel
+                        && ui.rect_contains_pointer(out.inner_rect)
+                    {
+                        let max_y = if effective_zoom == ZoomMode::FitPage {
+                            0.0
+                        } else {
+                            (out.content_size.y - out.inner_rect.height()).max(0.0)
+                        };
+                        let offset = old_offset.clamp(0.0, max_y);
+                        let steps = self.single_page_wheel.update(time, delta, offset, max_y);
+                        if steps != 0 {
+                            let target = wheel_page_target(
+                                self.current_page,
+                                self.total_pages,
+                                &self.hidden_pages,
+                                steps,
+                            );
+                            if target != self.current_page {
+                                // Commit only the destination, not each skipped page.
+                                let mut gesture = self.single_page_wheel;
+                                self.go_to_page(target, ui.ctx());
+                                gesture.reset_offset = true;
+                                self.single_page_wheel = gesture;
+                                self.pdf_scroll_offset = egui::Vec2::ZERO;
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                                ui.ctx().request_repaint();
+                            } else {
+                                self.single_page_wheel = SinglePageWheel::default();
+                            }
+                        }
+                    } else {
+                        self.single_page_wheel = SinglePageWheel::default();
+                    }
                 }
             });
 
@@ -19525,5 +19672,58 @@ mod fit_notes_layout_tests {
     #[test]
     fn accounts_for_book_spine() {
         assert_eq!(Lapis::fitted_notes_width(1800.0, 802.0, 0.75, 2, 250.0, 1700.0), 596.0);
+    }
+}
+
+#[cfg(test)]
+mod single_page_wheel_tests {
+    use super::{SinglePageWheel, wheel_page_target};
+    use std::collections::HashSet;
+
+    #[test]
+    fn turns_only_at_the_requested_edge() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -96.0, 20.0, 100.0), 0);
+        assert_eq!(wheel.update(1.1, 96.0, 100.0, 100.0), 0);
+        assert_eq!(wheel.update(1.2, -96.0, 100.0, 100.0), 2);
+        assert_eq!(wheel.update(1.21, 48.0, 0.0, 100.0), -1);
+    }
+
+    #[test]
+    fn preserves_remainder_without_a_cooldown() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -120.0, 0.0, 0.0), 2);
+        assert_eq!(wheel.update(1.01, -24.0, 0.0, 0.0), 1);
+        assert_eq!(wheel.update(1.02, -48.0, 0.0, 0.0), 1);
+    }
+
+    #[test]
+    fn small_trackpad_events_accumulate_like_one_large_event() {
+        let mut wheel = SinglePageWheel::default();
+        let turns: i32 = (0..24)
+            .map(|i| wheel.update(1.0 + f64::from(i) * 0.01, -8.0, 0.0, 0.0))
+            .sum();
+        assert_eq!(turns, 4);
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -192.0, 0.0, 0.0), turns);
+    }
+
+    #[test]
+    fn idle_and_reversal_discard_partial_distance() {
+        let mut wheel = SinglePageWheel::default();
+        assert_eq!(wheel.update(1.0, -30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.4, -30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.41, 30.0, 0.0, 0.0), 0);
+        assert_eq!(wheel.update(1.42, 18.0, 0.0, 0.0), -1);
+    }
+
+    #[test]
+    fn skips_hidden_pages_and_stops_at_document_boundaries() {
+        let hidden = HashSet::from([3, 5, 9]);
+        assert_eq!(wheel_page_target(2, 9, &hidden, 3), 7);
+        assert_eq!(wheel_page_target(7, 9, &hidden, -3), 2);
+        assert_eq!(wheel_page_target(7, 9, &hidden, 100), 8);
+        assert_eq!(wheel_page_target(2, 9, &hidden, -100), 1);
+        assert_eq!(wheel_page_target(8, 9, &hidden, 1), 8);
     }
 }

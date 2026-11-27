@@ -2954,101 +2954,51 @@ pub fn format_latex_expr(expr: &str) -> String {
     out.replace(['{', '}'], "").replace(':', "∶")
 }
 
-// Convert `Term :: Definition` lines into Markdown callouts.
-// Ignore code blocks and LaTeX math blocks.
-pub fn preprocess_definitions(markdown: &str) -> String {
-    let mut out = String::with_capacity(markdown.len() + 128);
-    let mut lines = markdown.lines().peekable();
-    let mut in_code_block = false;
-    let mut in_math_block = false;
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
+/// Prepare notes for Preview, using the same card boundaries as the trainer.
+pub fn preprocess_notes_preview(markdown: &str) -> String {
+    fn quote(out: &mut String, text: &str) {
+        for line in text.trim_matches('\n').lines() {
+            out.push_str("> ");
             out.push_str(line);
             out.push('\n');
-            continue;
         }
-        if trimmed.starts_with("$$") {
-            if !trimmed[2..].contains("$$") {
-                in_math_block = !in_math_block;
-            }
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if !in_code_block && !in_math_block {
-            let clean = trimmed.trim_start_matches(['-', '*', '+']).trim();
-            let q_start = clean
-                .strip_prefix("Q:")
-                .or_else(|| clean.strip_prefix("**Q:**"))
-                .or_else(|| clean.strip_prefix("D:"));
-            if let Some(q) = q_start {
-                let mut question = q.trim().to_string();
-                let mut answer = String::new();
-                let mut in_answer = false;
-                while let Some(next) = lines.peek() {
-                    let t = next.trim();
-                    if t.is_empty() && in_answer {
-                        break;
-                    }
-                    if t.starts_with("Q:")
-                        || t.starts_with("**Q:**")
-                        || t.starts_with("D:")
-                        || t.contains("::")
-                    {
-                        break;
-                    }
-                    let consumed = lines.next().unwrap().trim();
-                    if let Some(a) = consumed
-                        .strip_prefix("A:")
-                        .or_else(|| consumed.strip_prefix("**A:**"))
-                        .or_else(|| consumed.strip_prefix("R:"))
-                    {
-                        in_answer = true;
-                        answer.push_str(a.trim());
-                    } else if in_answer {
-                        if !answer.is_empty() {
-                            answer.push('\n');
-                        }
-                        answer.push_str(consumed);
-                    } else if !consumed.is_empty() {
-                        if !question.is_empty() {
-                            question.push('\n');
-                        }
-                        question.push_str(consumed);
-                    }
-                }
-                if !question.is_empty() && !answer.is_empty() {
-                    out.push_str(&format!(
-                        "\n> **Domanda**  \n> {}  \n> **Risposta**  \n> {}\n\n",
-                        question.replace('\n', "  \n> "),
-                        answer.replace('\n', "  \n> ")
-                    ));
-                    continue;
-                }
-                out.push_str(line);
-                out.push('\n');
-                continue;
-            }
-            if let Some((term, def)) = clean.split_once("::") {
-                let t = term.trim();
-                let d = def.trim();
-                let valid = !t.is_empty()
-                    && !d.is_empty()
-                    && !t.contains('$')
-                    && !t.contains('`')
-                    && !t.contains('\\')
-                    && !t.starts_with('>');
-                if valid {
-                    out.push_str(&format!("\n> **{}**  \n> {}\n\n", t, d));
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
     }
+
+    if !markdown.contains("::") && !markdown.contains("Q:") && !markdown.contains("D:") {
+        return preprocess_markdown_view(markdown);
+    }
+    let cards = flashcard_spans(0, markdown);
+    if cards.is_empty() {
+        return preprocess_markdown_view(markdown);
+    }
+    let mut out = String::with_capacity(markdown.len() + 128);
+    let mut pos = 0;
+    for (span, card, inline) in cards {
+        out.push_str(&preprocess_markdown_view(&markdown[pos..span.start]));
+        out.push('\n');
+        // Prepare math and code before adding the blockquote prefix.
+        let front = preprocess_markdown_view(&card.front);
+        let back = preprocess_markdown_view(&card.back);
+        if inline {
+            // Avoid nesting emphasis around an already formatted title.
+            let front = front.trim();
+            if !front.contains(['*', '_', '\n']) {
+                quote(&mut out, &format!("**{front}**  "));
+            } else {
+                quote(&mut out, &format!("{front}  "));
+            }
+        } else {
+            out.push_str("> **Domanda**  \n");
+            quote(&mut out, &front);
+            out.push_str(">\n> **Risposta**  \n");
+        }
+        // Separate the answer from the title, including fenced code and display math.
+        out.push_str(">\n");
+        quote(&mut out, &back);
+        out.push('\n');
+        pos = span.end;
+    }
+    out.push_str(&preprocess_markdown_view(&markdown[pos..]));
     out
 }
 
@@ -3080,7 +3030,7 @@ fn alias_code_fences(markdown: &str) -> String {
         let body = line.trim_end_matches(['\r', '\n']);
         let eol = &line[body.len()..];
         let rest = body.trim_start();
-        if rest.starts_with("```") {
+        if rest.starts_with("```") && (in_code_block || !rest.trim_start_matches('`').contains('`')) {
             in_code_block = !in_code_block;
             if in_code_block {
                 let indent = &body[..body.len() - rest.len()];
@@ -3165,7 +3115,7 @@ fn preprocess_markdown_math_impl(markdown: &str, escape_shell: bool) -> String {
                     final_out.push('\n');
                     continue;
                 }
-            } else if run >= 3 {
+            } else if run >= 3 && (marker != '`' || !trimmed[run..].contains('`')) {
                 fence = Some((marker, run));
             }
         }
@@ -3328,7 +3278,7 @@ pub fn code_and_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
         let opening = text[start..first_end].trim_start();
         let marker = opening.chars().next().filter(|c| *c == '`' || *c == '~')?;
         let run = opening.chars().take_while(|&c| c == marker).count();
-        if run < 3 {
+        if run < 3 || (marker == '`' && opening[run..].contains('`')) {
             return None;
         }
         let mut pos = first_end;
@@ -3451,6 +3401,14 @@ pub fn page_has_flashcards(content: &str) -> bool {
 }
 
 fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
+    flashcard_spans(page, content)
+        .into_iter()
+        .map(|(_, card, _)| card)
+        .collect()
+}
+
+// The span covers the original source; the bool distinguishes inline and Q/A cards.
+fn flashcard_spans(page: u32, content: &str) -> Vec<(std::ops::Range<usize>, Flashcard, bool)> {
     let mut cards = Vec::new();
     // Code and math never produce cards; offsets let us tell where a marker sits.
     let skip = code_and_math_ranges(content);
@@ -3468,27 +3426,36 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
         // `trimmed` is a subslice of `raw_line`.
         let base = line_off + (trimmed.as_ptr() as usize - raw_line.as_ptr() as usize);
 
-        // 1. Check inline `Front :: Back` syntax
-        if let Some(p) = find_outside(trimmed, base, "::", &skip) {
+        let question_start = if !in_ranges(&skip, base) {
+            trimmed.strip_prefix("Q:")
+                .or_else(|| trimmed.strip_prefix("**Q:**"))
+                .or_else(|| trimmed.strip_prefix("D:"))
+        } else {
+            None
+        };
+        // Inline cards must not split a multiline math or code span.
+        let line_end = line_off + raw_line.len();
+        let first = skip.partition_point(|r| r.end <= line_off);
+        let crosses_line = skip[first..]
+            .iter()
+            .take_while(|r| r.start < line_end)
+            .any(|r| r.start < line_off || r.end > line_end);
+        if !crosses_line && let Some(p) = find_outside(trimmed, base, "::", &skip) {
             let f = strip_title_emphasis(&trimmed[..p]);
             let b = trimmed[p + 2..].trim();
             if !f.is_empty() && !b.is_empty() {
-                cards.push(Flashcard {
-                    page,
-                    front: f.to_string(),
-                    back: b.to_string(),
-                });
+                cards.push((
+                    line_off..line_end,
+                    Flashcard { page, front: f.to_string(), back: b.to_string() },
+                    true,
+                ));
                 continue;
             }
         }
 
         // 2. Check `Q: ...` / `A: ...` block syntax
-        if !in_ranges(&skip, base)
-            && let Some(q_start) = trimmed
-                .strip_prefix("Q:")
-                .or_else(|| trimmed.strip_prefix("**Q:**"))
-                .or_else(|| trimmed.strip_prefix("D:"))
-        {
+        if let Some(q_start) = question_start {
+            let mut end = line_off + raw_line.len();
             let mut question = q_start.trim().to_string();
             let mut answer = String::new();
             let mut in_answer = false;
@@ -3501,22 +3468,22 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
                 if next_trim.is_empty() && in_answer && !in_ranges(&skip, next_off) {
                     break;
                 }
-                if (is_syntax
-                    && (next_trim.starts_with("Q:") || next_trim.starts_with("**Q:**")))
-                    || find_outside(next_raw, next_off, "::", &skip).is_some()
+                let a_start = if is_syntax {
+                    next_trim.strip_prefix("A:")
+                        .or_else(|| next_trim.strip_prefix("**A:**"))
+                        .or_else(|| next_trim.strip_prefix("R:"))
+                } else {
+                    None
+                };
+                if (is_syntax && (next_trim.starts_with("Q:")
+                    || next_trim.starts_with("**Q:**") || next_trim.starts_with("D:")))
+                    || (a_start.is_none() && find_outside(next_raw, next_off, "::", &skip).is_some())
                 {
                     break;
                 }
 
-                let consumed = lines.next().unwrap().1.trim();
-                let a_start = if is_syntax {
-                    consumed
-                        .strip_prefix("A:")
-                        .or_else(|| consumed.strip_prefix("**A:**"))
-                        .or_else(|| consumed.strip_prefix("R:"))
-                } else {
-                    None
-                };
+                let consumed = lines.next().unwrap().1.trim_end_matches(['\r', '\n']);
+                end = next_off + next_raw.len();
                 if let Some(a_start) = a_start {
                     in_answer = true;
                     answer.push_str(a_start.trim());
@@ -3534,11 +3501,11 @@ fn extract_flashcards_from_page(page: u32, content: &str) -> Vec<Flashcard> {
             }
 
             if !question.is_empty() && !answer.is_empty() {
-                cards.push(Flashcard {
-                    page,
-                    front: question,
-                    back: answer,
-                });
+                cards.push((
+                    line_off..end,
+                    Flashcard { page, front: question, back: answer },
+                    false,
+                ));
             }
         }
     }
@@ -5158,6 +5125,7 @@ mod tests {
         assert!(card_fronts("Use `std::vector` for arrays").is_empty());
         assert!(card_fronts("Inline $a :: b$ math").is_empty());
         assert!(card_fronts("$$\nx :: y\n$$").is_empty());
+        assert!(card_fronts("$$\nx\n$$ :: not an inline card").is_empty());
         assert!(card_fronts("```\nQ: not a card\nA: still not\n```").is_empty());
         // A real marker next to code still works.
         assert_eq!(
@@ -5165,6 +5133,38 @@ mod tests {
             ["`std::vector`"]
         );
         assert_eq!(card_fronts("Vector :: uses `a::b` inside"), ["Vector"]);
+    }
+
+    #[test]
+    fn preview_recognizes_inline_code_and_math_cards() {
+        let note = "`word` :: something\n$a::b$ :: relation\n**Term** :: `x::y`\n```a ` b``` :: code";
+        let cards = extract_flashcards_from_page(1, note);
+        assert_eq!(cards.len(), 4);
+        let preview = preprocess_notes_preview(note);
+        assert!(preview.contains("> **`word`**"));
+        assert!(preview.contains("> something"));
+        assert!(preview.contains("> **Term**"));
+        assert!(preview.contains("> `x::y`"));
+        assert!(preview.contains("> **```a ` b```**"));
+        assert!(!preview.contains(" :: relation"));
+        assert!(preview.contains("> relation"));
+    }
+
+    #[test]
+    fn preview_preserves_non_cards_and_formatted_answers() {
+        let note = "`a::b`\n$$\nx :: y\n$$\n~~~rust\nQ: a :: b\n~~~\nQ: incomplete";
+        assert!(extract_flashcards_from_page(1, note).is_empty());
+        assert_eq!(preprocess_notes_preview(note), preprocess_markdown_view(note));
+
+        let note = "Q: What is `$@`?\nA: Example $x^2$:\n```sh\n  echo \"$@\"\n\nQ: not a card\n```\n$$\ny^2\n$$\n\nD: Next\nR: Answer";
+        let cards = extract_flashcards_from_page(1, note);
+        assert_eq!(cards.len(), 2);
+        assert!(cards[0].back.contains("  echo \"$@\""));
+        let preview = preprocess_notes_preview(note);
+        assert!(preview.contains("> ```sh\n>   echo \"$@\"\n> \n> Q: not a card\n> ```"));
+        assert!(preview.contains("> **`y²`**"));
+        assert!(preview.contains("> Next"));
+        assert!(preview.contains("> Answer"));
     }
 
     #[test]

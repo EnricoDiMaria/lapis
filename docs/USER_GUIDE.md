@@ -62,7 +62,7 @@ The View Mode menu offers five ways to work with a document.
 
 ### Single Page — `Alt + 1`
 
-Displays one page at a time.
+Displays one page at a time. Scroll up or down over the PDF to move to previous or next pages. Larger wheel movements or trackpad swipes advance multiple pages, including native scroll momentum. The mouse-wheel speed in Settings → Workspace → Page scrolling also adjusts page-turn sensitivity. If the page is taller than the viewport, scroll within it first, then scroll again at the corresponding edge to turn the page. A new page opens at its top. Ctrl + wheel still zooms, and scrolling over the notes panel does not turn the PDF page.
 
 Use this mode when you want to concentrate on a single slide, annotate it, or read its associated notes.
 
@@ -619,7 +619,7 @@ Q: What is the function of mitochondria?
 A: ATP production through cellular respiration.
 ```
 
-Write these patterns in the notes associated with your document, then open the Flashcards trainer. Text inside code and LaTeX is ignored, so `std::vector` or `$a::b$` never creates a card; a code block inside an answer is kept as part of that answer.
+Write these patterns in the notes associated with your document, then open the Flashcards trainer. Separators inside code and LaTeX are ignored, so `std::vector` or `$a::b$` alone never creates a card. You can still use Markdown and math in a card, for example `` `word` :: Definition `` or `$x^2$ :: Square`. Preview displays the same recognized cards as styled callouts, including fenced code and display math in Q/A answers.
 
 ### Reviewing cards
 
