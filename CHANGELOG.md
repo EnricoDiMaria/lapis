@@ -5,6 +5,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Detect same-size external PDF edits using a content checksum. Keep untouched native annotations and acknowledge an external revision after its annotations have been imported and backed up. Validate page rewrites and check for competing changes before publication.
+- Discard pending image pastes after a document or page change. Preserve the previous export if the source changes during export.
+- Keep the previous recording, transcript, and index until a replacement audio import, trim, or silence removal is ready to publish. Save deletions to the index before removing the associated audio file.
+- Require confirmation before deleting a custom page with sketch or memo content. Clear PDF undo history when page numbering changes and recover interrupted audio-index remaps when reopening a PDF.
+
 ### Development
 
 - Isolated disk-backed tests from installed app data and other tests on Linux and Windows.

@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,6 +68,24 @@ pub struct AudioDocIndex {
     pub next_lecture_id: usize,
 }
 
+// Keep the ready-to-publish index beside the current one. Its revision fields are
+// ignored by the ordinary index reader after the atomic rename.
+#[derive(Serialize, Deserialize)]
+struct AudioPageRevisions {
+    source_pdf_digest: String,
+    rewritten_pdf_digest: String,
+}
+
+#[derive(Serialize)]
+struct PendingAudioPageChange {
+    #[serde(flatten)]
+    revisions: AudioPageRevisions,
+    #[serde(flatten)]
+    index: AudioDocIndex,
+}
+
+const PENDING_PAGE_CHANGE: &str = "audio_index.page-change.json";
+
 fn default_next_lecture_id() -> usize {
     2
 }
@@ -113,6 +132,7 @@ impl AudioDocIndex {
             return Err("No document for the audio index".into());
         }
 
+        Self::recover_page_change(pdf_path).map_err(|err| err.to_string())?;
         let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
 
         let mut to_save = self.clone();
@@ -124,6 +144,74 @@ impl AudioDocIndex {
 
         let json = serde_json::to_string_pretty(&to_save).map_err(|e| e.to_string())?;
         crate::paths::write_atomic(&index_path, json.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn stage_page_change(
+        &self,
+        pdf_path: &Path,
+        change: crate::notes::PageChange,
+        original_pages: u32,
+        source_pdf_digest: &str,
+        rewritten_pdf_digest: &str,
+    ) -> io::Result<bool> {
+        if self.page_memos.is_empty()
+            && self.timeline.is_empty()
+            && self.page_range.is_none()
+            && self.segments.is_empty()
+            && self.other_lectures.iter().all(|lecture| {
+                lecture.timeline.is_empty()
+                    && lecture.page_range.is_none()
+                    && lecture.segments.is_empty()
+            })
+        {
+            return Ok(false);
+        }
+        Self::recover_page_change(pdf_path)?;
+        let mut index = self.clone();
+        index.remap_pages(change, original_pages);
+        index.ensure_lecture_ids();
+        index.source_path =
+            Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
+        let pending = PendingAudioPageChange {
+            revisions: AudioPageRevisions {
+                source_pdf_digest: source_pdf_digest.into(),
+                rewritten_pdf_digest: rewritten_pdf_digest.into(),
+            },
+            index,
+        };
+        let path = Self::media_dir_for_pdf(pdf_path).join(PENDING_PAGE_CHANGE);
+        crate::paths::write_atomic(&path, &serde_json::to_vec(&pending)?)?;
+        Ok(true)
+    }
+
+    pub(crate) fn discard_staged_page_change(pdf_path: &Path) {
+        let path = Self::media_dir_for_pdf(pdf_path).join(PENDING_PAGE_CHANGE);
+        if let Err(err) = fs::remove_file(&path) {
+            eprintln!("Lapis: could not discard {}: {err}", path.display());
+        }
+    }
+
+    pub(crate) fn recover_page_change(pdf_path: &Path) -> io::Result<()> {
+        let dir = Self::media_dir_for_pdf(pdf_path);
+        let stage = dir.join(PENDING_PAGE_CHANGE);
+        let bytes = match fs::read(&stage) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        let pending: AudioPageRevisions = serde_json::from_slice(&bytes)?;
+        let digest = crate::notes::current_pdf_digest(pdf_path)?;
+        if digest == pending.rewritten_pdf_digest {
+            serde_json::from_slice::<AudioDocIndex>(&bytes)?;
+            return crate::paths::replace_file(&stage, &dir.join("audio_index.json"));
+        }
+        if digest == pending.source_pdf_digest {
+            return fs::remove_file(stage);
+        }
+        Err(io::Error::other(format!(
+            "The PDF changed before its audio page mapping could be recovered. The pending index is kept at {}.",
+            stage.display(),
+        )))
     }
 
     /// Match the actual recording, not its mutable position in a page's memo list.
@@ -264,20 +352,17 @@ impl AudioDocIndex {
             self.lecture_id = self.allocate_lecture_id();
         }
     }
-    pub fn fresh_wav_name(&self) -> String {
-        let used: HashSet<&str> = self
-            .lecture_wav
-            .iter()
-            .map(String::as_str)
-            .chain(self.other_lectures.iter().filter_map(|l| l.wav.as_deref()))
-            .collect();
-        if !used.contains("lecture.wav") {
-            return "lecture.wav".into();
-        }
-        (2..)
-            .map(|n| format!("lecture_{n}.wav"))
-            .find(|n| !used.contains(n.as_str()))
-            .unwrap()
+    pub fn references_wav(&self, name: &str) -> bool {
+        self.lecture_wav.as_deref() == Some(name)
+            || self
+                .other_lectures
+                .iter()
+                .any(|lecture| lecture.wav.as_deref() == Some(name))
+            || self
+                .page_memos
+                .values()
+                .flatten()
+                .any(|memo| memo.filename == name)
     }
     pub fn active_covers(&self, page: u32) -> bool {
         self.lecture_wav.is_some() && self.page_range.is_none_or(|(a, b)| (a..=b).contains(&page))
@@ -290,33 +375,48 @@ impl AudioDocIndex {
             l.wav.is_some() && l.page_range.is_some_and(|(a, b)| (a..=b).contains(&page))
         })
     }
-    /// Applica `f` a tutte le pagine di tutte le lezioni (inserimento/eliminazione/riordino pagine).
-    pub fn for_each_page_mut(&mut self, mut f: impl FnMut(&mut u32)) {
-        fn fix(r: &mut Option<(u32, u32)>, f: &mut impl FnMut(&mut u32)) {
-            if let Some((a, b)) = r {
-                f(a);
-                f(b);
-                if *a > *b {
-                    std::mem::swap(a, b);
+    pub(crate) fn remap_pages(&mut self, change: crate::notes::PageChange, original_pages: u32) {
+        let map = |page| {
+            if (1..=original_pages).contains(&page) {
+                change.map(page)
+            } else {
+                None
+            }
+        };
+        let remap = |timeline: &mut Vec<(u64, u32)>,
+                     segments: &mut [TranscriptSegment],
+                     range: &mut Option<(u32, u32)>| {
+            timeline.retain_mut(|(_, page)| {
+                if let Some(mapped) = map(*page) {
+                    *page = mapped;
+                    true
+                } else {
+                    false
                 }
+            });
+            for segment in segments {
+                segment.page = map(segment.page).unwrap_or(0);
             }
+            *range = range.and_then(|(start, end)| {
+                let mut pages = (start.max(1)..=end.min(original_pages)).filter_map(map);
+                let first = pages.next()?;
+                Some(pages.fold((first, first), |(min, max), page| {
+                    (min.min(page), max.max(page))
+                }))
+            });
+        };
+        remap(&mut self.timeline, &mut self.segments, &mut self.page_range);
+        for lecture in &mut self.other_lectures {
+            remap(
+                &mut lecture.timeline,
+                &mut lecture.segments,
+                &mut lecture.page_range,
+            );
         }
-        for (_, p) in &mut self.timeline {
-            f(p);
-        }
-        for s in &mut self.segments {
-            f(&mut s.page);
-        }
-        fix(&mut self.page_range, &mut f);
-        for l in &mut self.other_lectures {
-            for (_, p) in &mut l.timeline {
-                f(p);
-            }
-            for s in &mut l.segments {
-                f(&mut s.page);
-            }
-            fix(&mut l.page_range, &mut f);
-        }
+        self.page_memos = std::mem::take(&mut self.page_memos)
+            .into_iter()
+            .filter_map(|(page, memos)| map(page).map(|page| (page, memos)))
+            .collect();
     }
 
     /// Shifts timeline markers and transcript segments after trimming the lecture audio to `[start_ms, end_ms]`.
@@ -599,27 +699,34 @@ impl AudioEngine {
     }
 
     /// Finalize the raw file first. If conversion fails, keep and use the raw WAV.
-    pub fn stop_recording(&mut self, final_wav_path: &Path) -> Result<(RecordingTarget, PathBuf, u64), String> {
+    pub fn stop_recording(
+        &mut self,
+        final_wav_path: &Path,
+    ) -> Result<(RecordingTarget, PathBuf, u64), String> {
         self.rec_stream.take();
         let target = self.rec_target.take().ok_or("No active recording")?;
         let raw_path = self.rec_raw_path.take().ok_or("Recording path missing")?;
         self.rec_start_instant = None;
         let finalize = (|| {
-            let mut guard = self.rec_writer.lock().map_err(|_| "Recording writer lock failed".to_string())?;
+            let mut guard = self
+                .rec_writer
+                .lock()
+                .map_err(|_| "Recording writer lock failed".to_string())?;
             let writer = guard.take().ok_or("Recording writer missing")?;
             writer.finalize().map_err(|e| e.to_string())
         })();
         if let Err(err) = finalize {
-            return Err(format!("Could not finalize recording: {err}. Raw file kept at {}", raw_path.display()));
+            return Err(format!(
+                "Could not finalize recording: {err}. Raw file kept at {}",
+                raw_path.display()
+            ));
         }
-        let raw_duration = wav_duration_ms(&raw_path).ok_or_else(||
-            format!("Could not read recording; raw file kept at {}", raw_path.display()))?;
+        let raw_duration = validate_and_sync_wav(&raw_path)
+            .map_err(|err| format!("{err}. Raw file kept at {}", raw_path.display()))?;
 
         // The destination is newly allocated; never convert over an existing recording.
         if !final_wav_path.exists() {
-            if let Ok(dur) = convert_media_to_16k_wav(&raw_path, final_wav_path)
-                && wav_duration_ms(final_wav_path).is_some()
-            {
+            if let Ok(dur) = convert_media_to_16k_wav(&raw_path, final_wav_path) {
                 let _ = fs::remove_file(&raw_path);
                 return Ok((target, final_wav_path.to_path_buf(), dur));
             }
@@ -842,19 +949,10 @@ fn stretched_cache_path(input: &Path, speed: f32) -> PathBuf {
 /// Converts any audio/video file (.mp4, .mkv, .mp3, .m4a, .wav, .ogg) into 16kHz Mono 16-bit PCM WAV.
 pub fn convert_media_to_16k_wav(input: &Path, output_wav: &Path) -> Result<u64, String> {
     let status = crate::sysproc::ffmpeg()
-        .args([
-            "-y",
-            "-i",
-            &input.to_string_lossy(),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            &output_wav.to_string_lossy(),
-        ])
+        .args(["-n", "-i"])
+        .arg(input)
+        .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        .arg(output_wav)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -864,7 +962,42 @@ pub fn convert_media_to_16k_wav(input: &Path, output_wav: &Path) -> Result<u64, 
     if !status.success() {
         return Err("ffmpeg conversion failed".to_string());
     }
-    Ok(wav_duration_ms(output_wav).unwrap_or(0))
+    validate_and_sync_wav(output_wav)
+}
+
+fn validate_and_sync_wav(path: &Path) -> Result<u64, String> {
+    let mut reader = hound::WavReader::open(path).map_err(|err| err.to_string())?;
+    let spec = reader.spec();
+    let frames = reader.duration();
+    if frames == 0 || spec.sample_rate == 0 || spec.channels == 0 {
+        return Err("The WAV contains no audio".into());
+    }
+    // Hound reads the frame count from the header. Read the last full frame as well.
+    reader.seek(frames - 1).map_err(|err| err.to_string())?;
+    let read_last_frame = |samples: &mut dyn Iterator<Item = Result<(), hound::Error>>| {
+        for _ in 0..spec.channels {
+            samples
+                .next()
+                .ok_or("The WAV ends before the final frame")?
+                .map_err(|err| err.to_string())?;
+        }
+        Ok::<_, String>(())
+    };
+    match spec.sample_format {
+        hound::SampleFormat::Int => {
+            read_last_frame(&mut reader.samples::<i32>().map(|s| s.map(drop)))?
+        }
+        hound::SampleFormat::Float => {
+            read_last_frame(&mut reader.samples::<f32>().map(|s| s.map(drop)))?
+        }
+    }
+    drop(reader);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|err| err.to_string())?;
+    Ok(u64::from(frames) * 1000 / u64::from(spec.sample_rate))
 }
 
 fn wav_duration_ms(wav_path: &Path) -> Option<u64> {
@@ -1639,14 +1772,21 @@ pub fn align_segments_to_slides(
     (segments, timeline)
 }
 
-/// Trims a WAV file in-place to the interval `[start_ms, end_ms]` and returns the new duration in ms.
-pub fn trim_wav_file(wav_path: &Path, start_ms: u64, end_ms: u64) -> Result<u64, String> {
+/// Write the selected interval to a new WAV.
+pub fn trim_wav_file(
+    wav_path: &Path,
+    output: &Path,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<u64, String> {
     if end_ms <= start_ms {
         return Err("End time must be greater than start time".to_string());
     }
 
-    let tmp_path = wav_path.with_extension("trim_tmp.wav");
-    {
+    if output.exists() {
+        return Err("The trim destination already exists".into());
+    }
+    let result = (|| {
         let mut reader = hound::WavReader::open(wav_path).map_err(|e| e.to_string())?;
         let spec = reader.spec();
         let sr = spec.sample_rate as u64;
@@ -1654,28 +1794,38 @@ pub fn trim_wav_file(wav_path: &Path, start_ms: u64, end_ms: u64) -> Result<u64,
 
         // Seek directly to the first frame instead of decoding the preamble.
         let start_frame = (start_ms * sr) / 1000;
-        let n_samples = ((((end_ms - start_ms) * sr) / 1000) * ch) as usize;
+        let end_frame = (end_ms * sr / 1000).min(u64::from(reader.duration()));
+        if start_frame >= end_frame {
+            return Err("The selected interval contains no audio".into());
+        }
+        let n_samples = ((end_frame - start_frame) * ch) as usize;
         reader.seek(start_frame as u32).map_err(|e| e.to_string())?;
 
-        let mut writer = hound::WavWriter::create(&tmp_path, spec).map_err(|e| e.to_string())?;
+        let mut writer = hound::WavWriter::create(output, spec).map_err(|e| e.to_string())?;
 
         match spec.sample_format {
             hound::SampleFormat::Int => {
-                for s in reader.samples::<i16>().take(n_samples).flatten() {
-                    let _ = writer.write_sample(s);
+                for sample in reader.samples::<i32>().take(n_samples) {
+                    writer
+                        .write_sample(sample.map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
                 }
             }
             hound::SampleFormat::Float => {
-                for s in reader.samples::<f32>().take(n_samples).flatten() {
-                    let _ = writer.write_sample(s);
+                for sample in reader.samples::<f32>().take(n_samples) {
+                    writer
+                        .write_sample(sample.map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
         writer.finalize().map_err(|e| e.to_string())?;
+        validate_and_sync_wav(output)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(output);
     }
-
-    fs::rename(&tmp_path, wav_path).map_err(|e| e.to_string())?;
-    Ok(wav_duration_ms(wav_path).unwrap_or(end_ms - start_ms))
+    result
 }
 /// Computes `num_bins` (e.g. 240) normalized amplitude peaks in `[0.0, 1.0]` for fast UI waveform rendering.
 pub fn compute_waveform_peaks(wav_path: &Path, num_bins: usize) -> Vec<f32> {
@@ -1745,6 +1895,7 @@ pub fn compute_waveform_peaks(wav_path: &Path, num_bins: usize) -> Vec<f32> {
 /// and remaps slide markers and transcript timestamps onto the compacted audio.
 pub fn strip_silences_from_lecture(
     wav_path: &Path,
+    output: &Path,
     index: &mut AudioDocIndex,
     min_silence_ms: u64,
 ) -> Result<(u64, u64), String> {
@@ -1754,13 +1905,21 @@ pub fn strip_silences_from_lecture(
     let ch = (spec.channels as usize).max(1);
 
     let all_samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => reader.samples::<i16>().filter_map(Result::ok).collect(),
+        hound::SampleFormat::Int => reader
+            .samples::<i32>()
+            .map(|sample| {
+                sample.map(|sample| {
+                    (sample >> spec.bits_per_sample.saturating_sub(16)
+                        << 16u16.saturating_sub(spec.bits_per_sample)) as i16
+                })
+            })
+            .collect::<Result<_, _>>(),
         hound::SampleFormat::Float => reader
             .samples::<f32>()
-            .filter_map(Result::ok)
-            .map(|f| (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect(),
-    };
+            .map(|sample| sample.map(|f| (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16))
+            .collect::<Result<_, _>>(),
+    }
+    .map_err(|err| err.to_string())?;
 
     let old_dur_ms = ((all_samples.len() / ch) as u64 * 1000) / (sr as u64);
     if old_dur_ms < 3000 {
@@ -1842,19 +2001,30 @@ pub fn strip_silences_from_lecture(
     }
 
     // Write compacted WAV file
-    let tmp_path = wav_path.with_extension("vad_tmp.wav");
-    {
-        let mut writer = hound::WavWriter::create(&tmp_path, spec).map_err(|e| e.to_string())?;
+    if output.exists() {
+        return Err("The silence removal destination already exists".into());
+    }
+    let write_result = (|| {
+        let out_spec = hound::WavSpec {
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+            ..spec
+        };
+        let mut writer = hound::WavWriter::create(output, out_spec).map_err(|e| e.to_string())?;
         for &(old_s, old_e, _) in &kept_intervals {
             let s_idx = ((old_s as usize) * sr * ch) / 1000;
             let e_idx = (((old_e as usize) * sr * ch) / 1000).min(all_samples.len());
             for &sample in &all_samples[s_idx..e_idx] {
-                let _ = writer.write_sample(sample);
+                writer.write_sample(sample).map_err(|e| e.to_string())?;
             }
         }
         writer.finalize().map_err(|e| e.to_string())?;
+        validate_and_sync_wav(output)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(output);
     }
-    fs::rename(&tmp_path, wav_path).map_err(|e| e.to_string())?;
+    let new_duration = write_result?;
 
     // Helper closure to remap any old timestamp `t_ms` onto the compacted timeline
     let remap_ts = |t_ms: u64| -> u64 {
@@ -1872,15 +2042,16 @@ pub fn strip_silences_from_lecture(
     for (ts, _) in &mut index.timeline {
         *ts = remap_ts(*ts);
     }
-    for seg in &mut index.segments {
+    index.segments.retain_mut(|seg| {
         seg.start_ms = remap_ts(seg.start_ms);
-        seg.end_ms = remap_ts(seg.end_ms).max(seg.start_ms + 100);
-    }
+        seg.end_ms = remap_ts(seg.end_ms).min(new_duration);
+        seg.end_ms > seg.start_ms
+    });
 
-    index.lecture_duration_ms = new_accum_ms;
-    index.waveform_peaks = compute_waveform_peaks(wav_path, 240);
+    index.lecture_duration_ms = new_duration;
+    index.waveform_peaks = compute_waveform_peaks(output, 240);
 
-    Ok((old_dur_ms, new_accum_ms))
+    Ok((old_dur_ms, new_duration))
 }
 
 #[cfg(test)]

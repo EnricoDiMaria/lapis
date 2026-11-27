@@ -128,10 +128,23 @@ pub fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Atomic replace. Windows may briefly deny the rename (viewer, indexer or antivirus handle),
 /// so retry a few times there; the directory is synced on Unix to persist the rename.
 pub fn replace_file(tmp: &Path, dest: &Path) -> io::Result<()> {
+    replace_file_checked(tmp, dest, || Ok(()))
+}
+
+pub(crate) fn replace_file_checked(
+    tmp: &Path,
+    dest: &Path,
+    mut check: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
     let mut attempt = 0u64;
     loop {
+        check()?;
         match fs::rename(tmp, dest) {
-            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied && attempt < 5 => {
+            Err(err)
+                if cfg!(windows)
+                    && err.kind() == io::ErrorKind::PermissionDenied
+                    && attempt < 5 =>
+            {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
             }

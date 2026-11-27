@@ -2821,6 +2821,45 @@ fn export_vector(
     Ok(())
 }
 
+pub(crate) fn publish_export(
+    source: &Path,
+    output: &Path,
+    expected: &crate::notes::PdfStamp,
+    observed_digest: Option<&str>,
+    export: impl FnOnce(&Path) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let staged = output.with_file_name(format!(".lapis-export-{}.pdf", crate::docid::new_id()));
+    let result = (|| {
+        let check_source = || {
+            if &crate::notes::pdf_stamp(source)? != expected {
+                return Err(std::io::Error::other(
+                    "The source PDF changed during export. Export again.",
+                ));
+            }
+            Ok(())
+        };
+        check_source()?;
+        if let Some(digest) = observed_digest
+            && crate::notes::current_pdf_digest(source)? != digest
+        {
+            return Err(std::io::Error::other(
+                "The source PDF changed since it was opened. Save to merge changes or reopen it before exporting.",
+            ).into());
+        }
+        export(&staged)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)?
+            .sync_all()?;
+        crate::paths::replace_file_checked(&staged, output, check_source)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
+
 pub fn export_slides_with_notes(
     source_pdf: &Path,
     output_pdf: &Path,
@@ -2960,6 +2999,7 @@ mod tests {
             bold: false,
             italic: false,
             stroke_width: width,
+            native_source: None,
         }
     }
 
@@ -3133,6 +3173,46 @@ mod tests {
         let fb_sizes = page_sizes(&fb);
         assert_eq!(fb_sizes.len(), 3);
         assert!(fb_sizes.iter().all(|s| *s == (960.0, 540.0)));
+    }
+
+    #[test]
+    fn export_keeps_previous_output_if_source_changes_during_the_job() {
+        use std::io::Write as _;
+
+        let root = isolated_dir!(export_keeps_previous_output_if_source_changes_during_the_job);
+        let source = root.join("source.pdf");
+        let output = root.join("output.pdf");
+        sample_pdf(&source);
+        std::fs::write(&output, b"previous export").unwrap();
+        let expected = crate::notes::pdf_stamp(&source).unwrap();
+        let observed = crate::notes::current_pdf_digest(&source).unwrap();
+        let result = publish_export(&source, &output, &expected, None, |staged| {
+            std::fs::copy(&source, staged)?;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&source)?
+                .write_all(b"\n")?;
+            Ok(())
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("changed during export")
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous export");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        let current_stamp = crate::notes::pdf_stamp(&source).unwrap();
+        let result = publish_export(&source, &output, &current_stamp, Some(&observed), |_| {
+            panic!("A stale study snapshot was passed to the exporter");
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("changed since it was opened")
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous export");
     }
 
     // ───────────────────────────── sketches in the export ─────────────────────────────

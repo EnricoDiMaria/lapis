@@ -222,7 +222,11 @@ fn write_audio_index(dir: &Path, idx: &audio::AudioDocIndex) -> std::io::Result<
 /// Removes an audio file only if in the media folder of the file
 fn remove_media_file(dir: &Path, name: &str) -> std::io::Result<()> {
     let full = resolve_media_file(dir, name);
-    if !full.starts_with(dir) {
+    if !full.strip_prefix(dir).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    }) {
         return Ok(());
     }
     match std::fs::remove_file(&full) {
@@ -407,19 +411,17 @@ fn storage_delete_lecture(en: &StorageEntry) -> std::io::Result<()> {
     let Some(dir) = &en.media_dir else {
         return Ok(());
     };
+    if let Some(pdf) = en.pdf_path.as_deref() {
+        AudioDocIndex::recover_page_change(pdf)?;
+    }
     let Some(mut idx) = read_audio_index(dir) else {
         return Ok(());
     };
-    if let Some(w) = idx.lecture_wav.take() {
-        remove_media_file(dir, &w)?;
-    }
-    for l in &idx.other_lectures {
-        if let Some(w) = &l.wav {
-            remove_media_file(dir, w)?;
-        }
-    }
-    idx.other_lectures.clear();
-    remove_media_file(dir, "lecture_raw.wav")?;
+    let removed = idx.lecture_wav.take().into_iter().chain(
+        std::mem::take(&mut idx.other_lectures)
+            .into_iter()
+            .filter_map(|lecture| lecture.wav),
+    );
     idx.lecture_title.clear();
     idx.lecture_duration_ms = 0;
     idx.page_range = None;
@@ -427,7 +429,13 @@ fn storage_delete_lecture(en: &StorageEntry) -> std::io::Result<()> {
     idx.timeline_is_live = false;
     idx.segments.clear();
     idx.waveform_peaks.clear();
-    write_audio_index(dir, &idx)
+    write_audio_index(dir, &idx)?;
+    for wav in removed {
+        if !idx.references_wav(&wav) {
+            remove_media_file(dir, &wav)?;
+        }
+    }
+    Ok(())
 }
 
 /// Delete all voice memos (files + index entries). The lesson remains.
@@ -435,14 +443,20 @@ fn storage_delete_memos(en: &StorageEntry) -> std::io::Result<()> {
     let Some(dir) = &en.media_dir else {
         return Ok(());
     };
+    if let Some(pdf) = en.pdf_path.as_deref() {
+        AudioDocIndex::recover_page_change(pdf)?;
+    }
     let Some(mut idx) = read_audio_index(dir) else {
         return Ok(());
     };
-    for memo in idx.page_memos.values().flatten() {
-        remove_media_file(dir, &memo.filename)?;
+    let removed = std::mem::take(&mut idx.page_memos);
+    write_audio_index(dir, &idx)?;
+    for memo in removed.values().flatten() {
+        if !idx.references_wav(&memo.filename) {
+            remove_media_file(dir, &memo.filename)?;
+        }
     }
-    idx.page_memos.clear();
-    write_audio_index(dir, &idx)
+    Ok(())
 }
 
 fn storage_delete_leftovers(en: &StorageEntry) -> std::io::Result<()> {
@@ -1715,6 +1729,7 @@ struct Lapis {
     audio_engine: AudioEngine,
     memo_audio_engine: AudioEngine,
     audio_index: AudioDocIndex,
+    recording_timeline: Vec<(u64, u32)>,
     asr_rx: Receiver<audio::AsrJobResult>,
     audio_index_pending: bool,
     asr_cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -1940,6 +1955,7 @@ impl Lapis {
             audio_engine: AudioEngine::new(),
             memo_audio_engine: AudioEngine::new(),
             audio_index: AudioDocIndex::default(),
+            recording_timeline: Vec::new(),
             asr_rx,
             audio_index_pending: false,
             asr_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2386,11 +2402,7 @@ impl Lapis {
         self.single_page_wheel = SinglePageWheel::default();
         self.sync_and_save();
 
-        if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
-            let ts = self.audio_engine.recording_elapsed_ms();
-            self.audio_index.timeline.push((ts, page));
-            self.audio_index.save(&self.pdf_path);
-        }
+        self.record_lecture_page(page);
 
         self.current_page = page;
         // Reading position belongs to state.json, not to the PDF's annotation payload.
@@ -2732,7 +2744,10 @@ impl Lapis {
 
     /// Page edits rebuild the PDF from the local backup, so it must be current first.
     fn checkpoint_before_structure_change(&mut self) -> bool {
-        match self.sync_local_checkpoint() {
+        let checkpoint = self
+            .sync_local_checkpoint()
+            .and_then(|()| AudioDocIndex::recover_page_change(&self.pdf_path));
+        match checkpoint {
             Ok(()) => true,
             Err(err) => {
                 self.toast_message = Some((
@@ -2744,13 +2759,15 @@ impl Lapis {
         }
     }
 
-    /// Another program appended to the PDF: import its annotations into the live model,
-    /// checkpoint them, then record the new length so the next commit may proceed.
+    /// Checkpoint the imported annotations before acknowledging the source revision.
     fn merge_external_into_model(&mut self) -> std::io::Result<()> {
         self.finish_sketch_edit();
-        notes::merge_external_annotations(&self.pdf_path, &mut self.annotations);
+        let observed = notes::merge_external_annotations(&self.pdf_path, &mut self.annotations)?;
         self.sync_local_checkpoint()?;
-        notes::mark_pdf_observed(&self.pdf_path)
+        notes::mark_pdf_observed(&self.pdf_path, observed)?;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        Ok(())
     }
 
     fn sync_local_checkpoint(&mut self) -> std::io::Result<()> {
@@ -2789,6 +2806,10 @@ impl Lapis {
             return;
         }
         self.save_session_state();
+        if let Err(err) = AudioDocIndex::recover_page_change(&self.pdf_path) {
+            self.pdf_save_failed(after, format!("Could not recover the audio page mapping: {err}"), true);
+            return;
+        }
         let path = self.pdf_path.clone();
         let snapshot = match notes::prepare_pdf_commit(
             &path, &self.notes, &self.annotations, self.blank_pages.clone(), &self.sketches,
@@ -3059,6 +3080,14 @@ impl Lapis {
             return;
         }
 
+        let source_stamp = match notes::pdf_stamp(&self.pdf_path) {
+            Ok(stamp) => stamp,
+            Err(err) => {
+                self.audio_toast(format!("Could not read the PDF for export: {err}"));
+                return;
+            }
+        };
+        self.finish_sketch_edit();
         self.sync_and_save();
         self.is_exporting = true;
         self.toast_message = Some((" Exporting...".to_string(), std::time::Instant::now()));
@@ -3073,6 +3102,7 @@ impl Lapis {
         ));
 
         let source_path = self.pdf_path.clone();
+        let observed_digest = notes::observed_pdf_digest(&source_path);
         let notes_snapshot = self.notes.clone();
         let tx = self.export_tx.clone();
         let export_ctx = ctx.clone();
@@ -3087,14 +3117,22 @@ impl Lapis {
         };
 
         thread::spawn(move || {
-            let res = export::export_slides_with_notes(
+            let res = export::publish_export(
                 &source_path,
                 &out_path,
-                &notes_snapshot,
-                &annotations,
-                &sketches_snapshot,
-                &export_cfg,
-                &hidden_cfg,
+                &source_stamp,
+                observed_digest.as_deref(),
+                |staged| {
+                    export::export_slides_with_notes(
+                        &source_path,
+                        staged,
+                        &notes_snapshot,
+                        &annotations,
+                        &sketches_snapshot,
+                        &export_cfg,
+                        &hidden_cfg,
+                    )
+                },
             );
             match res {
                 Ok(_) => {
@@ -3933,7 +3971,12 @@ impl Lapis {
                 return false;
             }
         };
-        if !same_doc && !self.finish_audio_before_transition() {
+        if let Err(err) = AudioDocIndex::recover_page_change(&path) {
+            self.audio_toast(format!("Could not open the PDF's audio index: {err}"));
+            ctx.request_repaint();
+            return false;
+        }
+        if !self.finish_audio_before_transition() {
             ctx.request_repaint();
             return false;
         }
@@ -3949,6 +3992,7 @@ impl Lapis {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
 
+        self.invalidate_page_jobs();
         self.single_page_wheel = SinglePageWheel::default();
         let doc_data = notes::load_doc_data(&path);
         self.notes = doc_data.notes;
@@ -4089,6 +4133,7 @@ impl Lapis {
         // (other windows get "already open" and the storage cleanup stays disabled).
         self.doc_lock = None;
 
+        self.invalidate_page_jobs();
         self.pdf_path = PathBuf::new();
         self.pdf_name.clear();
         self.texture_handle = None;
@@ -4618,6 +4663,7 @@ impl Lapis {
                     bold: self.textbox_bold,
                     italic: self.textbox_italic,
                     stroke_width: self.stroke_width,
+                    native_source: None,
                 };
                 self.commit_annotation_color(ann.kind, ann.color);
                 let list = self.annotations.entry(page).or_default();
@@ -5995,6 +6041,7 @@ impl Lapis {
                             bold: false,
                             italic: false,
                             stroke_width: self.stroke_width,
+                            native_source: None,
                         });
                     }
                 } else if active_move {
@@ -7287,10 +7334,10 @@ impl Lapis {
                                                             self.finish_sketch_edit();
                                                             self.sync_and_save();
                                                             self.save_session_state();
-                                                            let result = notes::compact_doc_data(
+                                                            let result = AudioDocIndex::recover_page_change(&self.pdf_path).and_then(|()| notes::compact_doc_data(
                                                                 &self.pdf_path, &self.notes, &self.annotations,
                                                                 self.blank_pages.clone(), &self.sketches,
-                                                            );
+                                                            ));
                                                             self.toast_message = Some((
                                                                 match result {
                                                                     Ok(()) => "󰄬 PDF history compacted (backup preserved)".to_string(),
@@ -8614,6 +8661,31 @@ let state_path = crate::state::AppState::config_path();
         Ok(())
     }
 
+    fn publish_audio_index(
+        &mut self,
+        index: AudioDocIndex,
+        media_dir: &Path,
+        retired: Option<&str>,
+    ) -> Result<(), String> {
+        index.save_checked(&self.pdf_path)?;
+        self.audio_index = index;
+        self.audio_index_pending = false;
+        if let Some(name) = retired
+            && !self.audio_index.references_wav(name)
+            && let Err(err) = remove_media_file(media_dir, name)
+        {
+            eprintln!("Lapis: could not remove retired audio: {err}");
+        }
+        Ok(())
+    }
+
+    fn record_lecture_page(&mut self, page: u32) {
+        if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
+            self.recording_timeline
+                .push((self.audio_engine.recording_elapsed_ms(), page));
+        }
+    }
+
     fn report_audio_index_result(&mut self, message: impl Into<String>) {
         match self.persist_audio_index() {
             Ok(()) => self.audio_toast(message),
@@ -8629,14 +8701,22 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn finish_active_recording(&mut self, media_dir: &Path) -> Result<(), String> {
-        let target = self.audio_engine.rec_target.clone().ok_or("No active recording")?;
+        let target = self
+            .audio_engine
+            .rec_target
+            .clone()
+            .ok_or("No active recording")?;
         let prefix = match target {
             RecordingTarget::Lecture => "lecture",
             RecordingTarget::PageMemo(_) => "memo",
         };
         let final_wav = audio::recording_path(media_dir, prefix);
         let (target, path, dur) = self.audio_engine.stop_recording(&final_wav)?;
-        let name = path.file_name().ok_or("Invalid recording filename")?.to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .ok_or("Invalid recording filename")?
+            .to_string_lossy()
+            .into_owned();
         let raw_fallback = path != final_wav;
         let mut replaced_lecture = None;
         match target {
@@ -8644,31 +8724,54 @@ let state_path = crate::state::AppState::config_path();
                 replaced_lecture = self.audio_index.lecture_wav.replace(name);
                 self.audio_index.lecture_duration_ms = dur;
                 self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&path, 240);
-                self.audio_index.page_range = self.audio_index.timeline.iter().map(|t| t.1).min()
+                self.audio_index.timeline = std::mem::take(&mut self.recording_timeline);
+                for (time, _) in &mut self.audio_index.timeline {
+                    *time = (*time).min(dur);
+                }
+                self.audio_index.timeline_is_live = true;
+                self.audio_index.segments.clear();
+                self.audio_index.page_range = self
+                    .audio_index
+                    .timeline
+                    .iter()
+                    .map(|t| t.1)
+                    .min()
                     .zip(self.audio_index.timeline.iter().map(|t| t.1).max());
             }
             RecordingTarget::PageMemo(page) => {
                 // The recording belongs to the page where the microphone was started.
                 let list = self.audio_index.page_memos.entry(page).or_default();
-                let id = (1..).map(|n| format!("Memo #{n}"))
-                    .find(|id| !list.iter().any(|m| &m.id == id)).unwrap();
+                let id = (1..)
+                    .map(|n| format!("Memo #{n}"))
+                    .find(|id| !list.iter().any(|m| &m.id == id))
+                    .unwrap();
                 list.push(audio::VoiceMemoEntry {
-                    id, filename: name, duration_ms: dur, transcript: None, title: None,
+                    id,
+                    filename: name,
+                    duration_ms: dur,
+                    transcript: None,
+                    title: None,
                 });
             }
         }
-        self.persist_audio_index()
-            .map_err(|err| format!("Recording kept at {}; audio index save failed: {err}", path.display()))?;
+        self.persist_audio_index().map_err(|err| {
+            format!(
+                "Recording kept at {}; audio index save failed: {err}",
+                path.display()
+            )
+        })?;
         if let Some(old) = replaced_lecture
-            && !self.audio_index.other_lectures.iter().any(|l| l.wav.as_deref() == Some(old.as_str()))
-            && !self.audio_index.page_memos.values().flatten().any(|m| m.filename == old)
+            && !self.audio_index.references_wav(&old)
         {
             // Remove the replaced recording only after the new one and its index are safe.
             let _ = remove_media_file(media_dir, &old);
         }
         self.preload_asr_model();
-        self.audio_toast(if raw_fallback { "Recording saved as raw WAV (conversion unavailable)" }
-            else { "Recording saved" });
+        self.audio_toast(if raw_fallback {
+            "Recording saved as raw WAV (conversion unavailable)"
+        } else {
+            "Recording saved"
+        });
         Ok(())
     }
 
@@ -8680,7 +8783,9 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn toggle_lecture_recording(&mut self, media_dir: &Path) {
-        if self.is_transcribing { return; }
+        if self.is_transcribing {
+            return;
+        }
         self.confirm_remove_lecture = false;
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
             if let Err(err) = self.finish_active_recording(media_dir) {
@@ -8694,12 +8799,7 @@ let state_path = crate::state::AppState::config_path();
                 .start_recording(raw_wav, RecordingTarget::Lecture)
             {
                 Ok(()) => {
-                    // Slide changes during recording become trusted live markers
-                    self.audio_index.segments.clear();
-                    self.audio_index.timeline.clear();
-                    self.audio_index.timeline.push((0, self.current_page));
-                    self.audio_index.timeline_is_live = true;
-                    self.audio_index.save(&self.pdf_path);
+                    self.recording_timeline = vec![(0, self.current_page)];
                 }
                 Err(e) => self.audio_toast(format!("󰅚 Mic error: {}", e)),
             }
@@ -8720,43 +8820,65 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn finish_import_lecture_media(&mut self, src_path: PathBuf, media_dir: &Path) {
-        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording()
+        if !self.has_pdf()
+            || self.is_transcribing
+            || self.audio_engine.is_recording()
             || AudioDocIndex::media_dir_for_pdf(&self.pdf_path) != media_dir
         {
             self.audio_toast("Audio import cancelled: document or recording changed");
             return;
         }
         self.confirm_remove_lecture = false;
-        let name = self
-            .audio_index
-            .lecture_wav
-            .clone()
-            .unwrap_or_else(|| self.audio_index.fresh_wav_name());
-        let out_wav = media_dir.join(&name);
-        self.audio_engine.stop_and_release();
-        match audio::convert_media_to_16k_wav(&src_path, &out_wav) {
+        let out_wav = audio::recording_path(media_dir, "lecture");
+        let result = (|| {
+            let duration = audio::convert_media_to_16k_wav(&src_path, &out_wav)?;
+            self.install_imported_lecture(media_dir, &out_wav, duration)?;
+            Ok::<_, String>(duration)
+        })();
+        match result {
             Ok(dur) => {
-                // A new track invalidates the old transcript and markers
-                let idx = &mut self.audio_index;
-                idx.lecture_wav = Some(name);
-                idx.lecture_duration_ms = dur;
-                idx.waveform_peaks = audio::compute_waveform_peaks(&out_wav, 240);
-                idx.segments.clear();
-                idx.timeline.clear();
-                idx.timeline_is_live = false;
-                idx.save(&self.pdf_path);
                 self.show_audio_trimmer = true;
                 self.trim_start_ms = 0;
                 self.trim_end_ms = dur;
                 self.trim_memo_target = None;
-                let _ = self
+                let playback = self
                     .audio_engine
                     .load_and_play(&out_wav, "Lecture".to_string(), 0);
                 self.preload_asr_model();
-                self.audio_toast("󰄬 Media converted and loaded!");
+                match playback {
+                    Ok(()) => self.audio_toast("󰄬 Lecture imported"),
+                    Err(err) => self
+                        .audio_toast(format!("Lecture imported. Playback could not start: {err}")),
+                }
             }
-            Err(e) => self.audio_toast(format!("󰅚 Conversion error: {}", e)),
+            Err(err) => {
+                let _ = std::fs::remove_file(&out_wav);
+                self.audio_toast(format!("󰅚 Lecture import failed: {err}"));
+            }
         }
+    }
+
+    fn install_imported_lecture(
+        &mut self,
+        media_dir: &Path,
+        wav: &Path,
+        duration: u64,
+    ) -> Result<(), String> {
+        let mut index = self.audio_index.clone();
+        let old = index.lecture_wav.replace(
+            wav.file_name()
+                .ok_or("Invalid WAV path")?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        index.lecture_duration_ms = duration;
+        index.waveform_peaks = audio::compute_waveform_peaks(wav, 240);
+        index.page_range = None;
+        index.segments.clear();
+        index.timeline.clear();
+        index.timeline_is_live = false;
+        self.audio_engine.stop_and_release();
+        self.publish_audio_index(index, media_dir, old.as_deref())
     }
 
     const AUDIO_BTN_SIZE: f32 = 22.0;
@@ -9498,22 +9620,42 @@ let state_path = crate::state::AppState::config_path();
         }
 
         if let Some(idx) = to_delete {
-            if let Some(list) = self.audio_index.page_memos.get_mut(&page)
-                && idx < list.len()
-            {
-                let removed = list.remove(idx);
-                let removed_path = media_dir.join(&removed.filename);
-                if self.memo_audio_engine.active_file.as_ref() == Some(&removed_path) {
-                    self.memo_audio_engine.stop_and_release();
+            match self.delete_memo_recording(&media_dir, page, idx) {
+                Ok(()) => {
+                    if self.rename_memo_target.is_some_and(|(p, target)| p == page && target >= idx) {
+                        self.rename_memo_target = None;
+                        self.rename_memo_text.clear();
+                    }
+                    if self.trim_memo_target.is_some_and(|(p, target)| p == page && target >= idx) {
+                        self.trim_memo_target = None;
+                        self.show_audio_trimmer = false;
+                    }
                 }
-                let _ = std::fs::remove_file(removed_path);
-                self.audio_index.save(&self.pdf_path);
-            }
-            if self.rename_memo_target == Some((page, idx)) {
-                self.rename_memo_target = None;
-                self.rename_memo_text.clear();
+                Err(err) => self.audio_toast(format!("Could not remove voice memo: {err}")),
             }
         }
+    }
+
+    fn delete_memo_recording(
+        &mut self,
+        media_dir: &Path,
+        page: u32,
+        memo: usize,
+    ) -> Result<(), String> {
+        let mut index = self.audio_index.clone();
+        let list = index
+            .page_memos
+            .get_mut(&page)
+            .filter(|list| memo < list.len())
+            .ok_or("The voice memo is no longer available")?;
+        let removed = list.remove(memo);
+        if list.is_empty() {
+            index.page_memos.remove(&page);
+        }
+        if self.memo_audio_engine.active_file.as_ref() == Some(&media_dir.join(&removed.filename)) {
+            self.memo_audio_engine.stop_and_release();
+        }
+        self.publish_audio_index(index, media_dir, Some(&removed.filename))
     }
 
     fn render_audio_body(&mut self, ui: &mut egui::Ui, media_dir: &Path) {
@@ -9843,32 +9985,13 @@ let state_path = crate::state::AppState::config_path();
 
                         if ui
                             .add_enabled(
-                                !busy,
+                                !busy && !self.audio_engine.is_recording(),
                                 egui::Button::new("󰖁").corner_radius(egui::CornerRadius::same(6)),
                             )
-                            .on_hover_text("Remove silences (timestamps preserved)")
+                            .on_hover_text("Remove silences and adjust timestamps")
                             .clicked()
                         {
-                            self.audio_engine.stop_and_release();
-                            match audio::strip_silences_from_lecture(
-                                &wav_path,
-                                &mut self.audio_index,
-                                1800,
-                            ) {
-                                Ok((old_d, new_d)) => {
-                                    self.audio_index.save(&self.pdf_path);
-                                    let _ = self.audio_engine.load_and_play(
-                                        &wav_path,
-                                        "Lecture".to_string(),
-                                        0,
-                                    );
-                                    self.audio_toast(format!(
-                                        "󰄬 Removed {}s of silence!",
-                                        old_d.saturating_sub(new_d) / 1000
-                                    ));
-                                }
-                                Err(e) => self.audio_toast(format!("󰅚 {}", e)),
-                            }
+                            self.remove_lecture_silence(media_dir, &wav_path);
                         }
 
                         if ui
@@ -9889,23 +10012,21 @@ let state_path = crate::state::AppState::config_path();
                             .clicked()
                         {
                             if self.confirm_remove_lecture {
+                                let mut index = self.audio_index.clone();
+                                let old = index.lecture_wav.clone();
+                                index.remove_active_lecture();
                                 self.audio_engine.stop_and_release();
-                                let remove_result = std::fs::remove_file(&wav_path);
-                                if remove_result.is_ok() || !wav_path.exists() {
-                                    let _ = std::fs::remove_file(media_dir.join("lecture_raw.wav"));
-                                    self.audio_index.remove_active_lecture();
-                                    self.audio_index.save(&self.pdf_path);
-                                    self.show_audio_trimmer = false;
-                                    self.trim_memo_target = None;
-                                    self.trim_start_ms = 0;
-                                    self.trim_end_ms = 0;
-                                    self.transcript_last_seg = None;
-                                    self.transcript_all = false;
-                                    self.audio_toast("Lesson audio removed");
-                                } else if let Err(err) = remove_result {
-                                    self.audio_toast(format!(
-                                        "Could not remove lesson audio: {err}"
-                                    ));
+                                match self.publish_audio_index(index, media_dir, old.as_deref()) {
+                                    Ok(()) => {
+                                        self.show_audio_trimmer = false;
+                                        self.trim_memo_target = None;
+                                        self.trim_start_ms = 0;
+                                        self.trim_end_ms = 0;
+                                        self.transcript_last_seg = None;
+                                        self.transcript_all = false;
+                                        self.audio_toast("Lesson audio removed");
+                                    }
+                                    Err(err) => self.audio_toast(format!("Could not remove lesson audio: {err}")),
                                 }
                                 self.confirm_remove_lecture = false;
                             } else {
@@ -10984,40 +11105,107 @@ let state_path = crate::state::AppState::config_path();
             });
     }
 
-    fn apply_audio_trim(&mut self, wav: &Path) {
-        if self.trim_memo_target.is_some() {
-            self.memo_audio_engine.stop_and_release();
-        } else {
+    fn remove_lecture_silence(&mut self, media_dir: &Path, wav: &Path) {
+        let output = audio::recording_path(media_dir, "lecture");
+        let mut index = self.audio_index.clone();
+        let old = index.lecture_wav.clone();
+        let result = (|| {
+            let (before, after) =
+                audio::strip_silences_from_lecture(wav, &output, &mut index, 1800)?;
+            index.lecture_wav = Some(output.file_name().unwrap().to_string_lossy().into_owned());
             self.audio_engine.stop_and_release();
-        }
-        match audio::trim_wav_file(wav, self.trim_start_ms, self.trim_end_ms) {
-            Ok(new_dur) => {
-                match self.trim_memo_target {
-                    None => {
-                        self.audio_index
-                            .apply_lecture_trim(self.trim_start_ms, self.trim_end_ms);
-                        self.audio_index.lecture_duration_ms = new_dur;
-                        self.audio_index.waveform_peaks = audio::compute_waveform_peaks(wav, 240);
-                        let _ = self
-                            .audio_engine
-                            .load_and_play(wav, "Lecture".to_string(), 0);
-                    }
-                    Some((p, idx)) => {
-                        if let Some(m) = self
-                            .audio_index
-                            .page_memos
-                            .get_mut(&p)
-                            .and_then(|v| v.get_mut(idx))
-                        {
-                            m.duration_ms = new_dur;
-                        }
-                    }
-                }
-                self.audio_index.save(&self.pdf_path);
+            self.publish_audio_index(index, media_dir, old.as_deref())?;
+            Ok::<_, String>((before, after))
+        })();
+        match result {
+            Ok((before, after)) => {
                 self.show_audio_trimmer = false;
-                self.audio_toast(format!("󰄬 Audio trimmed ({})", audio::format_ms(new_dur)));
+                self.transcript_last_seg = None;
+                let playback = self
+                    .audio_engine
+                    .load_and_play(&output, "Lecture".into(), 0);
+                if let Err(err) = playback {
+                    self.audio_toast(format!("Silence removed. Playback could not start: {err}"));
+                } else {
+                    self.audio_toast(format!(
+                        "󰄬 Removed {}s of silence",
+                        before.saturating_sub(after) / 1000
+                    ));
+                }
             }
-            Err(e) => self.audio_toast(format!("󰅚 Trim error: {}", e)),
+            Err(err) => {
+                let _ = std::fs::remove_file(&output);
+                self.audio_toast(format!("Could not remove silence: {err}"));
+            }
+        }
+    }
+
+    fn apply_audio_trim(&mut self, wav: &Path) {
+        if self.audio_engine.is_recording() || self.is_transcribing {
+            self.audio_toast("Finish recording or transcription before trimming audio");
+            return;
+        }
+        let media_dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
+        let prefix = if self.trim_memo_target.is_some() {
+            "memo"
+        } else {
+            "lecture"
+        };
+        let output = audio::recording_path(&media_dir, prefix);
+        let result = (|| {
+            let mut index = self.audio_index.clone();
+            let old = match self.trim_memo_target {
+                Some((page, idx)) => index
+                    .page_memos
+                    .get(&page)
+                    .and_then(|memos| memos.get(idx))
+                    .map(|memo| &memo.filename),
+                None => index.lecture_wav.as_ref(),
+            }
+            .filter(|name| media_dir.join(name) == wav)
+            .ok_or("The audio selected for trimming has changed")?
+            .clone();
+            let duration =
+                audio::trim_wav_file(wav, &output, self.trim_start_ms, self.trim_end_ms)?;
+            let new_name = output.file_name().unwrap().to_string_lossy().into_owned();
+            match self.trim_memo_target {
+                Some((page, idx)) => {
+                    let memo = &mut index.page_memos.get_mut(&page).unwrap()[idx];
+                    memo.filename = new_name;
+                    memo.duration_ms = duration;
+                    self.memo_audio_engine.stop_and_release();
+                }
+                None => {
+                    index.apply_lecture_trim(
+                        self.trim_start_ms,
+                        self.trim_start_ms.saturating_add(duration),
+                    );
+                    index.lecture_wav = Some(new_name);
+                    index.waveform_peaks = audio::compute_waveform_peaks(&output, 240);
+                    self.audio_engine.stop_and_release();
+                }
+            }
+            self.publish_audio_index(index, &media_dir, Some(&old))?;
+            Ok::<_, String>(duration)
+        })();
+        match result {
+            Ok(duration) => {
+                self.show_audio_trimmer = false;
+                self.transcript_last_seg = None;
+                if self.trim_memo_target.is_none()
+                    && let Err(err) = self
+                        .audio_engine
+                        .load_and_play(&output, "Lecture".into(), 0)
+                {
+                    self.audio_toast(format!("Audio trimmed. Playback could not start: {err}"));
+                } else {
+                    self.audio_toast(format!("󰄬 Audio trimmed ({})", audio::format_ms(duration)));
+                }
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&output);
+                self.audio_toast(format!("Trim error: {err}"));
+            }
         }
     }
 
@@ -11450,14 +11638,16 @@ let state_path = crate::state::AppState::config_path();
         }
         self.finish_sketch_edit();
         if !self.checkpoint_before_structure_change() { return; }
+        let original_pages = self.total_pages;
         // Release worker file handles before rewriting the PDF.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
 
         match notes::insert_blank_page_with_style_into_pdf(
-            &self.pdf_path, after_page, style, self.allow_signature_loss,
+            &self.pdf_path, after_page, style, self.allow_signature_loss, Some(&self.audio_index),
         ) {
             Ok(new_page_num) => {
+                self.invalidate_page_jobs();
                 notes::shift_doc_data_on_insert(
                     &mut self.notes,
                     &mut self.annotations,
@@ -11480,16 +11670,6 @@ let state_path = crate::state::AppState::config_path();
                         bm.page += 1;
                     }
                 }
-                self.audio_index.for_each_page_mut(|p| {
-                    if *p >= new_page_num {
-                        *p += 1
-                    }
-                });
-                self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
-                    .into_iter()
-                    .map(|(p, memos)| (if p >= new_page_num { p + 1 } else { p }, memos))
-                    .collect();
-                self.audio_index.save(&self.pdf_path);
 
                 // Keep the current note aligned with the updated PDF.
                 self.note_is_dirty = false;
@@ -11544,8 +11724,8 @@ let state_path = crate::state::AppState::config_path();
                 self.current_note = self.notes.get(&new_page_num).cloned().unwrap_or_default();
                 self.continuous_scroll_to_page = Some(new_page_num);
                 self.save_session_state();
-                self.toast_message =
-                    Some(("󰄬 Blank page added".to_string(), std::time::Instant::now()));
+                self.finish_audio_page_change(notes::PageChange::Insert(new_page_num), original_pages, "󰄬 Blank page added");
+
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
@@ -11564,7 +11744,20 @@ let state_path = crate::state::AppState::config_path();
     fn is_disposable_blank_page(&self, page: u32) -> bool {
         self.blank_pages.contains(&page)
             && self.annotations.get(&page).is_none_or(|a| a.is_empty())
-            && self.notes.get(&page).is_none_or(|n| n.trim().is_empty())
+            && if page == self.note_page {
+                self.current_note.trim().is_empty()
+            } else {
+                self.notes.get(&page).is_none_or(|n| n.trim().is_empty())
+            }
+            && self
+                .sketches
+                .get(&page)
+                .is_none_or(|sketch| sketch.is_default())
+            && self
+                .audio_index
+                .page_memos
+                .get(&page)
+                .is_none_or(Vec::is_empty)
     }
 
     fn request_delete_page(&mut self, page: u32, ctx: &egui::Context) {
@@ -11602,6 +11795,7 @@ let state_path = crate::state::AppState::config_path();
 
         self.finish_sketch_edit();
         if !self.checkpoint_before_structure_change() { return; }
+        let original_pages = self.total_pages;
         // Close worker channels that may still hold the PDF open.
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
@@ -11611,17 +11805,11 @@ let state_path = crate::state::AppState::config_path();
         let old_note_page = self.note_page;
         let old_split_secondary = self.split_secondary_page;
 
-        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del, self.allow_signature_loss) {
+        match notes::delete_page_from_pdf(&self.pdf_path, page_to_del, self.allow_signature_loss, Some(&self.audio_index)) {
             Ok(()) => {
-                let shift = |p: u32| -> Option<u32> {
-                    if p < page_to_del {
-                        Some(p)
-                    } else if p > page_to_del {
-                        Some(p - 1)
-                    } else {
-                        None
-                    }
-                };
+                self.invalidate_page_jobs();
+                let change = notes::PageChange::Delete(page_to_del);
+                let shift = |page| change.map(page);
                 self.notes = std::mem::take(&mut self.notes)
                     .into_iter()
                     .filter_map(|(p, v)| shift(p).map(|np| (np, v)))
@@ -11649,22 +11837,6 @@ let state_path = crate::state::AppState::config_path();
                     }
                     None => false,
                 });
-                self.audio_index.for_each_page_mut(|p| {
-                    if *p > page_to_del {
-                        *p -= 1
-                    }
-                });
-                self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
-                    .into_iter()
-                    .filter_map(|(p, v)| {
-                        if p == page_to_del {
-                            None
-                        } else {
-                            Some((if p > page_to_del { p - 1 } else { p }, v))
-                        }
-                    })
-                    .collect();
-                self.audio_index.save(&self.pdf_path);
 
                 let new_total = self.total_pages.saturating_sub(1).max(1);
                 let keep_page = |p: u32| -> u32 {
@@ -11701,10 +11873,8 @@ let state_path = crate::state::AppState::config_path();
                     &self.sketches,
                 );
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰆴 Deleted page {}", page_to_del),
-                    std::time::Instant::now(),
-                ));
+                self.finish_audio_page_change(notes::PageChange::Delete(page_to_del), original_pages, format!("󰆴 Deleted page {page_to_del}"));
+
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
@@ -11734,23 +11904,16 @@ let state_path = crate::state::AppState::config_path();
 
         self.finish_sketch_edit();
         if !self.checkpoint_before_structure_change() { return; }
+        let original_pages = self.total_pages;
         self.render_tx = channel::<RenderRequest>().0;
         self.thumb_tx = channel::<RenderRequest>().0;
         let old_anchor_page = self.continuous_anchor_page;
         let old_anchor_frac = self.continuous_anchor_frac;
-        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page, self.allow_signature_loss) {
+        match notes::reorder_pages_in_pdf(&self.pdf_path, from_page, to_page, self.allow_signature_loss, Some(&self.audio_index)) {
             Ok(()) => {
-                let remap = |page: u32| -> u32 {
-                    if page == from_page {
-                        to_page
-                    } else if from_page < to_page && page > from_page && page <= to_page {
-                        page - 1
-                    } else if from_page > to_page && page >= to_page && page < from_page {
-                        page + 1
-                    } else {
-                        page
-                    }
-                };
+                self.invalidate_page_jobs();
+                let change = notes::PageChange::Reorder { from: from_page, to: to_page };
+                let remap = |page| change.map(page).unwrap();
                 self.notes = std::mem::take(&mut self.notes)
                     .into_iter()
                     .map(|(p, v)| (remap(p), v))
@@ -11769,12 +11932,6 @@ let state_path = crate::state::AppState::config_path();
                 for bm in &mut self.user_bookmarks {
                     bm.page = remap(bm.page);
                 }
-                self.audio_index.for_each_page_mut(|p| *p = remap(*p));
-                self.audio_index.page_memos = std::mem::take(&mut self.audio_index.page_memos)
-                    .into_iter()
-                    .map(|(p, v)| (remap(p), v))
-                    .collect();
-                self.audio_index.save(&self.pdf_path);
 
                 self.current_page = remap(self.current_page);
                 self.target_page = remap(self.target_page);
@@ -11790,12 +11947,6 @@ let state_path = crate::state::AppState::config_path();
                     .into_iter()
                     .map(|(p, i)| (remap(p), i))
                     .collect();
-                if let Some((p, i)) = self.selected_image {
-                    self.selected_image = Some((remap(p), i));
-                }
-                if let Some((p, a, b)) = self.active_snip_rect {
-                    self.active_snip_rect = Some((remap(p), a, b));
-                }
                 self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
                 self.note_is_dirty = false;
                 let _ = notes::save_doc_data(
@@ -11807,10 +11958,9 @@ let state_path = crate::state::AppState::config_path();
                 );
                 self.save_session_state();
                 self.refresh_pdf_after_page_structure_change(ctx);
-                self.toast_message = Some((
-                    format!("󰄬 Moved page {from_page} to position {to_page}"),
-                    std::time::Instant::now(),
-                ));
+                self.finish_audio_page_change(
+                    change, original_pages, format!("󰄬 Moved page {from_page} to position {to_page}"),
+                );
             }
             Err(e) => {
                 self.refresh_pdf_after_page_structure_change(ctx);
@@ -11826,8 +11976,53 @@ let state_path = crate::state::AppState::config_path();
         }
     }
 
-    /// Restart workers for the updated file without reloading the UI session.
-    /// Preserve the current page, zoom, view, panels, and scroll position.
+    fn invalidate_page_jobs(&mut self) {
+        self.shots.cancel_pending();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selected_textbox = None;
+        self.selected_image = None;
+        self.image_drag = None;
+        self.active_stroke = None;
+        self.active_snip_rect = None;
+        self.pending_delete_page = None;
+        self.pdf_selection = None;
+        self.selecting = false;
+        self.slide_rects.clear();
+        self.last_slide_rects.clear();
+    }
+
+    fn finish_audio_page_change(
+        &mut self,
+        change: notes::PageChange,
+        original_pages: u32,
+        message: impl Into<String>,
+    ) {
+        self.audio_index.remap_pages(change, original_pages);
+        self.trim_memo_target = None;
+        self.rename_memo_target = None;
+        self.show_audio_trimmer = false;
+        self.transcript_last_seg = None;
+        let result = if self.audio_index_pending {
+            self.persist_audio_index()
+        } else {
+            AudioDocIndex::recover_page_change(&self.pdf_path).map_err(|err| err.to_string())
+        };
+        match result {
+            Ok(()) => {
+                self.audio_index_pending = false;
+                self.audio_toast(message);
+            }
+            Err(err) => {
+                self.audio_index_pending = true;
+                self.audio_toast(format!(
+                    "Page changed. Audio index update is pending: {err}"
+                ));
+            }
+        }
+    }
+
+    /// Restart the render workers while preserving the workspace layout.
     fn refresh_pdf_after_page_structure_change(&mut self, ctx: &egui::Context) {
         let path = self.pdf_path.clone();
         let (total_pages, outline, current_page_pt) =
@@ -13673,6 +13868,7 @@ let state_path = crate::state::AppState::config_path();
             bold: false,
             italic: false,
             stroke_width: self.stroke_width,
+            native_source: None,
         });
         self.selected_image = Some((page, list.len() - 1));
         let _ = notes::save_doc_data(
@@ -15717,10 +15913,11 @@ impl eframe::App for Lapis {
         self.finish_sketch_edit();
         self.sync_and_save();
         if self.has_pdf() {
-            if let Err(err) = notes::commit_doc_data(
-                &self.pdf_path, &self.notes, &self.annotations,
-                self.blank_pages.clone(), &self.sketches,
-            ) {
+            let result = AudioDocIndex::recover_page_change(&self.pdf_path).and_then(|()| {
+                notes::commit_doc_data(&self.pdf_path, &self.notes, &self.annotations,
+                    self.blank_pages.clone(), &self.sketches)
+            });
+            if let Err(err) = result {
                 eprintln!("Lapis: failed to commit PDF annotations on exit: {err}");
             }
         }
@@ -19292,6 +19489,7 @@ impl eframe::App for Lapis {
         if let Some(vis_p) = candidate
             && vis_p != self.current_page && (1..=self.total_pages).contains(&vis_p) {
                 self.sync_and_save();
+                self.record_lecture_page(vis_p);
                 self.current_page = vis_p;
                 self.target_page = vis_p;
                 self.save_session_state();
@@ -19403,6 +19601,7 @@ impl eframe::App for Lapis {
 
                                     if slide_resp.clicked() && self.current_page != p {
                                         self.sync_and_save();
+                                        self.record_lecture_page(p);
                                         self.current_page = p;
                                         self.target_page = p;
                                         self.save_session_state();
@@ -20029,6 +20228,171 @@ mod release_correctness_tests {
     }
 
     #[test]
+    fn late_image_jobs_cannot_cross_document_or_page_changes() {
+        let root = isolated_dir!(late_image_jobs_cannot_cross_document_or_page_changes);
+        let first = root.join("first.pdf");
+        let second = root.join("second.pdf");
+        notes::create_blank_study_notebook(&first).unwrap();
+        notes::create_blank_study_notebook(&second).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+        assert!(app.open_pdf(first, &ctx));
+        let target = ShotTarget::Note { page: 1, cursor: 0 };
+        let switched = app.shots.pending_for_test(target.clone());
+        assert!(app.open_pdf(second.clone(), &ctx));
+        assert!(switched.send(None).is_err());
+        let reopened = app.shots.pending_for_test(target.clone());
+        assert!(app.open_pdf(second, &ctx));
+        assert!(reopened.send(None).is_err());
+
+        app.insert_blank_page_after(1, notes::BlankPageStyle::Blank, &ctx);
+        assert_eq!(app.total_pages, 2);
+        app.push_undo_snapshot(1);
+        app.selected_textbox = Some(0);
+        let moved = app.shots.pending_for_test(target.clone());
+        app.reorder_pdf_page(1, 2, &ctx);
+        assert_eq!(app.current_page, 1);
+        assert!(app.undo_stack.is_empty());
+        assert!(app.selected_textbox.is_none());
+        assert!(moved.send(None).is_err());
+        let closed = app.shots.pending_for_test(target);
+        assert!(app.complete_pdf_save(AfterPdfSave::Home, &ctx));
+        assert!(closed.send(None).is_err());
+    }
+
+    #[test]
+    fn deleting_a_custom_page_with_only_a_sketch_or_memo_requires_confirmation() {
+        let root =
+            isolated_dir!(deleting_a_custom_page_with_only_a_sketch_or_memo_requires_confirmation);
+        let pdf = root.join("study.pdf");
+        notes::create_blank_study_notebook(&pdf).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+        assert!(app.open_pdf(pdf, &ctx));
+        app.insert_blank_page_after(1, notes::BlankPageStyle::Blank, &ctx);
+        assert!(app.is_disposable_blank_page(2));
+
+        let mut sketch = notes::SketchPage::new(notes::BlankPageStyle::Blank);
+        sketch.strokes.push(notes::PageAnnotation {
+            kind: notes::AnnotationKind::Freehand,
+            color: [0, 0, 0],
+            points: vec![(10.0, 20.0), (20.0, 30.0)],
+            text: String::new(),
+            font_size: 18.0,
+            bold: false,
+            italic: false,
+            stroke_width: 2.5,
+            native_source: None,
+        });
+        app.sketches.insert(2, sketch);
+        app.request_delete_page(2, &ctx);
+        assert_eq!(app.pending_delete_page, Some(2));
+        assert_eq!(app.total_pages, 2);
+
+        app.pending_delete_page = None;
+        app.sketches.clear();
+        app.audio_index.page_memos.insert(
+            2,
+            vec![audio::VoiceMemoEntry {
+                id: "memo".into(),
+                filename: "memo.wav".into(),
+                duration_ms: 100,
+                transcript: None,
+                title: None,
+            }],
+        );
+        app.request_delete_page(2, &ctx);
+        assert_eq!(app.pending_delete_page, Some(2));
+        assert_eq!(app.total_pages, 2);
+    }
+
+    #[test]
+    fn failed_media_updates_preserve_the_recording_and_published_index() {
+        let root = isolated_dir!(failed_media_updates_preserve_the_recording_and_published_index);
+        let pdf = root.join("lecture.pdf");
+        notes::create_blank_study_notebook(&pdf).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+        assert!(app.open_pdf(pdf.clone(), &ctx));
+        let dir = AudioDocIndex::media_dir_for_pdf(&pdf);
+        let lecture = dir.join("original.wav");
+        let mut wav = hound::WavWriter::create(
+            &lecture,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in 0..64_000 {
+            let voice = !(11_200..52_800).contains(&sample);
+            wav.write_sample(if voice { 1000i16 } else { 0 }).unwrap();
+        }
+        wav.finalize().unwrap();
+        app.audio_index.lecture_wav = Some("original.wav".into());
+        app.audio_index.lecture_duration_ms = 4_000;
+        app.audio_index.timeline = vec![(0, 1)];
+        app.audio_index.segments = vec![audio::TranscriptSegment {
+            start_ms: 0,
+            end_ms: 150,
+            page: 1,
+            text: "Existing transcript".into(),
+        }];
+        app.audio_index.page_memos.insert(
+            1,
+            vec![audio::VoiceMemoEntry {
+                id: "memo".into(),
+                filename: "original.wav".into(),
+                duration_ms: 4_000,
+                transcript: Some("Existing memo".into()),
+                title: None,
+            }],
+        );
+        app.persist_audio_index().unwrap();
+        let original = std::fs::read(&lecture).unwrap();
+        let index_path = dir.join("audio_index.json");
+        let before = std::fs::read(&index_path).unwrap();
+
+        app.finish_import_lecture_media(root.join("no-input.wav"), &dir);
+        assert_eq!(std::fs::read(&lecture).unwrap(), original);
+        assert_eq!(std::fs::read(&index_path).unwrap(), before);
+        let blocked = dir.join(format!("audio_index.json.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocked).unwrap();
+        let replacement = dir.join("candidate.wav");
+        std::fs::copy(&lecture, &replacement).unwrap();
+        assert!(
+            app.install_imported_lecture(&dir, &replacement, 4_000)
+                .is_err()
+        );
+        app.trim_start_ms = 0;
+        app.trim_end_ms = 100;
+        app.apply_audio_trim(&lecture);
+        app.remove_lecture_silence(&dir, &lecture);
+        assert!(app.delete_memo_recording(&dir, 1, 0).is_err());
+        assert_eq!(std::fs::read(&lecture).unwrap(), original);
+        assert_eq!(std::fs::read(&index_path).unwrap(), before);
+        assert_eq!(app.audio_index.segments[0].text, "Existing transcript");
+        assert_eq!(
+            app.audio_index.page_memos[&1][0].transcript.as_deref(),
+            Some("Existing memo")
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 4);
+
+        std::fs::remove_dir(&blocked).unwrap();
+        app.install_imported_lecture(&dir, &replacement, 4_000)
+            .unwrap();
+        assert!(lecture.exists(), "the memo still references this WAV");
+        app.delete_memo_recording(&dir, 1, 0).unwrap();
+        assert!(!lecture.exists());
+        assert_eq!(
+            AudioDocIndex::load(&pdf).lecture_wav.as_deref(),
+            Some("candidate.wav")
+        );
+    }
+
+    #[test]
     fn retired_transcription_cannot_reach_the_next_job() {
         let (old_tx, mut rx) = channel();
         let old_cancel = Arc::new(AtomicBool::new(false));
@@ -20073,6 +20437,7 @@ mod release_correctness_tests {
             kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
             points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
             font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+            native_source: None,
         });
         assert!(has_extra_study_content(Some(&sketch), None));
         let memos = vec![audio::VoiceMemoEntry {
@@ -20095,6 +20460,7 @@ mod release_correctness_tests {
             kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
             points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
             font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+            native_source: None,
         });
         assert!(page_has_notes_or_sketch(2, 1, "", &notes, &sketches));
     }

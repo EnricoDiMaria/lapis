@@ -344,6 +344,10 @@ Exported FreeText annotations include a normal appearance (`/AP`) Form XObject s
 
 Lapis metadata is delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END` and stored as uncompressed bytes in a PDF stream object added to the incremental document. This keeps the metadata searchable by Lapis without placing a large block between `startxref` and `%%EOF`. A short `%LAPIS_INC_EOF` marker identifies the base length for a Lapis-created revision. Cleanup only rolls back a revision when that marker identifies the immediately trailing Lapis update; later external PDF revisions are intended to remain intact. Existing legacy trailing metadata markers remain readable for migration.
 
+New revisions include a SHA-256 checksum of the PDF with the checksum field zeroed. The local backup records the revision Lapis observed, so it can detect same-size edits after opening the file. Lapis retains untouched native annotations with their original PDF properties. When it recognizes independent local and external edits to a native annotation, it keeps both versions. A legacy file acquires a content checksum the first time its revision is successfully loaded.
+
+Page changes with linked audio stage a replacement index before publishing the PDF. On reopening, Lapis uses the PDF revision to decide whether to publish or discard the staged index. Audio replacement and deletion also publish the index before removing any previously referenced recording.
+
 For document-ID lookup, Lapis scans the final 16 MiB first and falls back to a full-file read if the metadata is not found there.
 
 ## Additional spelling languages
@@ -386,6 +390,8 @@ The initial baseline below uses the v1.5.0 persistence code, Linux x86-64, a Ryz
 | Changed PDF commit | 15.58 | 31.46 | 372.32 |
 | Unchanged PDF commit | 0.03 | 0.18 | 3.82 |
 | Reopen with study data | 7.57 | 10.83 | 70.26 |
+
+With revision verification in the open and save paths, five runs of the dense fixture on the same system measured medians of 62.31 ms to open, 93.04 ms to reopen, 27.81 ms for a changed checkpoint, 405.56 ms for a changed PDF commit, and 4.50 ms for an unchanged commit.
 
 ### Manual release checks
 

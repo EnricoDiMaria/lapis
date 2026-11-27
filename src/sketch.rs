@@ -1194,6 +1194,7 @@ fn new_annotation(
         bold: false,
         italic: false,
         stroke_width: st.stroke_width(),
+        native_source: None,
     }
 }
 

@@ -32,6 +32,7 @@ hound = "3.5"
 rodio = "0.23"
 parakeet-rs = "0.4"
 flate2 = "1.1"
+sha2 = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 egui_extras = { version = "0.37", features = ["all_loaders", "image", "file"] }
 spellbook = "0.3"

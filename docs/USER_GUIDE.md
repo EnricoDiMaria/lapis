@@ -42,7 +42,9 @@ The current document is the context for your work: notes, annotations, bookmarks
 
 Use the Save action or its keyboard shortcut to save notes and annotations. PDF commits run on a background worker. The workspace stays visible and editable while saving, with toast-only feedback. Closing or switching waits for all current edits to be committed. Inserting, deleting, reordering or compacting PDF pages is temporarily unavailable during the commit. Page insertion, deletion and reordering also wait until audio recording or transcription has finished. If a PDF commit fails, retry, keep working, or continue with the local backup only when the backup was successfully written.
 
-If another program added annotations to the PDF while it was open, Lapis merges them into your document before saving and shows a notice; nothing is removed from the page. Compacting the PDF history does the same and asks you to compact again. Inserting, deleting or reordering pages is cancelled if the local backup cannot be written, and asks for confirmation on digitally signed PDFs, because rewriting the pages invalidates the signature. Choose **Cancel** to leave the file untouched.
+If another program changes PDF annotations while the document is open, Lapis imports the changes before saving and shows a notice. Untouched native annotations retain their original PDF properties. Compacting the PDF history also imports changes and asks you to compact again.
+
+Page changes require a current local backup. If the PDF changed outside Lapis, save to merge the changes before retrying the page edit. Lapis asks before rewriting a digitally signed PDF because the rewrite invalidates the signature. Deleting a custom page with a sketch or voice memo requires confirmation. If Lapis is interrupted while updating the audio index for a page change, it can recover the page links when you reopen the document.
 
 Lapis stores document data locally and associates it with the PDF. A local backup is also maintained by the document-data storage system.
 
@@ -484,7 +486,7 @@ The audio workspace provides access to lecture playback, recording management, w
 
 Import an existing audio track into the document's lecture workspace.
 
-Loading a new lecture recording replaces the previous lecture track context and invalidates its old transcript and slide markers.
+A successful import replaces the lecture recording and clears its old transcript and slide markers. If the operation fails, the previous recording and its study data remain available.
 
 ### Recording audio
 
@@ -511,7 +513,7 @@ The waveform provides a quick overview of the recording's amplitude and makes it
 
 ### Trimming audio
 
-Use the visual range bar and its drag handles to select a portion of the recording.
+Use the visual range bar and its drag handles to select a portion of the recording. Lapis saves the new track and associated timestamps before removing the previous track.
 
 This is useful for removing unwanted introductions, pauses, or irrelevant sections.
 
@@ -519,7 +521,7 @@ This is useful for removing unwanted introductions, pauses, or irrelevant sectio
 
 The lecture audio tools also include automatic silence removal.
 
-This operation detects sufficiently long silent regions, compacts the recording, and remaps associated slide markers and transcript timestamps to the new timeline.
+This operation detects sufficiently long silent regions, compacts the recording, and remaps associated slide markers and transcript timestamps to the new timeline. A failed update preserves the previous recording and timeline.
 
 Review the operation before using it on an important recording.
 

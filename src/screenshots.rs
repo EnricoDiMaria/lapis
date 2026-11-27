@@ -246,9 +246,19 @@ pub struct ShotJobs {
 }
 
 impl ShotJobs {
-    /*pub fn is_busy(&self) -> bool {
-        self.pending.is_some()
-    }*/
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_for_test(
+        &mut self,
+        target: ShotTarget,
+    ) -> std::sync::mpsc::Sender<Option<Shot>> {
+        let (tx, rx) = channel();
+        self.pending = Some((target, rx));
+        tx
+    }
 
     pub fn request_clipboard(&mut self, ctx: &egui::Context, target: ShotTarget) -> bool {
         self.spawn(ctx, target, read_clipboard_image)
