@@ -539,7 +539,7 @@ impl SuiteTheme {
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        fs::write(path, json)
+        crate::paths::write_atomic(path, json.as_bytes())
     }
 
     fn is_light(&self) -> bool {

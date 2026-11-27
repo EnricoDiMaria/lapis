@@ -1,3 +1,4 @@
+use crate::paths::{replace_file, write_atomic, write_synced};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -1015,36 +1016,6 @@ fn run_after_replace_hook() {
     if let Some(hook) = hook { hook(); }
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = File::create(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-/// Atomic replace. Windows may briefly deny the rename (viewer, indexer or antivirus handle),
-/// so retry a few times there; the directory is synced on Unix to persist the rename.
-fn replace_file(tmp: &Path, dest: &Path) -> io::Result<()> {
-    let mut attempt = 0u64;
-    loop {
-        match fs::rename(tmp, dest) {
-            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied && attempt < 5 => {
-                attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
-            }
-            result => {
-                #[cfg(unix)]
-                if result.is_ok()
-                    && let Some(dir) = dest.parent().filter(|d| !d.as_os_str().is_empty())
-                    && let Ok(dir) = File::open(dir)
-                {
-                    let _ = dir.sync_all();
-                }
-                return result;
-            }
-        }
-    }
-}
-
 /// The PDF carries a digital signature that a page change would invalidate.
 #[derive(Debug)]
 struct SignedPdf;
@@ -1550,7 +1521,7 @@ pub fn compact_doc_data(
     }
     // Preserve the exact bytes of the original on disk so compaction can be undone.
     let backup = pdf_path.with_extension("lapis_before_compaction.pdf");
-    if !backup.exists() { fs::write(&backup, &original)?; }
+    if !backup.exists() { write_atomic(&backup, &original)?; }
     commit_with_base(pdf_path, data, compacted, &stamp, true)
 }
 

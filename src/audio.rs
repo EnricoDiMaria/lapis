@@ -116,11 +116,7 @@ impl AudioDocIndex {
             Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
 
         if let Ok(json) = serde_json::to_string_pretty(&to_save) {
-            let tmp = index_path.with_extension("json.tmp");
-
-            if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(&tmp, &index_path);
-            }
+            let _ = crate::paths::write_atomic(&index_path, json.as_bytes());
         }
     }
 

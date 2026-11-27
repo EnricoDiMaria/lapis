@@ -3,7 +3,8 @@
 //! Windows: config -> %APPDATA%\lapis  (Roaming)
 //!          data   -> %LOCALAPPDATA%\lapis
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
@@ -118,9 +119,109 @@ fn windows_file_uri(path: &str) -> String {
     }
 }
 
+pub fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Atomic replace. Windows may briefly deny the rename (viewer, indexer or antivirus handle),
+/// so retry a few times there; the directory is synced on Unix to persist the rename.
+pub fn replace_file(tmp: &Path, dest: &Path) -> io::Result<()> {
+    let mut attempt = 0u64;
+    loop {
+        match fs::rename(tmp, dest) {
+            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+            }
+            result => {
+                #[cfg(unix)]
+                if result.is_ok()
+                    && let Some(dir) = dest.parent().filter(|d| !d.as_os_str().is_empty())
+                    && let Ok(dir) = File::open(dir)
+                {
+                    let _ = dir.sync_all();
+                }
+                return result;
+            }
+        }
+    }
+}
+
+/// Writes `bytes` to a temporary file next to `dest`, flushes it, then replaces `dest`
+/// atomically: after a crash `dest` holds either the old or the new content, never a mix.
+pub fn write_atomic(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+        .to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dest.with_file_name(name);
+    let result = write_synced(&tmp, bytes).and_then(|_| replace_file(&tmp, dest));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Keeps an unreadable state file as `<name>.corrupt` so the next save cannot destroy it.
+pub fn quarantine_corrupt(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".corrupt");
+    let target = path.with_file_name(name);
+    fs::rename(path, &target).ok().map(|_| target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lapis_paths_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_temporary_file() {
+        let dir = scratch("atomic");
+        let file = dir.join("state.json");
+        write_atomic(&file, b"old").unwrap();
+        write_atomic(&file, b"new content").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"new content");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temporary file left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_atomic_write_keeps_the_old_file_and_cleans_up() {
+        let dir = scratch("atomic_fail");
+        let file = dir.join("state.json");
+        write_atomic(&file, b"keep me").unwrap();
+        // A directory in the way of the rename target makes the replacement fail.
+        let blocked = dir.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("child"), b"x").unwrap();
+        assert!(write_atomic(&blocked, b"data").is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"keep me");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2, "temporary file left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quarantine_keeps_the_unreadable_file_out_of_the_way() {
+        let dir = scratch("quarantine");
+        let file = dir.join("state.json");
+        fs::write(&file, b"{ truncated").unwrap();
+        let kept = quarantine_corrupt(&file).unwrap();
+        assert!(!file.exists());
+        assert_eq!(kept.file_name().unwrap(), "state.json.corrupt");
+        assert_eq!(fs::read(&kept).unwrap(), b"{ truncated");
+        assert!(quarantine_corrupt(&file).is_none(), "nothing left to quarantine");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn windows_uris_use_three_slashes_and_forward_slashes() {

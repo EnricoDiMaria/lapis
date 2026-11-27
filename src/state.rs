@@ -994,13 +994,17 @@ impl AppState {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if let Ok(content) = fs::read_to_string(&path)
-            && let Ok(mut state) = serde_json::from_str::<Self>(&content)
-        {
-            state.shortcuts.migrate_layout();
-            // Filter out files that were deleted or moved from disk
-            state.recent_files.retain(|entry| entry.path.exists());
-            return state;
+        if let Ok(content) = fs::read_to_string(&path) {
+            match serde_json::from_str::<Self>(&content) {
+                Ok(mut state) => {
+                    state.shortcuts.migrate_layout();
+                    // Filter out files that were deleted or moved from disk
+                    state.recent_files.retain(|entry| entry.path.exists());
+                    return state;
+                }
+                // Keep the unreadable file: the next save would otherwise overwrite it.
+                Err(_) => { crate::paths::quarantine_corrupt(&path); }
+            }
         }
         Self {
             home_grid_view: true,
@@ -1011,7 +1015,7 @@ impl AppState {
     pub fn save(&self) {
         let path = Self::config_path();
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, json);
+            let _ = crate::paths::write_atomic(&path, json.as_bytes());
         }
     }
 

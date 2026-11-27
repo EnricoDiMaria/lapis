@@ -214,7 +214,7 @@ fn read_audio_index(dir: &Path) -> Option<audio::AudioDocIndex> {
 fn write_audio_index(dir: &Path, idx: &audio::AudioDocIndex) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(idx)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("audio_index.json"), json)
+    paths::write_atomic(&dir.join("audio_index.json"), json.as_bytes())
 }
 
 /// Removes an audio file only if in the media folder of the file

@@ -39,7 +39,7 @@ pub fn write_user_words(words: &[String]) -> io::Result<()> {
     if !out.is_empty() {
         out.push('\n');
     }
-    fs::write(user_words_path(), out)
+    crate::paths::write_atomic(&user_words_path(), out.as_bytes())
 }
 
 pub struct SpellChecker {

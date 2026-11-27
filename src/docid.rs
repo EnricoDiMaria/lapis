@@ -118,10 +118,7 @@ fn load_index() -> Index {
 fn save_index(idx: &Index) {
     let path = index_path();
     if let Ok(json) = serde_json::to_string_pretty(idx) {
-        let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, json).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
+        let _ = crate::paths::write_atomic(&path, json.as_bytes());
     }
 }
 
