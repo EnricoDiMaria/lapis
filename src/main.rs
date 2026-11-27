@@ -1099,6 +1099,79 @@ fn spawn_worker(
     req_tx
 }
 
+/// Retire the previous worker's channel and cancellation token as a pair.
+fn replace_asr_channel(
+    rx: &mut Receiver<audio::AsrJobResult>,
+    cancel: &mut Arc<std::sync::atomic::AtomicBool>,
+) -> Sender<audio::AsrJobResult> {
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (tx, next_rx) = channel();
+    *rx = next_rx;
+    *cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tx
+}
+
+fn merge_imported_notes(
+    notes: &mut HashMap<u32, String>,
+    imported: impl IntoIterator<Item = (u32, String)>,
+    note_page: u32,
+) -> String {
+    notes.extend(imported);
+    notes.get(&note_page).cloned().unwrap_or_default()
+}
+
+fn has_extra_study_content(sketch: Option<&notes::SketchPage>, memos: Option<&Vec<audio::VoiceMemoEntry>>) -> bool {
+    sketch.is_some_and(|s| !s.strokes.is_empty()) || memos.is_some_and(|m| !m.is_empty())
+}
+
+fn page_has_notes_or_sketch(
+    page: u32,
+    note_page: u32,
+    current_note: &str,
+    notes: &HashMap<u32, String>,
+    sketches: &HashMap<u32, notes::SketchPage>,
+) -> bool {
+    let has_note = if page == note_page {
+        !current_note.trim().is_empty()
+    } else {
+        notes.get(&page).is_some_and(|text| !text.trim().is_empty())
+    };
+    has_note || sketches.get(&page).is_some_and(|sketch| !sketch.strokes.is_empty())
+}
+
+fn cached_page<'a, T>(pages: &'a HashMap<u32, T>, thumbs: &'a HashMap<u32, T>, page: u32) -> Option<&'a T> {
+    pages.get(&page).or_else(|| thumbs.get(&page))
+}
+
+/// Validate a candidate before replacing the active document or its lock.
+fn inspect_pdf(path: &Path) -> Result<(u32, Vec<TocItem>, (f32, f32)), String> {
+    let doc = Document::open(path.to_str().ok_or("Invalid file path")?)
+        .map_err(|e| e.to_string())?;
+    if !doc.is_pdf() {
+        return Err("The selected file is not a PDF".into());
+    }
+    if doc.needs_password().map_err(|e| e.to_string())? {
+        return Err("Password-protected PDFs must be unlocked before opening".into());
+    }
+    let count = doc.page_count().map_err(|e| e.to_string())?;
+    if count <= 0 {
+        return Err("The PDF has no pages".into());
+    }
+    let bounds = doc.load_page(0).and_then(|p| p.bounds()).map_err(|e| e.to_string())?;
+    let (w, h) = (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return Err("The first PDF page has invalid dimensions".into());
+    }
+    let mut outline = Vec::new();
+    if let Ok(nodes) = doc.outlines() {
+        for node in nodes {
+            let idx = node.dest.as_ref().map(|d| d.loc.page_number as i32).unwrap_or(0);
+            outline.push(TocItem { title: node.title.clone(), page: (idx.max(0) as u32) + 1 });
+        }
+    }
+    Ok((count as u32, outline, (w, h)))
+}
+
 /// Page worker (low latency) + thumbnail worker (never blocks the main page).
 fn spawn_render_workers(
     path: PathBuf,
@@ -1641,7 +1714,7 @@ struct Lapis {
     memo_audio_engine: AudioEngine,
     audio_index: AudioDocIndex,
     asr_rx: Receiver<audio::AsrJobResult>,
-    asr_tx: Sender<audio::AsrJobResult>,
+    audio_index_pending: bool,
     asr_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// (done_ms, total_ms) of the running lecture transcription
     asr_progress: Option<(u64, u64)>,
@@ -1747,7 +1820,7 @@ impl Lapis {
         let (thumb_tx, _thumb_rx) = channel::<RenderRequest>();
         let (_res_tx, res_rx) = channel::<WorkerMsg>();
         let (export_tx, export_rx) = channel::<Result<PathBuf, String>>();
-        let (asr_tx, asr_rx) = channel::<audio::AsrJobResult>();
+        let asr_rx = channel::<audio::AsrJobResult>().1;
         let (home_thumb_tx, home_thumb_rx) = channel::<(PathBuf, egui::ColorImage)>();
         let spellchecker = spellcheck::SpellChecker::with_preferences(
             &app_state.settings.extra_dictionaries,
@@ -1866,7 +1939,7 @@ impl Lapis {
             memo_audio_engine: AudioEngine::new(),
             audio_index: AudioDocIndex::default(),
             asr_rx,
-            asr_tx,
+            audio_index_pending: false,
             asr_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             asr_progress: None,
             asr_model_dir: None,
@@ -2339,7 +2412,16 @@ impl Lapis {
         }
 
         self.selected_textbox = None;
+        if matches!(self.view_mode, ViewMode::SinglePage | ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+            self.pdf_selection = None;
+            self.selecting = false;
+            self.active_stroke = None;
+            self.radial_menu_pos = None;
+            self.slide_rects.clear();
+            self.last_slide_rects.clear();
+        }
         self.continuous_scroll_to_page = Some(page);
+        // Keep the last texture visible until the destination is ready.
 
         // Rendering requests are issued once per frame by `pump_render_requests`.
         if let Some((handle, dims)) = self.page_cache.get(&page) {
@@ -2349,7 +2431,7 @@ impl Lapis {
             self.touch_cache(page);
         } else {
             self.is_rendering = true;
-            // Show the low-res thumbnail instead of the previous page while rendering.
+            // Prefer a destination thumbnail; otherwise retain the previous render.
             if let Some((h, dims)) = self.thumb_cache.get(&page) {
                 self.texture_handle = Some(h.clone());
                 self.page_dims = *dims;
@@ -2738,7 +2820,13 @@ impl Lapis {
         }
     }
 
-    fn complete_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) {
+    fn complete_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) -> bool {
+        if matches!(&after, AfterPdfSave::Home | AfterPdfSave::Exit)
+            && !self.finish_audio_before_transition()
+        {
+            ctx.request_repaint();
+            return false;
+        }
         match after {
             AfterPdfSave::Stay => {
                 self.toast_message = Some(("󰄬 Saved".into(), std::time::Instant::now()));
@@ -2749,7 +2837,7 @@ impl Lapis {
             }
             AfterPdfSave::Open(path) => {
                 self.toast_message = Some(("󰄬 Saved".into(), std::time::Instant::now()));
-                self.open_pdf(path, ctx);
+                return self.open_pdf(path, ctx);
             }
             AfterPdfSave::Exit => {
                 // Send Close in the next frame, separate from any CancelClose command.
@@ -2757,6 +2845,7 @@ impl Lapis {
             }
         }
         ctx.request_repaint();
+        true
     }
 
     // Keep the workspace live while the worker commits an immutable snapshot.
@@ -2786,8 +2875,7 @@ impl Lapis {
                     match save_intent::on_commit_success(&job.after, queued, job.snapshot_hash, current_hash) {
                         Completion::Followup => self.request_pdf_save(job.after, &ctx),
                         Completion::Done { newer_edits } => {
-                            self.complete_pdf_save(job.after, &ctx);
-                            if newer_edits {
+                            if self.complete_pdf_save(job.after, &ctx) && newer_edits {
                                 self.toast_message = Some(("󰄬 PDF saved; newer edits are local".into(), std::time::Instant::now()));
                             }
                         }
@@ -2851,8 +2939,9 @@ impl Lapis {
                 match self.sync_local_checkpoint() {
                     Ok(()) => {
                         self.save_session_state();
-                        self.complete_pdf_save(failure.after, &ctx);
-                        self.toast_message = Some(("󰀪 PDF not saved; local backup kept".into(), std::time::Instant::now()));
+                        if self.complete_pdf_save(failure.after, &ctx) {
+                            self.toast_message = Some(("󰀪 PDF not saved; local backup kept".into(), std::time::Instant::now()));
+                        }
                     }
                     Err(err) => self.pdf_save_failed(failure.after, err.to_string(), false),
                 }
@@ -2905,6 +2994,10 @@ impl Lapis {
     }
 
     fn pdf_structure_busy(&mut self) -> bool {
+        if self.audio_engine.is_recording() || self.is_transcribing {
+            self.audio_toast("Finish recording or transcription before changing PDF pages");
+            return true;
+        }
         if self.pdf_save_job.is_some() || self.queued_pdf_save.is_some() || self.pdf_save_failure.is_some() {
             self.toast_message = Some(("PDF is saving; retry the page action shortly".into(), std::time::Instant::now()));
             true
@@ -3039,25 +3132,13 @@ impl Lapis {
                     return;
                 }
 
-                for (page, text) in imported {
-                    self.notes.insert(page, text);
-                }
-
-                self.current_note = self
-                    .notes
-                    .get(&self.current_page)
-                    .cloned()
-                    .unwrap_or_default();
-                self.note_is_dirty = false;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
-
+                self.current_note = merge_imported_notes(&mut self.notes, imported, self.note_page);
+                self.note_is_dirty = true;
                 self.show_notes = true;
+                if let Err(err) = self.sync_local_checkpoint() {
+                    self.audio_toast(format!("Notes imported, but local backup failed: {err}"));
+                    return;
+                }
 
                 self.toast_message = Some((
                     format!("󰄬 Notes imported for {} pages", count),
@@ -3817,8 +3898,7 @@ impl Lapis {
         }
     }
 
-    fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.single_page_wheel = SinglePageWheel::default();
+    fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) -> bool {
         // Do not open a document already locked by another window.
         // Multiple instances would overwrite notes and annotations.
         let same_doc =
@@ -3837,51 +3917,37 @@ impl Lapis {
                         format!("\"{name}\" is already open in another Lapis window"),
                         std::time::Instant::now(),
                     ));
-                    return;
+                    return false;
                 }
                 Err(doc_lock::LockError::Io(_)) => None, // Continue if locking is unavailable.
             }
         };
 
-        if let Some(l) = new_lock {
-            self.doc_lock = Some(l); // Drop the previous document lock.
+        let (total_pages, outline, first_page_pt) = match inspect_pdf(&path) {
+            Ok(info) => info,
+            Err(err) => {
+                self.audio_toast(format!("Could not open PDF: {err}"));
+                ctx.request_repaint();
+                return false;
+            }
+        };
+        if !same_doc && !self.finish_audio_before_transition() {
+            ctx.request_repaint();
+            return false;
         }
-
-        let (total_pages, outline, first_page_pt) =
-            match Document::open(path.to_str().unwrap_or_default()) {
-                Ok(doc) => {
-                    let pages = doc.page_count().unwrap_or(1) as u32;
-                    let mut items = Vec::new();
-
-                    if let Ok(outlines_iter) = doc.outlines() {
-                        for node in outlines_iter {
-                            let page_idx: i32 = node
-                                .dest
-                                .as_ref()
-                                .map(|d| d.loc.page_number as i32)
-                                .unwrap_or(0);
-                            let p: u32 = (page_idx.max(0) as u32) + 1;
-                            items.push(TocItem {
-                                title: node.title.clone(),
-                                page: p,
-                            });
-                        }
-                    }
-                    let pt = doc
-                        .load_page(0)
-                        .and_then(|p| p.bounds())
-                        .map(|b| (b.x1 - b.x0, b.y1 - b.y0))
-                        .unwrap_or((0.0, 0.0));
-                    (pages, items, pt)
-                }
-                Err(_) => (1, Vec::new(), (0.0, 0.0)),
-            };
+        // Only release the old lock after the candidate has been validated.
+        if !same_doc {
+            self.doc_lock = new_lock;
+        } else if let Some(l) = new_lock {
+            self.doc_lock = Some(l);
+        }
 
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
 
+        self.single_page_wheel = SinglePageWheel::default();
         let doc_data = notes::load_doc_data(&path);
         self.notes = doc_data.notes;
         self.annotations = doc_data.annotations;
@@ -3935,18 +4001,8 @@ impl Lapis {
         self.notes_panel_resizing = false;
         self.fit_notes_layout_pending = false;
 
-        if self.pdf_path != path {
-            self.audio_engine.stop_and_release();
-            self.memo_audio_engine.stop_and_release();
-            self.asr_cancel
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            self.is_transcribing = false;
-            self.asr_progress = None;
-            self.transcript_last_seg = None;
-            self.show_audio_trimmer = false;
-            self.trim_memo_target = None;
-        }
         self.audio_index = AudioDocIndex::load(&path);
+        self.audio_index_pending = false;
 
         self.thumb_cache.clear();
         self.pending_delete_page = None;
@@ -3969,10 +4025,14 @@ impl Lapis {
         self.note_is_dirty = false;
         self.page_cache.clear();
         self.page_text.clear();
+        self.page_links.clear();
+        self.slide_rects.clear();
+        self.last_slide_rects.clear();
         self.pdf_selection = None;
         self.selecting = false;
         self.cache_order.clear();
         self.texture_handle = None;
+        self.page_dims = (0, 0);
         self.is_rendering = true;
         self.note_page = start_page;
         self.lock_note_page = false;
@@ -3999,6 +4059,7 @@ impl Lapis {
 
         self.save_session_state();
         ctx.request_repaint();
+        true
     }
 
     /// Open a user-requested document unless it is already open.
@@ -4031,6 +4092,9 @@ impl Lapis {
         self.texture_handle = None;
         self.page_cache.clear();
         self.page_text.clear();
+        self.page_links.clear();
+        self.slide_rects.clear();
+        self.last_slide_rects.clear();
         self.pdf_selection = None;
         self.selecting = false;
         self.cache_order.clear();
@@ -8500,6 +8564,112 @@ let state_path = crate::state::AppState::config_path();
         self.toast_message = Some((msg.into(), std::time::Instant::now()));
     }
 
+    /// Each worker owns a fresh channel and token, even when reopening the same PDF.
+    fn new_asr_job(&mut self) -> (Sender<audio::AsrJobResult>, Arc<std::sync::atomic::AtomicBool>) {
+        let tx = replace_asr_channel(&mut self.asr_rx, &mut self.asr_cancel);
+        (tx, self.asr_cancel.clone())
+    }
+
+    fn retire_asr_job(&mut self) {
+        drop(replace_asr_channel(&mut self.asr_rx, &mut self.asr_cancel));
+        self.is_transcribing = false;
+        self.asr_progress = None;
+    }
+
+    /// Finalize the recording and persist its index before releasing the document.
+    fn finish_audio_before_transition(&mut self) -> bool {
+        if !self.has_pdf() { return true; }
+        if self.audio_engine.is_recording() {
+            let dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
+            if let Err(err) = self.finish_active_recording(&dir) {
+                self.audio_toast(format!("Could not finish recording: {err}"));
+                return false;
+            }
+        }
+        if self.audio_index_pending || (self.is_transcribing && self.asr_progress.is_some()) {
+            if let Err(err) = self.audio_index.save_checked(&self.pdf_path) {
+                self.audio_toast(format!("Could not save audio index: {err}"));
+                return false;
+            }
+            self.audio_index_pending = false;
+        }
+        self.retire_asr_job();
+        self.audio_engine.shutdown_output();
+        self.memo_audio_engine.shutdown_output();
+        self.transcript_last_seg = None;
+        self.show_audio_trimmer = false;
+        self.trim_memo_target = None;
+        self.rename_memo_target = None;
+        self.show_align_panel = false;
+        self.dialogs = Dialogs::default(); // Results from old document dialogs are obsolete.
+        true
+    }
+
+    fn persist_audio_index(&mut self) -> Result<(), String> {
+        self.audio_index_pending = true;
+        self.audio_index.save_checked(&self.pdf_path)?;
+        self.audio_index_pending = false;
+        Ok(())
+    }
+
+    fn report_audio_index_result(&mut self, message: impl Into<String>) {
+        match self.persist_audio_index() {
+            Ok(()) => self.audio_toast(message),
+            Err(err) => self.audio_toast(format!("Audio index save failed: {err}")),
+        }
+    }
+
+    fn start_memo_recording(&mut self, media_dir: &Path, page: u32) {
+        let raw = audio::recording_path(media_dir, "memo_raw");
+        if let Err(err) = self.audio_engine.start_recording(raw, RecordingTarget::PageMemo(page)) {
+            self.audio_toast(format!("Mic error: {err}"));
+        }
+    }
+
+    fn finish_active_recording(&mut self, media_dir: &Path) -> Result<(), String> {
+        let target = self.audio_engine.rec_target.clone().ok_or("No active recording")?;
+        let prefix = match target {
+            RecordingTarget::Lecture => "lecture",
+            RecordingTarget::PageMemo(_) => "memo",
+        };
+        let final_wav = audio::recording_path(media_dir, prefix);
+        let (target, path, dur) = self.audio_engine.stop_recording(&final_wav)?;
+        let name = path.file_name().ok_or("Invalid recording filename")?.to_string_lossy().into_owned();
+        let raw_fallback = path != final_wav;
+        let mut replaced_lecture = None;
+        match target {
+            RecordingTarget::Lecture => {
+                replaced_lecture = self.audio_index.lecture_wav.replace(name);
+                self.audio_index.lecture_duration_ms = dur;
+                self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&path, 240);
+                self.audio_index.page_range = self.audio_index.timeline.iter().map(|t| t.1).min()
+                    .zip(self.audio_index.timeline.iter().map(|t| t.1).max());
+            }
+            RecordingTarget::PageMemo(page) => {
+                // The recording belongs to the page where the microphone was started.
+                let list = self.audio_index.page_memos.entry(page).or_default();
+                let id = (1..).map(|n| format!("Memo #{n}"))
+                    .find(|id| !list.iter().any(|m| &m.id == id)).unwrap();
+                list.push(audio::VoiceMemoEntry {
+                    id, filename: name, duration_ms: dur, transcript: None, title: None,
+                });
+            }
+        }
+        self.persist_audio_index()
+            .map_err(|err| format!("Recording kept at {}; audio index save failed: {err}", path.display()))?;
+        if let Some(old) = replaced_lecture
+            && !self.audio_index.other_lectures.iter().any(|l| l.wav.as_deref() == Some(old.as_str()))
+            && !self.audio_index.page_memos.values().flatten().any(|m| m.filename == old)
+        {
+            // Remove the replaced recording only after the new one and its index are safe.
+            let _ = remove_media_file(media_dir, &old);
+        }
+        self.preload_asr_model();
+        self.audio_toast(if raw_fallback { "Recording saved as raw WAV (conversion unavailable)" }
+            else { "Recording saved" });
+        Ok(())
+    }
+
     /// Loads the ASR model in the background so the first transcription starts right away.
     fn preload_asr_model(&self) {
         if let Some(model) = audio::find_asr_model() {
@@ -8508,31 +8678,15 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn toggle_lecture_recording(&mut self, media_dir: &Path) {
+        if self.is_transcribing { return; }
         self.confirm_remove_lecture = false;
         if self.audio_engine.rec_target == Some(RecordingTarget::Lecture) {
-            let name = self
-                .audio_index
-                .lecture_wav
-                .clone()
-                .unwrap_or_else(|| self.audio_index.fresh_wav_name());
-            let final_wav = media_dir.join(&name);
-            if let Some((_, dur)) = self.audio_engine.stop_recording(&final_wav) {
-                self.audio_index.lecture_wav = Some(name);
-                self.audio_index.lecture_duration_ms = dur;
-                self.audio_index.waveform_peaks = audio::compute_waveform_peaks(&final_wav, 240);
-                self.audio_index.page_range = self
-                    .audio_index
-                    .timeline
-                    .iter()
-                    .map(|t| t.1)
-                    .min()
-                    .zip(self.audio_index.timeline.iter().map(|t| t.1).max());
-                self.audio_index.save(&self.pdf_path);
-                self.preload_asr_model();
-                self.audio_toast("󰄬 Lecture recording saved");
+            if let Err(err) = self.finish_active_recording(media_dir) {
+                self.audio_toast(format!("Could not finish recording: {err}"));
             }
         } else if !self.audio_engine.is_recording() {
-            let raw_wav = media_dir.join("lecture_raw.wav");
+            self.audio_engine.stop_and_release();
+            let raw_wav = audio::recording_path(media_dir, "lecture_raw");
             match self
                 .audio_engine
                 .start_recording(raw_wav, RecordingTarget::Lecture)
@@ -8564,6 +8718,12 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn finish_import_lecture_media(&mut self, src_path: PathBuf, media_dir: &Path) {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording()
+            || AudioDocIndex::media_dir_for_pdf(&self.pdf_path) != media_dir
+        {
+            self.audio_toast("Audio import cancelled: document or recording changed");
+            return;
+        }
         self.confirm_remove_lecture = false;
         let name = self
             .audio_index
@@ -8918,8 +9078,7 @@ let state_path = crate::state::AppState::config_path();
         let is_transcribing = self.is_transcribing;
         let is_recording = self.audio_engine.is_recording();
 
-        let memo_is_recording =
-            self.audio_engine.rec_target == Some(RecordingTarget::PageMemo(page));
+        let memo_is_recording = matches!(self.audio_engine.rec_target, Some(RecordingTarget::PageMemo(_)));
 
         let lesson_btn_info = self.lesson_button_state();
 
@@ -9281,10 +9440,7 @@ let state_path = crate::state::AppState::config_path();
             if memo_is_recording {
                 self.finish_memo_recording(&media_dir);
             } else if !is_recording {
-                let raw_wav = media_dir.join("memo_raw.wav");
-                let _ = self
-                    .audio_engine
-                    .start_recording(raw_wav, RecordingTarget::PageMemo(page));
+                self.start_memo_recording(&media_dir, page);
             }
         }
 
@@ -10280,7 +10436,7 @@ let state_path = crate::state::AppState::config_path();
             return;
         }
 
-        let is_rec_memo = self.audio_engine.rec_target == Some(RecordingTarget::PageMemo(page));
+        let is_rec_memo = matches!(self.audio_engine.rec_target, Some(RecordingTarget::PageMemo(_)));
 
         // Anchor the controls 6 px above `bottom_rect.top()`.
         // Place it above the ticker when visible.
@@ -10362,10 +10518,7 @@ let state_path = crate::state::AppState::config_path();
             if is_rec_memo {
                 self.finish_memo_recording(media_dir);
             } else if !self.audio_engine.is_recording() {
-                let raw_wav = media_dir.join("memo_raw.wav");
-                let _ = self
-                    .audio_engine
-                    .start_recording(raw_wav, RecordingTarget::PageMemo(page));
+                self.start_memo_recording(media_dir, page);
             }
         }
     }
@@ -10867,20 +11020,8 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn finish_memo_recording(&mut self, media_dir: &Path) {
-        let page = self.current_page;
-        let list = self.audio_index.page_memos.entry(page).or_default();
-        let idx = list.len() + 1;
-        let fname = format!("memo_p{}_{}.wav", page, idx);
-        if let Some((_, dur)) = self.audio_engine.stop_recording(&media_dir.join(&fname)) {
-            list.push(audio::VoiceMemoEntry {
-                id: format!("Memo #{}", idx),
-                filename: fname,
-                duration_ms: dur,
-                transcript: None,
-                title: None,
-            });
-            self.audio_index.save(&self.pdf_path);
-            self.preload_asr_model();
+        if let Err(err) = self.finish_active_recording(media_dir) {
+            self.audio_toast(format!("Could not finish recording: {err}"));
         }
     }
 
@@ -10973,6 +11114,10 @@ let state_path = crate::state::AppState::config_path();
         });
 
         if switch_to.is_some() || new_lec {
+            if self.audio_engine.is_recording() || self.is_transcribing {
+                self.audio_toast("Finish recording or transcription before switching lectures");
+                return;
+            }
             self.audio_engine.stop_and_release();
 
             match switch_to {
@@ -11054,7 +11199,11 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn start_lecture_transcription(&mut self, wav_path: PathBuf, ctx: &egui::Context) {
-        if self.is_transcribing {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording() {
+            return;
+        }
+        let dir = AudioDocIndex::media_dir_for_pdf(&self.pdf_path);
+        if self.audio_index.lecture_wav.as_ref().map(|n| dir.join(n)).as_ref() != Some(&wav_path) {
             return;
         }
         let Some(model_dir) = self.ensure_asr_model(
@@ -11067,12 +11216,9 @@ let state_path = crate::state::AppState::config_path();
         };
 
         self.is_transcribing = true;
-        self.asr_cancel
-            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.asr_progress = Some((0, self.audio_index.lecture_duration_ms.max(1)));
 
-        let tx = self.asr_tx.clone();
-        let cancel = self.asr_cancel.clone();
+        let (tx, cancel) = self.new_asr_job();
         let w_ctx = ctx.clone();
 
         thread::spawn(move || {
@@ -11084,7 +11230,7 @@ let state_path = crate::state::AppState::config_path();
     }
 
     fn start_alignment(&mut self, ctx: &egui::Context) {
-        if self.is_transcribing || self.audio_index.segments.is_empty() {
+        if self.is_transcribing || self.audio_engine.is_recording() || self.audio_index.segments.is_empty() {
             return;
         }
         let (lo, hi) = (self.align_from.max(1), self.align_to.min(self.total_pages));
@@ -11096,15 +11242,21 @@ let state_path = crate::state::AppState::config_path();
         self.asr_progress = None;
         let mut idx = self.audio_index.clone();
         let (pdf, total, notes) = (self.pdf_path.clone(), self.total_pages, self.notes.clone());
-        let (tx, ctx) = (self.asr_tx.clone(), ctx.clone());
+        let (tx, cancel) = self.new_asr_job();
+        let ctx = ctx.clone();
         thread::spawn(move || {
             let texts = extract_slide_texts(&pdf, total, &notes);
             idx.align_to_slides(&texts, (lo, hi));
-            let _ = tx.send(audio::AsrJobResult::Aligned {
-                segments: idx.segments,
-                timeline: idx.timeline,
-                range: (lo, hi),
-            });
+            let msg = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                audio::AsrJobResult::Cancelled
+            } else {
+                audio::AsrJobResult::Aligned {
+                    segments: idx.segments,
+                    timeline: idx.timeline,
+                    range: (lo, hi),
+                }
+            };
+            let _ = tx.send(msg);
             ctx.request_repaint();
         });
     }
@@ -11116,9 +11268,12 @@ let state_path = crate::state::AppState::config_path();
         wav_path: PathBuf,
         ctx: &egui::Context,
     ) {
-        if self.is_transcribing {
+        if !self.has_pdf() || self.is_transcribing || self.audio_engine.is_recording() {
             return;
         }
+        let Some(memo) = self.audio_index.page_memos.get(&page).and_then(|list| list.get(memo_idx)) else { return; };
+        let filename = memo.filename.clone();
+        if AudioDocIndex::media_dir_for_pdf(&self.pdf_path).join(&filename) != wav_path { return; }
         let Some(model_dir) = self.ensure_asr_model(
             ctx,
             AsrRetry::Memo {
@@ -11134,22 +11289,21 @@ let state_path = crate::state::AppState::config_path();
         self.asr_progress = None;
         self.audio_toast("󱑚 Transcribing voice memo...");
 
-        let tx = self.asr_tx.clone();
+        let (tx, cancel) = self.new_asr_job();
         let w_ctx = ctx.clone();
         thread::spawn(move || {
-            let msg = audio::transcribe_memo(&model_dir, &wav_path, page, memo_idx);
+            let msg = audio::transcribe_memo(&model_dir, &wav_path, filename, &cancel);
             let _ = tx.send(msg);
             w_ctx.request_repaint();
         });
     }
 
     fn page_has_study_content(&self, page: u32) -> bool {
-        let has_note = self
-            .notes
-            .get(&page)
-            .map(|n| !n.trim().is_empty())
-            .unwrap_or(false)
-            || (page == self.note_page && !self.current_note.trim().is_empty());
+        let has_note = if page == self.note_page {
+            !self.current_note.trim().is_empty()
+        } else {
+            self.notes.get(&page).is_some_and(|n| !n.trim().is_empty())
+        };
 
         let has_anns = self
             .annotations
@@ -11165,6 +11319,7 @@ let state_path = crate::state::AppState::config_path();
                 .any(|l| l.segments.iter().any(|s| s.page == page));
 
         has_note || has_anns || has_transcript
+            || has_extra_study_content(self.sketches.get(&page), self.audio_index.page_memos.get(&page))
     }
 
     /// Searches backwards from `page - 1` down to `1` for the most recent non-empty note.
@@ -13411,7 +13566,10 @@ let state_path = crate::state::AppState::config_path();
             paste_ev || v_press || v_release
         });
 
-        if ctrl_v && !any_focused && over_canvas {
+        let over_pending_primary = self.view_mode == ViewMode::SinglePage
+            && pointer.is_some_and(|p| self.canvas_rect.contains(p))
+            && cached_page(&self.page_cache, &self.thumb_cache, self.current_page).is_none();
+        if ctrl_v && !any_focused && over_canvas && !over_pending_primary {
             let (page, center) = self.page_at_pos(pointer);
             self.shots
                 .request_clipboard(ctx, ShotTarget::Pdf { page, center });
@@ -13426,6 +13584,13 @@ let state_path = crate::state::AppState::config_path();
                 .map(|f| f.path().to_path_buf()) // Convert &Path to owned PathBuf
         });
         if let Some(path) = dropped {
+            if over_pending_primary {
+                self.toast_message = Some((
+                    "Wait for the current page before dropping an image".into(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
             let over_page =
                 pointer.is_some_and(|p| self.last_slide_rects.iter().any(|(_, r)| r.contains(p)));
             let target = if over_page {
@@ -15537,6 +15702,9 @@ let state_path = crate::state::AppState::config_path();
 
 impl eframe::App for Lapis {
     fn on_exit(&mut self) {
+        if !self.allow_window_close && !self.finish_audio_before_transition() {
+            eprintln!("Lapis: could not finalize audio on forced exit; recording files retained");
+        }
         self.audio_engine.shutdown_output();
         self.memo_audio_engine.shutdown_output();
         if self.allow_window_close { return; }
@@ -15641,6 +15809,7 @@ impl eframe::App for Lapis {
                 } => {
                     let n = segments.len();
                     self.audio_index.segments = segments;
+                    self.audio_index_pending = true;
                     if self.audio_index.timeline_is_live {
                         self.audio_index.assign_pages_from_timeline();
                     }
@@ -15650,8 +15819,7 @@ impl eframe::App for Lapis {
                         if !self.audio_index.timeline_is_live {
                             self.transcript_all = true;
                         }
-                        self.audio_index.save(&self.pdf_path);
-                        self.audio_toast(format!(
+                        self.report_audio_index_result(format!(
                             "󰄬 Transcribed {n} segments. Use Align to map them to slides"
                         ));
                     } else {
@@ -15670,39 +15838,31 @@ impl eframe::App for Lapis {
                     self.audio_index.timeline_is_live = false;
                     self.audio_index.page_range = Some(range);
                     self.transcript_all = false;
-                    self.audio_index.save(&self.pdf_path);
-                    self.audio_toast(format!(
+                    self.report_audio_index_result(format!(
                         "󰄬 Aligned {n} segments to pages {}–{}",
                         range.0, range.1
                     ));
                 }
-                audio::AsrJobResult::Memo {
-                    page,
-                    memo_idx,
-                    text,
-                } => {
+                audio::AsrJobResult::Memo { filename, text } => {
                     self.is_transcribing = false;
-                    if let Some(memo) = self
-                        .audio_index
-                        .page_memos
-                        .get_mut(&page)
-                        .and_then(|list| list.get_mut(memo_idx))
-                    {
-                        memo.transcript = Some(text);
-                        self.audio_index.save(&self.pdf_path);
+                    self.asr_progress = None;
+                    if self.audio_index.set_memo_transcript(&filename, text) {
+                        self.report_audio_index_result("󰄬 Voice memo transcribed!");
                     }
-                    self.audio_toast("󰄬 Voice memo transcribed!");
                 }
                 audio::AsrJobResult::Cancelled => {
                     self.is_transcribing = false;
                     self.asr_progress = None;
-                    self.audio_index.save(&self.pdf_path);
-                    self.audio_toast("󰅖 Transcription cancelled (partial transcript kept)");
+                    self.report_audio_index_result("󰅖 Transcription cancelled (partial transcript kept)");
                 }
                 audio::AsrJobResult::Error(err) => {
                     self.is_transcribing = false;
                     self.asr_progress = None;
-                    self.audio_toast(format!("󰅚 Transcription: {}", err));
+                    if self.audio_index_pending {
+                        self.report_audio_index_result(format!("󰅚 Transcription: {err} (partial transcript kept)"));
+                    } else {
+                        self.audio_toast(format!("󰅚 Transcription: {err}"));
+                    }
                 }
             }
         }
@@ -16397,7 +16557,13 @@ impl eframe::App for Lapis {
                         ui.spacing_mut().button_padding = egui::vec2(6.0, pad_y);
 
                         // Notes
-                        let page_has_note = self.notes.get(&self.current_page).map(|s| !s.trim().is_empty()).unwrap_or(false) || !self.current_note.trim().is_empty();
+                        let page_has_note = page_has_notes_or_sketch(
+                            self.current_page,
+                            self.note_page,
+                            &self.current_note,
+                            &self.notes,
+                            &self.sketches,
+                        );
  
                         let notes_arrow = if self.show_notes { "" } else { "" };
                         let notes_btn = crate::theme::selected_button(format!("{} 󰠮 ", notes_arrow), self.show_notes, ui.visuals())
@@ -16409,7 +16575,7 @@ impl eframe::App for Lapis {
                             self.paint_topbar_dot(ui, resp.rect);
                         }
  
-                        let has_notes_hover = if page_has_note {"\n(This page contains notes)"} else {""};
+                        let has_notes_hover = if page_has_note {"\n(This page contains notes or a sketch)"} else {""};
                         if resp.on_hover_text(format!("{}{}", self.app_state.shortcuts.toggle_notes.hint("Toggle Notes Panel"), has_notes_hover)).clicked() {
                             self.show_notes = !self.show_notes;
                             if self.show_notes && self.note_mode == NoteMode::Edit {
@@ -18620,6 +18786,13 @@ impl eframe::App for Lapis {
                 let visible_w = ui.available_width();
                 let visible_h = ui.available_height();
 
+                let current_texture_ready = cached_page(&self.page_cache, &self.thumb_cache, self.current_page).is_some();
+                if matches!(self.view_mode, ViewMode::SinglePage | ViewMode::Slideshow | ViewMode::SlideshowWithNotes) {
+                    if let Some((handle, dims)) = cached_page(&self.page_cache, &self.thumb_cache, self.current_page) {
+                        self.texture_handle = Some(handle.clone());
+                        self.page_dims = *dims;
+                    }
+                }
                 let page_w = self.page_dims.0 as f32;
                 let page_h = self.page_dims.1 as f32;
                 let (base_w, base_h) = if page_w > 0.0 && page_h > 0.0 {
@@ -19291,11 +19464,6 @@ impl eframe::App for Lapis {
                     return;
                 }
                 if self.view_mode == ViewMode::SinglePage || self.view_mode == ViewMode::Slideshow || self.view_mode == ViewMode::SlideshowWithNotes  {
-                    if let Some((handle, dims)) = self.page_cache.get(&self.current_page) {
-                        self.texture_handle = Some(handle.clone());
-                        self.page_dims = *dims;
-                    }
-                    
                     let mut canvas_scroll = egui::ScrollArea::both()
                         .id_salt("pdf_canvas_scroll")
                         .auto_shrink([false, false]);
@@ -19394,7 +19562,11 @@ impl eframe::App for Lapis {
                                 egui::vec2(display_w, display_h),
                             );
 
-                            let sense = egui::Sense::click_and_drag();
+                            let sense = if current_texture_ready {
+                                egui::Sense::click_and_drag()
+                            } else {
+                                egui::Sense::hover()
+                            };
 
                             // Keep centering padding independent of widget spacing.
                             if effective_zoom == ZoomMode::FitPage {
@@ -19419,12 +19591,19 @@ impl eframe::App for Lapis {
                                 })
                                 .inner;
 
-                            let slide_rect = img_resp.rect;
-                            self.handle_slide_annotations(
-                                ui,
-                                self.current_page,
-                                slide_rect,
-                                &img_resp,
+                            // The retained image is only visual; never draw or select on it.
+                            if current_texture_ready {
+                                self.handle_slide_annotations(
+                                    ui,
+                                    self.current_page,
+                                    img_resp.rect,
+                                    &img_resp,
+                                );
+                            }
+                        } else {
+                            // On first open there is no previous texture to display.
+                            ui.allocate_exact_size(
+                                egui::vec2(display_w, display_h), egui::Sense::hover(),
                             );
                         }
                     });
@@ -19758,5 +19937,116 @@ mod single_page_wheel_tests {
         assert_eq!(wheel_page_target(7, 9, &hidden, 100), 8);
         assert_eq!(wheel_page_target(2, 9, &hidden, -100), 1);
         assert_eq!(wheel_page_target(8, 9, &hidden, 1), 8);
+    }
+}
+
+#[cfg(test)]
+mod release_correctness_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn retired_transcription_cannot_reach_the_next_job() {
+        let (old_tx, mut rx) = channel();
+        let old_cancel = Arc::new(AtomicBool::new(false));
+        let mut cancel = old_cancel.clone();
+        assert!(old_tx.send(audio::AsrJobResult::Cancelled).is_ok());
+        let new_tx = replace_asr_channel(&mut rx, &mut cancel);
+        assert!(old_cancel.load(Ordering::Relaxed));
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(old_tx.send(audio::AsrJobResult::Cancelled).is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(new_tx.send(audio::AsrJobResult::Error("new job".into())).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(audio::AsrJobResult::Error(s)) if s == "new job"));
+        let _third = replace_asr_channel(&mut rx, &mut cancel);
+        assert!(new_tx.send(audio::AsrJobResult::Cancelled).is_err());
+    }
+
+    #[test]
+    fn import_refreshes_the_locked_note_page_not_the_pdf_page() {
+        let mut notes = HashMap::from([(1, "old one".to_owned()), (2, "old two".to_owned())]);
+        let editor = merge_imported_notes(&mut notes, [(1, "new one".to_owned())], 2);
+        assert_eq!(editor, "old two");
+        assert_eq!(notes.get(&1).unwrap(), "new one");
+        let editor = merge_imported_notes(&mut notes, [(2, "new two".to_owned())], 2);
+        assert_eq!(editor, "new two");
+    }
+
+    #[test]
+    fn lookup_never_uses_another_pages_texture() {
+        let mut pages = HashMap::from([(1, "page one")]);
+        let thumbs = HashMap::from([(2, "page two thumb")]);
+        assert_eq!(cached_page(&pages, &thumbs, 3), None);
+        assert_eq!(cached_page(&pages, &thumbs, 2), Some(&"page two thumb"));
+        pages.insert(2, "page two full");
+        assert_eq!(cached_page(&pages, &thumbs, 2), Some(&"page two full"));
+    }
+
+    #[test]
+    fn sketch_or_memo_is_study_content() {
+        let mut sketch = notes::SketchPage::new(notes::BlankPageStyle::Blank);
+        assert!(!has_extra_study_content(Some(&sketch), None));
+        sketch.strokes.push(notes::PageAnnotation {
+            kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
+            points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
+            font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+        });
+        assert!(has_extra_study_content(Some(&sketch), None));
+        let memos = vec![audio::VoiceMemoEntry {
+            id: "Memo #1".into(), filename: "memo.wav".into(), duration_ms: 100,
+            transcript: None, title: None,
+        }];
+        assert!(has_extra_study_content(None, Some(&memos)));
+        assert!(!has_extra_study_content(None, None));
+    }
+
+    #[test]
+    fn notes_dot_includes_sketches_and_respects_locked_editor() {
+        let notes = HashMap::from([(1, "saved text".to_owned())]);
+        let mut sketches = HashMap::from([(2, notes::SketchPage::new(notes::BlankPageStyle::Blank))]);
+        assert!(!page_has_notes_or_sketch(2, 1, "editing page one", &notes, &sketches));
+        assert!(page_has_notes_or_sketch(1, 1, "editing page one", &notes, &sketches));
+        assert!(!page_has_notes_or_sketch(1, 1, " ", &notes, &sketches));
+        assert!(page_has_notes_or_sketch(1, 2, "", &notes, &sketches));
+        sketches.get_mut(&2).unwrap().strokes.push(notes::PageAnnotation {
+            kind: notes::AnnotationKind::Freehand, color: [0, 0, 0],
+            points: vec![(1.0, 1.0), (4.0, 4.0)], text: String::new(),
+            font_size: 18.0, bold: false, italic: false, stroke_width: 2.5,
+        });
+        assert!(page_has_notes_or_sketch(2, 1, "", &notes, &sketches));
+    }
+
+    #[test]
+    fn opening_rejects_bad_or_empty_pdf_but_accepts_valid_pdf() {
+        use lopdf::{dictionary, Object};
+        let dir = std::env::temp_dir().join(format!("lapis-open-test-{}", docid::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.pdf");
+        assert!(inspect_pdf(&path).is_err());
+        std::fs::write(&path, b"not a PDF").unwrap();
+        assert!(inspect_pdf(&path).is_err());
+        for count in [0, 1] {
+            let mut doc = lopdf::Document::with_version("1.5");
+            let pages = doc.new_object_id();
+            let mut kids = Vec::new();
+            if count == 1 {
+                let page = doc.add_object(dictionary! {
+                    "Type" => "Page", "Parent" => Object::Reference(pages),
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => dictionary! {},
+                });
+                kids.push(Object::Reference(page));
+            }
+            doc.objects.insert(pages, Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count),
+            }));
+            let root = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => Object::Reference(pages) });
+            doc.trailer.set("Root", root);
+            doc.save(&path).unwrap();
+            let result = inspect_pdf(&path);
+            if count == 0 { assert!(result.is_err()); }
+            else { assert_eq!(result.unwrap().0, 1); }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Audio recording and transcription:** Recordings use unique filenames and voice memos stay on their original page. Closing, switching or exiting finalizes recordings and saves their index; failed conversion retains the raw WAV. Isolate background transcription/alignment jobs by document session, and apply memo results by recording filename rather than list position. Stop old playback and cancel obsolete work on document transitions.
+
+- **PDF opening and navigation:** Reject unreadable, non-PDF, password-protected and empty documents without replacing the open document. Prefer the destination thumbnail or keep the last rendered page visible while rendering, without permitting annotation interactions on the fallback image.
+- **Notes and presentation:** Import notes into the correct editor page when the notes panel is locked; treat pages with sketches or voice memos as study content in Slideshow + Notes. Show the Notes toolbar dot for sketch-only pages and respect the locked note page when checking the current page.
+
 - **Flashcard preview:** Use the same parser as the trainer, including inline code and LaTeX in titles, and preserve fenced code and display math in answers.
 - **Slideshow HUD:** Center the floating Exit control in both slideshow modes.
 

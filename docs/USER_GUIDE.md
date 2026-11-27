@@ -32,13 +32,15 @@ Start by opening a PDF through the **Open PDF** action or by dragging a PDF into
   <img src="images/01-open-document.png" alt="Opening a PDF document in Lapis" width="85%">
 </p>
 
+Invalid, empty, or password-protected PDFs are rejected without closing the current document. Unlock password-protected PDFs before opening them.
+
 Once a document is loaded, Lapis provides a workspace containing the PDF viewer, navigation controls, annotation tools, notes, and study features.
 
 The current document is the context for your work: notes, annotations, bookmarks, and associated audio information are organized around its pages.
 
 ### Saving your work
 
-Use the Save action or its keyboard shortcut to save notes and annotations. PDF commits run on a background worker. The workspace stays visible and editable while saving, with toast-only feedback. Closing or switching waits for all current edits to be committed. Inserting, deleting, reordering or compacting PDF pages is temporarily unavailable during the commit. If a PDF commit fails, retry, keep working, or continue with the local backup only when the backup was successfully written.
+Use the Save action or its keyboard shortcut to save notes and annotations. PDF commits run on a background worker. The workspace stays visible and editable while saving, with toast-only feedback. Closing or switching waits for all current edits to be committed. Inserting, deleting, reordering or compacting PDF pages is temporarily unavailable during the commit. Page insertion, deletion and reordering also wait until audio recording or transcription has finished. If a PDF commit fails, retry, keep working, or continue with the local backup only when the backup was successfully written.
 
 If another program added annotations to the PDF while it was open, Lapis merges them into your document before saving and shows a notice; nothing is removed from the page. Compacting the PDF history does the same and asks you to compact again. Inserting, deleting or reordering pages is cancelled if the local backup cannot be written, and asks for confirmation on digitally signed PDFs, because rewriting the pages invalidates the signature. Choose **Cancel** to leave the file untouched.
 
@@ -166,7 +168,7 @@ Lapis provides several ways to navigate through a document.
 
 Use the thumbnails sidebar to navigate visually.
 
-Selecting a thumbnail takes you to the corresponding page.
+Selecting a thumbnail takes you to the corresponding page. In Single Page mode, Lapis prefers the destination thumbnail while a full render is pending, or keeps the last page image visible until the destination is ready. The retained image is not an annotation target.
 
 ### Document outline
 
@@ -326,7 +328,7 @@ Custom pages are useful for adding handwritten-style notes, calculations, diagra
 
 ## 8. Markdown Notes
 
-Each PDF page can have its own Markdown notes.
+Each PDF page can have its own Markdown notes. The Notes toolbar button shows a notification dot when the current PDF page contains text notes or a non-empty sketch.
 
 Use the notes panel to write explanations, summaries, formulas, and study material associated with the current slide.
 
@@ -488,7 +490,7 @@ Loading a new lecture recording replaces the previous lecture track context and 
 
 Use the recording controls to capture a lecture directly from the application.
 
-Once recorded, the audio becomes available for playback and transcription.
+Once recorded, the audio becomes available for playback and transcription. Closing, switching documents or exiting finalizes an active recording. If conversion fails, the original WAV is retained. Transcription and alignment are cancelled on document changes; partial lecture transcripts already received are kept.
 
 ### Playback
 
@@ -578,7 +580,7 @@ They are useful for:
 - Questions to revisit later.
 - Short spoken summaries.
 
-Voice memos are managed in the audio workspace and are associated with their respective pages.
+Voice memos are managed in the audio workspace and remain associated with the page where recording started, even if you navigate before stopping.
 
 ### Transcribing a voice memo
 

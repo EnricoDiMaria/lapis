@@ -102,8 +102,15 @@ impl AudioDocIndex {
     }
 
     pub fn save(&self, pdf_path: &Path) {
+        if pdf_path.as_os_str().is_empty() { return; }
+        if let Err(err) = self.save_checked(pdf_path) {
+            eprintln!("Lapis: audio index save failed: {err}");
+        }
+    }
+
+    pub fn save_checked(&self, pdf_path: &Path) -> Result<(), String> {
         if pdf_path.as_os_str().is_empty() {
-            return;
+            return Err("No document for the audio index".into());
         }
 
         let index_path = Self::media_dir_for_pdf(pdf_path).join("audio_index.json");
@@ -115,8 +122,17 @@ impl AudioDocIndex {
         to_save.source_path =
             Some(dunce::canonicalize(pdf_path).unwrap_or_else(|_| pdf_path.to_path_buf()));
 
-        if let Ok(json) = serde_json::to_string_pretty(&to_save) {
-            let _ = crate::paths::write_atomic(&index_path, json.as_bytes());
+        let json = serde_json::to_string_pretty(&to_save).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&index_path, json.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    /// Match the actual recording, not its mutable position in a page's memo list.
+    pub fn set_memo_transcript(&mut self, filename: &str, text: String) -> bool {
+        if let Some(memo) = self.page_memos.values_mut().flatten().find(|m| m.filename == filename) {
+            memo.transcript = Some(text);
+            true
+        } else {
+            false
         }
     }
 
@@ -368,6 +384,16 @@ impl AudioDocIndex {
     }
 }
 
+/// Recording filenames are permanent identities, not positions in a list.
+pub fn recording_path(dir: &Path, prefix: &str) -> PathBuf {
+    loop {
+        let path = dir.join(format!("{prefix}_{}.wav", crate::docid::new_id()));
+        if !path.exists() {
+            return path;
+        }
+    }
+}
+
 type SharedWavWriter = Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<File>>>>>;
 
 #[derive(PartialEq, Clone)]
@@ -572,27 +598,35 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Stops recording, finalizes the WAV header and normalizes to 16kHz Mono for ASR.
-    pub fn stop_recording(&mut self, final_wav_path: &Path) -> Option<(RecordingTarget, u64)> {
-        self.rec_stream.take(); // Drops stream
-        if let Ok(mut guard) = self.rec_writer.lock()
-            && let Some(writer) = guard.take()
-        {
-            let _ = writer.finalize();
-        }
-        let target = self.rec_target.take()?;
-        let raw_path = self.rec_raw_path.take()?;
+    /// Finalize the raw file first. If conversion fails, keep and use the raw WAV.
+    pub fn stop_recording(&mut self, final_wav_path: &Path) -> Result<(RecordingTarget, PathBuf, u64), String> {
+        self.rec_stream.take();
+        let target = self.rec_target.take().ok_or("No active recording")?;
+        let raw_path = self.rec_raw_path.take().ok_or("Recording path missing")?;
         self.rec_start_instant = None;
-
-        // Convert to 16kHz Mono via ffmpeg if available, otherwise rename raw WAV directly
-        if convert_media_to_16k_wav(&raw_path, final_wav_path).is_ok() {
-            let _ = fs::remove_file(&raw_path);
-        } else {
-            let _ = fs::rename(&raw_path, final_wav_path);
+        let finalize = (|| {
+            let mut guard = self.rec_writer.lock().map_err(|_| "Recording writer lock failed".to_string())?;
+            let writer = guard.take().ok_or("Recording writer missing")?;
+            writer.finalize().map_err(|e| e.to_string())
+        })();
+        if let Err(err) = finalize {
+            return Err(format!("Could not finalize recording: {err}. Raw file kept at {}", raw_path.display()));
         }
+        let raw_duration = wav_duration_ms(&raw_path).ok_or_else(||
+            format!("Could not read recording; raw file kept at {}", raw_path.display()))?;
 
-        let dur = wav_duration_ms(final_wav_path).unwrap_or(0);
-        Some((target, dur))
+        // The destination is newly allocated; never convert over an existing recording.
+        if !final_wav_path.exists() {
+            if let Ok(dur) = convert_media_to_16k_wav(&raw_path, final_wav_path)
+                && wav_duration_ms(final_wav_path).is_some()
+            {
+                let _ = fs::remove_file(&raw_path);
+                return Ok((target, final_wav_path.to_path_buf(), dur));
+            }
+            // FFmpeg can leave a partial output after a failed conversion.
+            let _ = fs::remove_file(final_wav_path);
+        }
+        Ok((target, raw_path, raw_duration))
     }
     fn start_player(
         &mut self,
@@ -783,6 +817,7 @@ impl AudioEngine {
     }
 
     pub fn stop_and_release(&mut self) {
+        self.pending_stretch = None;
         self.player.take();
         self.active_file = None;
         self.last_resume_instant = None;
@@ -930,8 +965,7 @@ pub enum AsrJobResult {
         range: (u32, u32),
     },
     Memo {
-        page: u32,
-        memo_idx: usize,
+        filename: String,
         text: String,
     },
     Cancelled,
@@ -1338,14 +1372,12 @@ pub fn transcribe_lecture(
 pub fn transcribe_memo(
     model_dir: &Path,
     wav_path: &Path,
-    page: u32,
-    memo_idx: usize,
+    filename: String,
+    cancel: &AtomicBool,
 ) -> AsrJobResult {
-    let never = AtomicBool::new(false);
-    match transcribe_chunks(model_dir, wav_path, &never, &mut |_, _, _| {}) {
+    match transcribe_chunks(model_dir, wav_path, cancel, &mut |_, _, _| {}) {
         Ok((segs, _)) => AsrJobResult::Memo {
-            page,
-            memo_idx,
+            filename,
             text: segs.into_iter().map(|s| s.2).collect::<Vec<_>>().join(" "),
         },
         Err(e) => e.into_job(),
@@ -1861,5 +1893,68 @@ mod output_lifecycle_tests {
         assert!(engine.device_sink.is_none());
         engine.shutdown_output();
         assert!(engine.device_sink.is_none());
+    }
+}
+
+#[cfg(test)]
+mod recording_correctness_tests {
+    use super::*;
+
+    #[test]
+    fn recording_names_do_not_depend_on_the_number_of_memos() {
+        let dir = std::env::temp_dir().join(format!("lapis-recordings-{}", crate::docid::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let first = recording_path(&dir, "memo");
+        let second = recording_path(&dir, "memo");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        fs::remove_file(&first).unwrap();
+        let third = recording_path(&dir, "memo");
+        assert_ne!(third, first);
+        assert_ne!(third, second);
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stopping_recording_keeps_original_page_and_does_not_replace_existing_file() {
+        // Construct a recording without a microphone or FFmpeg dependency.
+        let dir = std::env::temp_dir().join(format!("lapis-recording-stop-{}", crate::docid::new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("raw.wav");
+        let occupied = dir.join("occupied.wav");
+        fs::write(&occupied, b"existing recording").unwrap();
+        let mut writer = hound::WavWriter::create(&raw, hound::WavSpec {
+            channels: 1, sample_rate: 16000, bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        }).unwrap();
+        for _ in 0..1600 { writer.write_sample(0i16).unwrap(); }
+        let mut engine = AudioEngine::new();
+        engine.rec_writer = Arc::new(Mutex::new(Some(writer)));
+        engine.rec_raw_path = Some(raw.clone());
+        engine.rec_target = Some(RecordingTarget::PageMemo(7));
+        let (target, path, duration) = engine.stop_recording(&occupied).unwrap();
+        assert!(target == RecordingTarget::PageMemo(7));
+        assert_eq!(path, raw);
+        assert_eq!(duration, 100);
+        assert_eq!(fs::read(&occupied).unwrap(), b"existing recording");
+        assert_eq!(wav_duration_ms(&raw), Some(100));
+        assert!(engine.rec_target.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn late_memo_result_follows_filename_after_list_changes() {
+        let memo = |filename: &str| VoiceMemoEntry {
+            id: filename.into(), filename: filename.into(), duration_ms: 100,
+            transcript: None, title: None,
+        };
+        let mut index = AudioDocIndex::default();
+        index.page_memos.insert(3, vec![memo("first.wav"), memo("second.wav"), memo("third.wav")]);
+        index.page_memos.get_mut(&3).unwrap().remove(0);
+        assert!(index.set_memo_transcript("second.wav", "correct memo".into()));
+        assert_eq!(index.page_memos[&3][0].transcript.as_deref(), Some("correct memo"));
+        assert!(index.page_memos[&3][1].transcript.is_none());
+        assert!(!index.set_memo_transcript("first.wav", "obsolete".into()));
     }
 }

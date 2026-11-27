@@ -77,7 +77,7 @@ fn legacy_hash(canon: &Path) -> u64 {
     h.finish()
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     use std::hash::{BuildHasher, RandomState};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
