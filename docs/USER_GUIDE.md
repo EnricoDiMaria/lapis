@@ -102,7 +102,7 @@ This mode is useful when presenting or reviewing a slide while keeping its assoc
 
 ### Fit PDF and Notes Layout — `Alt + F`
 
-Click the fit icon to the left of the lock in the right notes panel header, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu, or `F` when not typing, fits the PDF without moving the divider. Both shortcuts can be changed in **Settings → Keybindings**.
+Double-click the divider between the PDF and the right notes panel, press `Alt + F` (configurable in **Settings → Keybindings**), or select **Fit PDF and Notes Layout** in the Command Palette. The page or book spread is fitted to the largest available size while keeping the notes panel usable, and the remaining width is assigned to the notes panel. This is a one-time layout adjustment; you can drag the divider afterwards or repeat the action after resizing the window or changing pages. It is available in reading modes with the right notes panel open and Split View disabled. The regular **Fit Page** option in the zoom menu, or `F` when not typing, fits the PDF without moving the divider. Both shortcuts can be changed in **Settings → Keybindings**.
 
 ### Fullscreen — `F11`
 

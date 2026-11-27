@@ -402,6 +402,7 @@ Configurable shortcuts are grouped in **Settings → Keybindings**. Uncheck indi
 | `W` | Fit Width |
 | `F` | Fit Page without resizing the notes panel when not typing |
 | `Alt + F` | Fit PDF and right notes panel to the available workspace |
+| Double-click notes divider | Fit PDF and right notes panel |
 
 Single-letter shortcuts operate outside text fields. Toolbar and radial-menu hints reflect the active binding; disabled shortcuts do not appear in those hints. The configurable shortcut system also provides global previous/next slide navigation and other application actions.
 

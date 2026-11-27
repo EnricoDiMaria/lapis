@@ -1975,6 +1975,47 @@ impl Lapis {
         (width - pdf_width).clamp(min, max)
     }
 
+    fn fit_notes_target_width(&self, available: egui::Rect, min_w: f32, max_w: f32) -> f32 {
+        let (w, h) = self.page_cache.get(&self.current_page)
+            .map(|(_, dims)| *dims).unwrap_or(self.page_dims);
+        let aspect = if w > 0 && h > 0 { w as f32 / h as f32 } else { 4.0 / 3.0 };
+        let count = if self.view_mode == ViewMode::TwoPage {
+            let (left, right) = self.current_book_spread();
+            (left.iter().count() + right.iter().count()).max(1)
+        } else { 1 };
+        Self::fitted_notes_width(available.width(), available.height(), aspect, count, min_w, max_w)
+    }
+
+    fn notes_layout_needs_fit(zoom: ZoomMode, current: f32, target: f32) -> bool {
+        // Ignore small differences from panel borders and texture rounding.
+        zoom != ZoomMode::FitPage || (current - target).abs() > 3.0
+    }
+
+    fn handle_fit_notes_divider_double_click(
+        &mut self, ui: &egui::Ui, panel: &egui::Response,
+        available: egui::Rect, min_w: f32, max_w: f32,
+    ) {
+        if !self.can_fit_notes_layout() || self.notes_panel_resizing || self.pdf_panning
+            || self.show_settings || self.show_command_palette || self.show_flashcards_modal
+            || self.show_search || self.radial_menu_pos.is_some()
+            || !ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+        {
+            return;
+        }
+        let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else { return; };
+        let rect = panel.rect;
+        let near_divider = (pos.x - rect.left()).abs() <= 5.0
+            && pos.y >= rect.top() && pos.y <= rect.bottom();
+        let ctx = ui.ctx();
+        if !near_divider || ctx.layer_id_at(pos) != Some(panel.layer_id) {
+            return;
+        }
+        let target = self.fit_notes_target_width(available, min_w, max_w);
+        if Self::notes_layout_needs_fit(self.zoom_mode, rect.width(), target) {
+            self.request_fit_notes_layout(ctx);
+        }
+    }
+
     fn can_fit_notes_layout(&self) -> bool {
         self.has_pdf() && self.show_notes && !self.split_view_enabled
             && !matches!(self.view_mode, ViewMode::Slideshow | ViewMode::SlideshowWithNotes)
@@ -14194,19 +14235,6 @@ let state_path = crate::state::AppState::config_path();
                 let full_width = ui.available_width();
                 let compact = full_width < 320.0;
 
-                if !use_bottom && !self.split_view_enabled {
-                    let hint = self.app_state.shortcuts.fit_page.hint("Fit PDF and notes layout");
-                    if ui.add_sized([18.0, nav_h],
-                        egui::Button::new(egui::RichText::new("󰊓").size(11.0))
-                            .corner_radius(button_radius))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        self.request_fit_notes_layout(ui.ctx());
-                    }
-                }
-
                 // Page navigation stays compact and left aligned.
                 let lock_icon = if self.lock_note_page { "󰌾" } else { "󰌿" };
                 if ui
@@ -17645,15 +17673,7 @@ impl eframe::App for Lapis {
                     let reserved_pdf_w = if self.split_view_enabled { 340.0 } else { 100.0 };
                     let max_w = (available.width() - reserved_pdf_w).max(min_w);
                     if fit_notes_layout {
-                        let (w, h) = self.page_cache.get(&self.current_page)
-                            .map(|(_, dims)| *dims).unwrap_or(self.page_dims);
-                        let aspect = if w > 0 && h > 0 { w as f32 / h as f32 } else { 4.0 / 3.0 };
-                        let count = if self.view_mode == ViewMode::TwoPage {
-                            let (left, right) = self.current_book_spread();
-                            (left.iter().count() + right.iter().count()).max(1)
-                        } else { 1 };
-                        let size = Self::fitted_notes_width(available.width(), available.height(), aspect,
-                            count, min_w, max_w);
+                        let size = self.fit_notes_target_width(available, min_w, max_w);
                         self.panel_sizes.set(PanelSlot::Right, size);
                         self.panel_apply[PanelSlot::Right as usize] = true;
                         self.panel_sizes_dirty = true;
@@ -17681,6 +17701,9 @@ impl eframe::App for Lapis {
                         self.render_notes_panel_contents(ui, text_edit_id, false);
                     });
                     self.track_panel_size(ui, PanelSlot::Right, resp.response.rect.width());
+                    if !fit_notes_layout {
+                        self.handle_fit_notes_divider_double_click(ui, &resp.response, available, min_w, max_w);
+                    }
                 }
             }
         }
@@ -19657,7 +19680,17 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod fit_notes_layout_tests {
-    use super::Lapis;
+    use super::{Lapis, ZoomMode};
+
+    #[test]
+    fn divider_double_click_needs_no_adjustment_when_fitted() {
+        assert!(!Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 350.0));
+        assert!(!Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 352.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 350.0, 354.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitPage, 354.0, 350.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::Custom, 350.0, 350.0));
+        assert!(Lapis::notes_layout_needs_fit(ZoomMode::FitWidth, 350.0, 350.0));
+    }
 
     #[test]
     fn gives_unused_width_to_notes() {
