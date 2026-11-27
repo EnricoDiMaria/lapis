@@ -1004,6 +1004,17 @@ pub fn mark_pdf_observed(pdf_path: &Path) -> io::Result<()> {
     save_local_backup_checked(pdf_path, &data)
 }
 
+/// Test seam: runs once between the atomic PDF replacement and the backup reconciliation, the
+/// exact point where a UI checkpoint can interleave with a background commit.
+#[cfg(test)]
+static AFTER_REPLACE_HOOK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_replace_hook() {
+    let hook = AFTER_REPLACE_HOOK.lock().unwrap().take();
+    if let Some(hook) = hook { hook(); }
+}
+
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
@@ -1032,23 +1043,6 @@ fn replace_file(tmp: &Path, dest: &Path) -> io::Result<()> {
             }
         }
     }
-}
-
-fn pdf_has_signature(doc: &lopdf::Document) -> bool {
-    // /ByteRange, /FT /Sig and /Type /Sig can represent signed PDF objects.
-    doc.objects.values().any(|object| {
-        let dictionary = match object {
-            lopdf::Object::Dictionary(d) => Some(d),
-            lopdf::Object::Stream(s) => Some(&s.dict),
-            _ => None,
-        };
-        dictionary.is_some_and(|d| {
-            d.get(b"ByteRange").is_ok()
-                || [b"Type".as_slice(), b"FT".as_slice()].iter().any(|key| {
-                    d.get(key).ok().and_then(|o| o.as_name().ok()) == Some(b"Sig".as_slice())
-                })
-        })
-    })
 }
 
 /// The PDF carries a digital signature that a page change would invalidate.
@@ -1494,6 +1488,8 @@ fn commit_with_base(
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }
     result?;
+    #[cfg(test)]
+    run_after_replace_hook();
     finish_pdf_checkpoint(pdf_path, &data)?;
     if let Ok(stamp) = pdf_stamp(pdf_path)
         && stamp.len == data.pdf_annots_file_len
@@ -1530,7 +1526,7 @@ pub fn compact_doc_data(
         return Err(io::Error::other("encrypted PDFs are not eligible for compaction"));
     }
     // Compaction invalidates signatures even when their appearance survives.
-    let signed = pdf_has_signature(&doc);
+    let signed = pdf_has_signed_value(&doc);
     if signed {
         return Err(io::Error::other("signed PDFs cannot be compacted without invalidating signatures"));
     }
@@ -4861,6 +4857,74 @@ mod tests {
             assert_eq!(memchr::memmem::rfind(&bytes, b"startxref"), naive_rfind(b"startxref"));
             assert_eq!(memchr::memmem::rfind(&bytes, LAPIS_INCREMENTAL_MARKER), naive_rfind(LAPIS_INCREMENTAL_MARKER));
         }
+    }
+
+    #[test]
+    fn save_pipeline_edit_between_pdf_replace_and_reconcile_is_never_lost() {
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("mid_commit_edit");
+        let path = fixture.root.join("mid_commit_edit.pdf");
+        save_test_pdf(&path, 3);
+        let mut data = load_doc_data(&path);
+        data.notes.insert(1, "snapshot note".into());
+        let snapshot = prepare_pdf_commit(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        let snapshot_rev = snapshot.rev;
+
+        // The UI checkpoints a newer edit at the exact moment the worker has replaced the PDF.
+        let mut newer = data.notes.clone();
+        newer.insert(1, "edit during commit".into());
+        newer.insert(2, "second page edit".into());
+        let (hook_path, annotations, sketches) = (path.clone(), data.annotations.clone(), data.sketches.clone());
+        let hook_notes = newer.clone();
+        *AFTER_REPLACE_HOOK.lock().unwrap() = Some(Box::new(move || {
+            save_doc_data(&hook_path, &hook_notes, &annotations, HashSet::new(), &sketches).unwrap();
+        }));
+        commit_pdf_snapshot(&path, snapshot).unwrap();
+        assert!(AFTER_REPLACE_HOOK.lock().unwrap().is_none(), "hook did not run");
+
+        // The PDF holds the snapshot; the backup keeps the newer edit and the commit metadata.
+        let embedded = embedded_doc_data(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(embedded.notes[&1], "snapshot note");
+        let backup = load_local_backup(&path).unwrap();
+        assert_eq!(backup.notes[&1], "edit during commit", "newer edit overwritten by the worker");
+        assert_eq!(backup.notes[&2], "second page edit");
+        assert!(backup.rev > snapshot_rev, "backup revision went backwards");
+        assert_eq!(backup.pdf_annots_file_len, fs::metadata(&path).unwrap().len());
+        assert!(backup.pdf_annots_imported);
+
+        // Reopening prefers the newer local data, and the follow-up commit persists it.
+        *LAST_COMMIT.lock().unwrap() = None;
+        let reopened = load_doc_data(&path);
+        assert_eq!(reopened.notes[&1], "edit during commit");
+        commit_doc_data(&path, &newer, &data.annotations, HashSet::new(), &data.sketches).unwrap();
+        let embedded = embedded_doc_data(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(embedded.notes[&1], "edit during commit");
+        assert_eq!(embedded.notes[&2], "second page edit");
+        assert_eq!(count_custom_sections(&fs::read(&path).unwrap()), 1);
+    }
+
+    #[test]
+    fn compaction_is_blocked_only_by_real_signature_values() {
+        use lopdf::dictionary;
+        let _guard = crate::docid::test_lock();
+        let fixture = SaveTestDir::new("compact_signature");
+        let path = fixture.root.join("compact_signature.pdf");
+        save_test_pdf(&path, 3);
+        let data = load_doc_data(&path);
+        save_fixture(&path, &data);
+        // An empty signature field does not block compaction.
+        add_test_object(&path, dictionary! { "FT" => "Sig", "T" => lopdf::Object::string_literal("Signature1") });
+        mark_pdf_observed(&path).unwrap();
+        compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap();
+        // A signed value does, and the file is left alone.
+        add_test_object(&path, dictionary! {
+            "Type" => "Sig", "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()],
+        });
+        mark_pdf_observed(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let err = compact_doc_data(&path, &data.notes, &data.annotations, data.blank_pages.clone(), &data.sketches).unwrap_err();
+        assert!(err.to_string().contains("signed"), "unexpected error: {err}");
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
