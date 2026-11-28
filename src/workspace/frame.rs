@@ -73,7 +73,10 @@ impl eframe::App for Lapis {
             let dialog_ctx = ui.ctx().clone();
             self.handle_dialog_result(kind, result, &dialog_ctx);
         }
-        if self.pending_delete_page.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !self.show_command_palette
+            && self.pending_delete_page.is_some()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             self.pending_delete_page = None;
         }
         let lesson_poll_pending = self.audio_engine.poll();
@@ -200,8 +203,12 @@ impl eframe::App for Lapis {
         self.update_text_drag(&sel_ctx);
 
         // Global Hotkeys & Zoom handling (processed before widgets so they work reliably)
-        let text_edit_id = ui.make_persistent_id("note_text_edit");
-        let any_focused = ui.ctx().memory(|m| m.focused().is_some());
+        let text_edit_id = self.note_editor_id();
+        let focused = ui.ctx().memory(|m| m.focused());
+        let any_focused = focused.is_some();
+        let editor_focused =
+            focused.is_some_and(|id| egui::TextEdit::load_state(ui.ctx(), id).is_some());
+        let popup_open = egui::Popup::is_any_open(ui.ctx());
         let note_editor_focused = ui.ctx().memory(|m| m.has_focus(text_edit_id));
 
         // Leaving the Sketch tab (or hiding the notes) finishes an open text box.
@@ -235,7 +242,26 @@ impl eframe::App for Lapis {
         let mut act_toggle_fullscreen = false;
         let mut copy_triggered = false;
 
-        if !self.show_settings && self.rebinding_action.is_none() {
+        let toggle_palette = !self.show_settings
+            && !self.show_flashcards_modal
+            && self.rebinding_action.is_none()
+            && ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)
+            });
+        if toggle_palette {
+            if self.show_command_palette {
+                self.close_command_palette(ui.ctx());
+            } else {
+                self.open_command_palette(ui.ctx());
+            }
+        }
+
+        if !self.show_settings
+            && !self.show_command_palette
+            && !toggle_palette
+            && self.rebinding_action.is_none()
+        {
             ui.input_mut(|i| {
                 shortcuts::track_key_presses(i);
                 // 1. Trackpad pinch or Ctrl + wheel zoom
@@ -455,8 +481,8 @@ impl eframe::App for Lapis {
                         self.continuous_scroll_delta += 120.0;
                     }
                 }
-                // Copy selected PDF text when the note editor is not focused.
-                if !note_editor_focused {
+                // Focused editors handle their own copy events.
+                if !editor_focused {
                     let has_copy_ev = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
                     if has_copy_ev
                         || i.consume_shortcut(&egui::KeyboardShortcut::new(
@@ -467,26 +493,21 @@ impl eframe::App for Lapis {
                         copy_triggered = true;
                     }
                 }
-                // 9. CTRL+Z for tools annotations
-                let mut do_undo = false;
-                let mut do_redo = false;
-                if !any_focused && self.rebinding_action.is_none() {
-                    let is_cmd = i.modifiers.command;
-                    if is_cmd && i.key_pressed(egui::Key::Z) {
-                        if i.modifiers.shift {
-                            do_redo = true;
-                        } else {
-                            do_undo = true;
-                        }
-                    } else if is_cmd && i.key_pressed(egui::Key::Y) {
-                        do_redo = true;
+                // Focused editors keep their native text history.
+                if self.has_pdf()
+                    && !editor_focused
+                    && !self.show_search
+                    && !self.show_flashcards_modal
+                    && self.radial_menu_pos.is_none()
+                    && !popup_open
+                {
+                    let redo = i.consume_key(
+                        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                        egui::Key::Z,
+                    ) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+                    if redo || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z) {
+                        self.apply_history_shortcut(redo);
                     }
-                }
-
-                if do_undo {
-                    self.undo_annotation(self.current_page);
-                } else if do_redo {
-                    self.redo_annotation(self.current_page);
                 }
                 //10. Search
                 if allowed(&self.app_state.shortcuts.search_notes)
@@ -496,18 +517,6 @@ impl eframe::App for Lapis {
                         self.close_search();
                     } else {
                         self.open_search();
-                    }
-                }
-
-                //11. Command palette
-                //11. Command palette
-                let toggle_cmd_palette = i.modifiers.command
-                    && (i.key_pressed(egui::Key::P) || i.key_pressed(egui::Key::K));
-                if toggle_cmd_palette {
-                    self.show_command_palette = !self.show_command_palette;
-                    if self.show_command_palette {
-                        self.command_palette_query.clear();
-                        self.command_palette_selected = 0;
                     }
                 }
             });
@@ -1082,6 +1091,7 @@ impl eframe::App for Lapis {
                 }
 
                 if is_open {
+                    const FILE_MENU_ALPHA: u8 = 230;
                     let mut close_requested = false;
                     let (popup_pos, popup_pivot) =
                         self.topbar_popup_placement(button_rect, title_fits);
@@ -1091,7 +1101,7 @@ impl eframe::App for Lapis {
                         .pivot(popup_pivot)
                         .order(egui::Order::Foreground)
                         .show(ui.ctx(), |ui| {
-                            self.modal_glass_frame(MENU_GLASS_ALPHA)
+                            self.modal_glass_frame(FILE_MENU_ALPHA)
                                 .inner_margin(egui::Margin::symmetric(6, 6))
                                 .show(ui, |ui| {
                                     let menu_width = 232.0;
@@ -1127,7 +1137,7 @@ impl eframe::App for Lapis {
                                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     };
 
-                                    menu_heading(ui, "PREFERENCES");
+                                    menu_heading(ui, "APPLICATION");
                                     if menu_item(ui, "󰒓  Settings & customization...", true)
                                         .on_hover_text("Themes, export preferences and keyboard shortcuts")
                                         .clicked()
@@ -1137,7 +1147,14 @@ impl eframe::App for Lapis {
                                         close_requested = true;
                                     }
 
-                                    ui.separator();
+                                    if menu_item(ui, COMMAND_PALETTE_LABEL, true)
+                                        .on_hover_text("Open Command Palette [Ctrl+P / Ctrl+K]")
+                                        .clicked()
+                                    {
+                                        self.open_command_palette(ui.ctx());
+                                        close_requested = true;
+                                    }
+
                                     menu_heading(ui, "DOCUMENT");
                                     if menu_item(ui, "󰈦  Open PDF...", true).clicked() {
                                         self.dialogs.open(
@@ -1172,7 +1189,6 @@ impl eframe::App for Lapis {
                                         close_requested = true;
                                     }
 
-                                    ui.separator();
                                     menu_heading(ui, "NOTES & STUDY");
                                     if menu_item(ui, "󰈦  Import Notes (.txt / .md)...", true)
                                         .on_hover_text("Import notes mapped by slide headers (e.g. # Slide 1)")
@@ -1190,7 +1206,6 @@ impl eframe::App for Lapis {
                                         close_requested = true;
                                     }
 
-                                    ui.separator();
                                     menu_heading(ui, "EXPORT");
                                     let export_label = if self.is_exporting {
                                         "󱑚  Exporting...".to_string()
@@ -2115,7 +2130,7 @@ impl eframe::App for Lapis {
                         (120.0, max_panel_h),
                     );
                     let resp = notes_panel.show(ui, |ui| {
-                        self.render_notes_panel_contents(ui, text_edit_id, true);
+                        self.render_notes_panel_contents(ui, true);
                     });
                     self.track_panel_size(ui, PanelSlot::Bottom, resp.response.rect.height());
                 } else {
@@ -2153,7 +2168,7 @@ impl eframe::App for Lapis {
                         (min_w, max_w),
                     );
                     let resp = notes_panel.show(ui, |ui| {
-                        self.render_notes_panel_contents(ui, text_edit_id, false);
+                        self.render_notes_panel_contents(ui, false);
                     });
                     self.track_panel_size(ui, PanelSlot::Right, resp.response.rect.width());
                     if !fit_notes_layout {
@@ -3947,10 +3962,12 @@ impl eframe::App for Lapis {
             });
 
         // Search
-        if self.show_search && self.has_pdf() {
-            self.render_search_popup(ui);
-        } else if self.show_search {
-            self.close_search();
+        if self.show_search {
+            if !self.has_pdf() {
+                self.close_search();
+            } else if !self.show_command_palette {
+                self.render_search_popup(ui);
+            }
         }
 
         //Command Palette

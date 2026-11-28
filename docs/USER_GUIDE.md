@@ -204,6 +204,8 @@ Lapis includes a collection of annotation tools for marking up PDF pages.
 </p>
 
 - Select tools from the annotation toolbar, available as a horizontal bar at the top or bottom, or a vertical rail on the right. Choose its placement in **Settings → Tools & Study → Annotation toolbar**. Closing either bar returns to Cursor / Select by default; change this in **Settings → Tools & Study → Annotation toolbar** if you prefer to keep the active tool.
+- The horizontal toolbar gives color swatches priority over shape and stroke-width controls. Open **Annotation options** for colors or stroke width when those controls move into the popup. Select **Shapes** to open its picker when the shape buttons are hidden. Very narrow toolbars place secondary tools under **More annotation tools**. Scroll the vertical rail when the window is short.
+- The PDF toolbar's **Undo** and **Redo** buttons act on the current PDF page. The Sketch toolbar's buttons act on the page open in Sketch.
 - Right-click an unselected area of the PDF canvas to open the radial tools menu when enabled. Right-click a radial item to apply it **without closing the menu**, or left-click to apply it and close the menu. A small image-paste button appears beside the main radial menu only when a clipboard image is available.
 - Right-click selected PDF text to open a **Copy** context menu instead of the radial menu.
 
@@ -297,6 +299,8 @@ Use it to draw attention to a particular area of the current slide without creat
 Select a textbox to show its compact glass toolbar. Use **Edit** / **Done** at the right edge to start or finish typing, drag the grip to move the box, and drag its corner handle to resize it. Click **Aa** for bold, italic, underline, strikethrough, and list controls in a glass popup. Click the color circle to open the same swatch palette as the vertical annotation toolbar. Both popups use the toolbar’s glass style. Choosing a swatch applies the color and closes the palette. Font-size and formatting controls can receive focus while editing. Press `Esc` to close an open color palette, finish editing, or deselect the box.
 The copy icon between Delete and Edit/Done copies the whole textbox, including its inline formatting markers but excluding its internal background marker.
 
+While typing in a textbox or the Markdown editor, undo and redo use the focused text editor's history. After you leave a PDF textbox, **Undo PDF Annotation** can undo its text edit as one step.
+
 ---
 
 ## 7. Custom Study Pages
@@ -381,7 +385,7 @@ Hold **Spacebar** and move the pointer to draw in the Sketch canvas without clic
   whole strokes; the text tool creates a box where you click (click it again to edit it).
 - **Colors and sizes:** six colors and four sizes, which also set the text size. In a very narrow panel they
   collapse into a single button.
-- **Undo / Redo:** works on the sketch while it is the last thing you drew on (`Ctrl + Z` / `Ctrl + Y`).
+- **Undo / Redo:** the Sketch toolbar uses the sketch page's history, including when the notes panel is locked to a different page. Outside a text editor, `Ctrl + Z` and `Ctrl + Y` use Sketch history after you interact with that sketch. Click the PDF canvas to send those shortcuts back to the PDF page.
 - **Menu (`…`):** the background (blank, ruled, grid, dotted) for this page, zoom and *Clear sketch*
   (which can be undone).
 
@@ -669,13 +673,14 @@ This is useful when you remember a concept or phrase but not where it appeared i
 
 ### Command Palette — `Ctrl + P` / `Ctrl + K`
 
-The Command Palette provides quick access to application actions.
+Open **File → Command Palette** or use the shortcut. Type a command, use the arrow keys to select a result, then press **Enter**. Press **Esc** to close the palette. Type a page number such as `p14` to jump straight to that page.
 
 It includes commands for navigating and launching features, such as:
 
 - Opening Active Recall Flashcards.
 - Exporting flashcards to Anki.
 - Selecting annotation tools.
+- Switching to Book View.
 - Opening the Snip tool.
 - Opening the Occlusion Tape tool.
 - Inserting a new page.

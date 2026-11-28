@@ -394,8 +394,9 @@ impl Lapis {
         let mut just_created_this_frame = false;
 
         // Selection state: page, index, and editing status.
-        let sel_key = ui.make_persistent_id("tb_sel_state");
-        let edit_prev_key = ui.make_persistent_id("tb_prev_edit");
+        let sel_key = ui.make_persistent_id(("tb_sel_state", self.textbox_epoch));
+        let edit_prev_key = ui.make_persistent_id(("tb_prev_edit", self.textbox_epoch));
+        let recorded_edit_key = edit_prev_key.with("recorded");
         let mut sel: Option<(u32, usize, bool)> = ui.data(|d| d.get_temp(sel_key));
 
         if let Some((sp, si, _)) = sel {
@@ -743,19 +744,20 @@ impl Lapis {
 
                 // Editing the block.
                 if editing {
-                    let te_id = ui.make_persistent_id(("tb_text", page, idx));
+                    let te_id = ui.make_persistent_id(("tb_text", self.textbox_epoch, page, idx));
                     let prev_edit: Option<(u32, usize)> = ui.data(|d| d.get_temp(edit_prev_key));
                     let need_init_cursor = prev_edit != Some((page, idx));
-                    if prev_edit != Some((page, idx)) {
+                    if need_init_cursor {
+                        ui.data_mut(|d| d.remove::<(u32, usize)>(recorded_edit_key));
                         ui.ctx().memory_mut(|m| m.request_focus(te_id));
-                        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), te_id)
-                            .unwrap_or_default();
+                        let mut st = egui::text_edit::TextEditState::default();
                         st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
                             egui::text::CCursor::new(g.text.chars().count()),
                         )));
                         st.store(ui.ctx(), te_id);
                     }
 
+                    let mut text_changed = false;
                     if let Some(ann) = self.annotations.get_mut(&page).and_then(|v| v.get_mut(idx))
                     {
                         let layout_font = g.font_id.clone();
@@ -817,9 +819,8 @@ impl Lapis {
                             }
                             ui.ctx().request_repaint();
                         }
-                        if out.response.changed() {
-                            dirty = true;
-                        }
+                        text_changed = out.response.changed();
+                        dirty |= text_changed;
 
                         // Draw an extra pass over the TextEdit galley to render bold text.
                         if g.bold && !ann.text.is_empty() {
@@ -831,6 +832,17 @@ impl Lapis {
                                 g.font_id.size,
                             );
                         }
+                    }
+                    if text_changed
+                        && ui.data(|d| d.get_temp(recorded_edit_key)) != Some((page, idx))
+                    {
+                        // The creation snapshot already covers a new, empty box.
+                        if !g.text.trim().is_empty() {
+                            let mut before = self.annotations[&page].clone();
+                            before[idx].text.clone_from(&g.text);
+                            self.record_annotation_undo(page, before);
+                        }
+                        ui.data_mut(|d| d.insert_temp(recorded_edit_key, (page, idx)));
                     }
                 }
 
@@ -1428,6 +1440,9 @@ impl Lapis {
         if self.pdf_panning {
             return;
         }
+        if img_resp.clicked() || img_resp.drag_started() {
+            self.sketch.clear_focus();
+        }
         // Screenshots are painted first so that text boxes (drawn right after) always end up on top.
         self.image_annotations_ui(ui, page_num, slide_rect);
         self.render_page_textboxes(ui, page_num, slide_rect);
@@ -1664,12 +1679,7 @@ impl Lapis {
                         }
 
                         if changed {
-                            let stack = self.undo_stack.entry(page_num).or_default();
-                            if stack.len() >= 40 {
-                                stack.remove(0);
-                            }
-                            stack.push(before_state);
-                            self.redo_stack.remove(&page_num);
+                            self.record_annotation_undo(page_num, before_state);
                             self.selected_textbox = None;
 
                             self.save_study_edit();
@@ -1956,9 +1966,12 @@ impl Lapis {
     }
 
     pub(super) fn push_undo_snapshot(&mut self, page: u32) {
-        // A slide annotation is now the last thing drawn on: Ctrl+Z goes back to the slides.
-        self.sketch.focus = false;
         let current_state = self.annotations.get(&page).cloned().unwrap_or_default();
+        self.record_annotation_undo(page, current_state);
+    }
+
+    fn record_annotation_undo(&mut self, page: u32, current_state: Vec<PageAnnotation>) {
+        self.sketch.clear_focus();
         let stack = self.undo_stack.entry(page).or_default();
         // Cap history to 40 steps per page to keep RAM negligible
         if stack.len() >= 40 {
@@ -1969,14 +1982,13 @@ impl Lapis {
         self.redo_stack.remove(&page);
     }
 
+    pub(super) fn can_undo_annotation(&self, page: u32) -> bool {
+        self.undo_stack
+            .get(&page)
+            .is_some_and(|stack| !stack.is_empty())
+    }
+
     pub(super) fn undo_annotation(&mut self, page: u32) {
-        if self.sketch_receives_undo() {
-            if self.sketch.undo(self.note_page, &mut self.sketches) {
-                self.save_study_edit();
-                self.toast_message = Some(("󰕌 Undo sketch".to_string(), std::time::Instant::now()));
-            }
-            return;
-        }
         if let Some(stack) = self.undo_stack.get_mut(&page)
             && let Some(prev_state) = stack.pop()
         {
@@ -1988,19 +2000,20 @@ impl Lapis {
                 self.annotations.insert(page, prev_state);
             }
             self.selected_textbox = None;
+            self.textbox_epoch = self.textbox_epoch.wrapping_add(1);
+            self.sketch.clear_focus();
             self.save_study_edit();
             self.toast_message = Some(("󰕌 Undo annotation".to_string(), std::time::Instant::now()));
         }
     }
 
+    pub(super) fn can_redo_annotation(&self, page: u32) -> bool {
+        self.redo_stack
+            .get(&page)
+            .is_some_and(|stack| !stack.is_empty())
+    }
+
     pub(super) fn redo_annotation(&mut self, page: u32) {
-        if self.sketch_receives_undo() {
-            if self.sketch.redo(self.note_page, &mut self.sketches) {
-                self.save_study_edit();
-                self.toast_message = Some(("󰑎 Redo sketch".to_string(), std::time::Instant::now()));
-            }
-            return;
-        }
         if let Some(stack) = self.redo_stack.get_mut(&page)
             && let Some(next_state) = stack.pop()
         {
@@ -2008,6 +2021,8 @@ impl Lapis {
             self.undo_stack.entry(page).or_default().push(current_state);
             self.annotations.insert(page, next_state);
             self.selected_textbox = None;
+            self.textbox_epoch = self.textbox_epoch.wrapping_add(1);
+            self.sketch.clear_focus();
             self.save_study_edit();
             self.toast_message = Some(("󰑎 Redo annotation".to_string(), std::time::Instant::now()));
         }
@@ -2356,5 +2371,59 @@ impl Lapis {
                 self.save_study_edit();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::isolated_dir;
+
+    #[test]
+    fn editing_an_existing_textbox_creates_one_pdf_undo_step() {
+        let root = isolated_dir!(editing_an_existing_textbox_creates_one_pdf_undo_step);
+        let pdf = root.join("textboxes.pdf");
+        notes::create_blank_study_notebook(&pdf).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Lapis::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Some(pdf),
+        );
+        app.annotation_tool = AnnotationTool::Cursor;
+        app.annotations.insert(
+            1,
+            vec![notes::tests::sample_textbox(
+                "Original",
+                vec![(0.1, 0.1), (0.5, 0.3)],
+            )],
+        );
+        let page_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let draw = |app: &mut Lapis, events, enter_edit| {
+            let raw = egui::RawInput {
+                screen_rect: Some(page_rect),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                if enter_edit {
+                    let key = ui.make_persistent_id(("tb_sel_state", app.textbox_epoch));
+                    ui.data_mut(|d| d.insert_temp(key, (1_u32, 0_usize, true)));
+                }
+                app.render_page_textboxes(ui, 1, page_rect);
+            });
+            output.textures_delta.clear();
+        };
+
+        draw(&mut app, vec![], true);
+        draw(&mut app, vec![egui::Event::Text(" first".into())], false);
+        draw(&mut app, vec![egui::Event::Text(" second".into())], false);
+        assert_eq!(app.undo_stack[&1].len(), 1);
+        let edited = app.annotations[&1][0].text.clone();
+        assert_ne!(edited, "Original");
+
+        app.undo_annotation(1);
+        assert_eq!(app.annotations[&1][0].text, "Original");
+        app.redo_annotation(1);
+        assert_eq!(app.annotations[&1][0].text, edited);
     }
 }

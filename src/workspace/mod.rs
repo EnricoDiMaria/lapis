@@ -54,7 +54,7 @@ use document::{
 use navigation::{SinglePageWheel, clamp_scroll_offset, wheel_page_target, zoom_scroll_offset};
 use pdf_text::{PdfSearchIndex, TextCaret, TextSelection};
 use save::{PdfSaveFailure, PdfSaveJob};
-use ui::{MENU_GLASS_ALPHA, SettingsTab, TopbarSlot, truncate_filename};
+use ui::{COMMAND_PALETTE_LABEL, MENU_GLASS_ALPHA, SettingsTab, TopbarSlot, truncate_filename};
 
 fn setup_nerd_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -303,6 +303,8 @@ pub(crate) struct Lapis {
     active_stroke: Option<annotations::PageAnnotation>,
     stroke_width: f32,
     selected_textbox: Option<usize>,
+    note_editor_epoch: u64,
+    textbox_epoch: u64,
     textbox_font_size: f32,
     textbox_bold: bool,
     textbox_italic: bool,
@@ -521,6 +523,8 @@ impl Lapis {
             active_stroke: None,
             stroke_width: 2.5,
             selected_textbox: None,
+            note_editor_epoch: 0,
+            textbox_epoch: 0,
             textbox_font_size: 16.0,
             textbox_bold: false,
             textbox_italic: false,
@@ -803,12 +807,35 @@ impl Lapis {
         }
     }
 
-    /// Ctrl+Z / Ctrl+Y act on the sketch when it was the last thing drawn on.
-    fn sketch_receives_undo(&self) -> bool {
-        self.sketch_enabled()
+    fn note_editor_id(&self) -> egui::Id {
+        egui::Id::unique(("lapis_note_editor", self.note_editor_epoch, self.note_page))
+    }
+
+    fn apply_history_shortcut(&mut self, redo: bool) {
+        if self.sketch_enabled()
             && self.show_notes
             && self.note_mode == NoteMode::Sketch
-            && self.sketch.focus
+            && self.sketch.has_focus(self.note_page)
+        {
+            let changed = if redo {
+                self.sketch.redo(self.note_page, &mut self.sketches)
+            } else {
+                self.sketch.undo(self.note_page, &mut self.sketches)
+            };
+            if changed {
+                self.save_study_edit();
+                let message = if redo {
+                    "󰑎 Redo sketch"
+                } else {
+                    "󰕌 Undo sketch"
+                };
+                self.toast_message = Some((message.into(), std::time::Instant::now()));
+            }
+        } else if redo {
+            self.redo_annotation(self.current_page);
+        } else {
+            self.undo_annotation(self.current_page);
+        }
     }
 
     fn start_export(&mut self, ctx: &egui::Context) {
@@ -909,6 +936,7 @@ impl Lapis {
                 }
 
                 self.current_note = merge_imported_notes(&mut self.notes, imported, self.note_page);
+                self.note_editor_epoch = self.note_editor_epoch.wrapping_add(1);
                 self.mark_study_changed();
                 self.show_notes = true;
                 if let Err(err) = self.sync_local_checkpoint() {
@@ -1117,373 +1145,6 @@ impl Lapis {
                     DialogKind::ImportNotes => self.finish_import_notes(path),
                 }
             }
-        }
-    }
-
-    // Reusable top-bar button groups.
-
-    fn render_command_palette(&mut self, ui: &mut egui::Ui) {
-        if !self.show_command_palette {
-            return;
-        }
-
-        let (esc_pressed, down_pressed, up_pressed, enter_pressed) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Escape),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::Enter),
-            )
-        });
-
-        if esc_pressed {
-            self.show_command_palette = false;
-            return;
-        }
-
-        let full_rect = ui.max_rect();
-        egui::Area::new(ui.make_persistent_id("cmd_palette_backdrop"))
-            .fixed_pos(full_rect.min)
-            .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(full_rect.size(), egui::Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::ZERO,
-                    egui::Color32::from_black_alpha(150),
-                );
-                if resp.clicked() {
-                    self.show_command_palette = false;
-                }
-            });
-
-        let commands: &[(&str, &str, &str)] = &[
-            (
-                "toggle_split",
-                "󰯌  Toggle Split-View (Side-by-Side PDF)",
-                "View",
-            ),
-            (
-                "mode_continuous",
-                "󰍜  Switch to Continuous Scroll Mode",
-                "View",
-            ),
-            ("mode_single", "󰈙  Switch to Single Page Mode", "View"),
-            (
-                "mode_toggle_cont_single",
-                "󰍜  Toggle Continuous / Single Page",
-                "View",
-            ),
-            (
-                "mode_slideshow",
-                "󰐨  Enter Presentation / Slideshow Mode",
-                "View",
-            ),
-            ("toggle_fullscreen", "󰊓  Toggle Fullscreen", "View"),
-            (
-                "toggle_sketch",
-                "󰠱  Toggle Sketch (page scratchpad)",
-                "View",
-            ),
-            ("toggle_topbar", "󰁝  Toggle Topbar Auto-hide", "View"),
-            ("fit_page", "󰊓  Fit PDF and Notes Layout", "View"),
-            ("fit_pdf_page", "󰊓  Fit Page", "View"),
-            (
-                "toggle_topbar_position",
-                "󰁝  Move Topbar to Bottom / Top",
-                "View",
-            ),
-            ("toggle_dark", "󰔎  Toggle PDF Smart Dark Mode", "Appearance"),
-            (
-                "insert_blank",
-                "󰐕  Insert Blank Ruled Page After Current Slide",
-                "Document",
-            ),
-            ("delete_page", "󰆴  Delete Current Page from PDF", "Document"),
-            (
-                "download_orig",
-                "󰇚  Download / Save Original Unmodified PDF...",
-                "Document",
-            ),
-            ("global_search", "󰍉  Search notes, slides & audio", "Search"),
-            (
-                "flashcards",
-                "󰘸  Open Active Recall Flashcards Deck",
-                "Study",
-            ),
-            (
-                "export_anki",
-                "󰈇  Export Notes Flashcards to Anki (.tsv)",
-                "Study",
-            ),
-            ("tool_cursor", "󰇀  Tool: Cursor / Text Selection", "Tools"),
-            (
-                "tool_pen",
-                "󰏫  Tool: Freehand Pen (Chaikin Smoothed)",
-                "Tools",
-            ),
-            ("tool_highlight", "  Tool: Highlighter", "Tools"),
-            (
-                "tool_tape",
-                "󰝤  Tool: Occlusion Tape (Active Recall)",
-                "Tools",
-            ),
-            ("tool_laser", "󰐾  Tool: Laser Pointer", "Tools"),
-            (
-                "tool_snip",
-                "󰆞  Tool: Snip Region to Markdown Notes",
-                "Tools",
-            ),
-            ("tool_eraser", "󰇾  Tool: Eraser", "Tools"),
-            ("undo", "󰕌  Undo Last Annotation on Current Slide", "Edit"),
-            ("redo", "󰑎  Redo Annotation on Current Slide", "Edit"),
-        ];
-
-        let q = self.command_palette_query.trim().to_lowercase();
-
-        let direct_page_jump: Option<u32> = q
-            .strip_prefix('p')
-            .unwrap_or(&q)
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|&p| p >= 1 && p <= self.total_pages.max(1));
-
-        let mut filtered: Vec<(&str, String, &str)> = Vec::new();
-        if let Some(target_p) = direct_page_jump {
-            filtered.push((
-                "__jump_page__",
-                format!("󰁔  Jump directly to Slide p.{}", target_p),
-                "Navigation",
-            ));
-        }
-
-        for &(id, label, cat) in commands {
-            if q.is_empty()
-                || label.to_lowercase().contains(&q)
-                || cat.to_lowercase().contains(&q)
-                || q.split_whitespace()
-                    .all(|tok| label.to_lowercase().contains(tok))
-            {
-                let sc = &self.app_state.shortcuts;
-                let binding = match id {
-                    "mode_continuous" => Some(&sc.view_continuous),
-                    "mode_single" => Some(&sc.view_single),
-                    "mode_book" => Some(&sc.view_twopage),
-                    "mode_toggle_cont_single" => Some(&sc.toggle_continuous_single),
-                    "mode_slideshow" => Some(&sc.view_slideshow),
-                    "toggle_fullscreen" => Some(&sc.toggle_fullscreen),
-                    "toggle_sketch" => Some(&sc.toggle_sketch),
-                    "toggle_topbar" => Some(&sc.toggle_topbar),
-                    "fit_page" => Some(&sc.fit_page),
-                    "fit_pdf_page" => Some(&sc.fit_pdf_page),
-                    "toggle_dark" => Some(&sc.toggle_night),
-                    "global_search" => Some(&sc.search_notes),
-                    "tool_cursor" => Some(&sc.select_cursor),
-                    "tool_pen" => Some(&sc.select_pen),
-                    "tool_highlight" => Some(&sc.select_highlighter),
-                    "tool_tape" => Some(&sc.select_tape),
-                    "tool_snip" => Some(&sc.select_snip),
-                    "tool_eraser" => Some(&sc.select_eraser),
-                    _ => None,
-                };
-                filtered.push((
-                    id,
-                    binding.map_or_else(|| label.to_owned(), |b| b.hint(label)),
-                    cat,
-                ));
-            }
-        }
-
-        if filtered.is_empty() {
-            self.command_palette_selected = 0;
-        } else {
-            if down_pressed {
-                self.command_palette_selected =
-                    (self.command_palette_selected + 1) % filtered.len();
-            }
-            if up_pressed {
-                self.command_palette_selected = if self.command_palette_selected == 0 {
-                    filtered.len() - 1
-                } else {
-                    self.command_palette_selected - 1
-                };
-            }
-            self.command_palette_selected = self.command_palette_selected.min(filtered.len() - 1);
-        }
-
-        let mut triggered_cmd: Option<(String, Option<u32>)> = None;
-
-        egui::Area::new(ui.make_persistent_id("cmd_palette_modal"))
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
-            .order(egui::Order::Tooltip)
-            .show(ui.ctx(), |ui| {
-                self.modal_glass_frame(238).show(ui, |ui| {
-                        ui.set_width(540.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("󰘳")
-                                    .size(16.0)
-                                    .color(rgb(self.theme.accent)),
-                            );
-                            let prev_q = self.command_palette_query.clone();
-                            let edit_resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.command_palette_query)
-                                    .hint_text("Type a command or slide number (e.g. 'tape', 'split', 'p14')...")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            edit_resp.request_focus();
-                            if self.command_palette_query != prev_q {
-                                self.command_palette_selected = 0;
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
-                        egui::ScrollArea::vertical()
-                            .id_salt("cmd_palette_scroll")
-                            .auto_shrink([false, true])
-                            .max_height(280.0)
-                            .show(ui, |ui| {
-                                if filtered.is_empty() {
-                                    ui.weak("No matching command found.");
-                                } else {
-                                    for (idx, (id, label, cat)) in filtered.iter().enumerate() {
-                                        let is_sel = idx == self.command_palette_selected;
-                                        let row_resp = ui.horizontal(|ui| {
-                                            let btn = crate::theme::selected_button(egui::RichText::new(label).size(13.0), is_sel, ui.visuals())
-                                            .min_size(egui::vec2(ui.available_width() - 85.0, 28.0));
-
-                                            let b_resp = ui.add(btn);
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(*cat)
-                                                            .size(11.0)
-                                                            .color(rgb(self.theme.fg_muted)),
-                                                    );
-                                                },
-                                            );
-                                            b_resp
-                                        });
-
-                                        if row_resp.inner.clicked() {
-                                            triggered_cmd = Some(((*id).to_string(), direct_page_jump));
-                                        }
-                                    }
-                                }
-                            });
-                    });
-            });
-
-        if enter_pressed
-            && triggered_cmd.is_none()
-            && let Some((id, _, _)) = filtered.get(self.command_palette_selected)
-        {
-            triggered_cmd = Some(((*id).to_string(), direct_page_jump));
-        }
-
-        if let Some((cmd_id, opt_page)) = triggered_cmd {
-            self.show_command_palette = false;
-            self.execute_palette_command(&cmd_id, opt_page, ui.ctx());
-        }
-    }
-
-    fn execute_palette_command(
-        &mut self,
-        cmd_id: &str,
-        opt_page: Option<u32>,
-        ctx: &egui::Context,
-    ) {
-        match cmd_id {
-            "__jump_page__" => {
-                if let Some(p) = opt_page {
-                    self.go_to_page(p, ctx);
-                }
-            }
-            "toggle_split" => {
-                self.split_view_enabled = !self.split_view_enabled;
-                if self.split_view_enabled {
-                    self.split_secondary_page = self.current_page;
-                }
-            }
-            "mode_continuous" => self.set_view_mode(ViewMode::Continuous),
-            "mode_book" => self.view_mode = ViewMode::TwoPage,
-            "mode_single" => self.set_view_mode(ViewMode::SinglePage),
-            "mode_toggle_cont_single" => {
-                if self.view_mode == ViewMode::Continuous {
-                    self.set_view_mode(ViewMode::SinglePage);
-                } else if !matches!(
-                    self.view_mode,
-                    ViewMode::Slideshow | ViewMode::SlideshowWithNotes
-                ) {
-                    self.set_view_mode(ViewMode::Continuous);
-                }
-            }
-            "mode_slideshow" => self.view_mode = ViewMode::Slideshow,
-            "toggle_sketch" => self.toggle_sketch_tab(),
-            "toggle_topbar" if self.has_pdf() => self.toggle_topbar(),
-            "fit_page" => self.request_fit_notes_layout(ctx),
-            "fit_pdf_page" => {
-                self.zoom_mode = ZoomMode::FitPage;
-                self.zoom_anchor = None;
-            }
-            "toggle_topbar_position" => self.toggle_topbar_position(),
-            "toggle_fullscreen" => {
-                if !matches!(
-                    self.view_mode,
-                    ViewMode::Slideshow | ViewMode::SlideshowWithNotes
-                ) {
-                    self.user_fullscreen = !self.user_fullscreen;
-                }
-            }
-            "toggle_dark" => {
-                self.pdf_dark_mode = !self.pdf_dark_mode;
-                self.viewer.invalidate_images();
-                ctx.request_repaint();
-            }
-            "insert_blank" => self.insert_blank_page_after(
-                self.current_page,
-                self.app_state.settings.default_page_style,
-                ctx,
-            ),
-            "delete_page" => self.request_delete_page(self.current_page, ctx),
-            "download_orig" => self.prompt_download_original_pdf(ctx),
-            "global_search" => {
-                self.open_search();
-            }
-            "flashcards" => {
-                self.sync_and_save();
-                self.toggle_flashcards_modal();
-            }
-            "export_anki" => {
-                self.sync_and_save();
-                self.export_anki_dialog(ctx);
-            }
-            "tool_cursor" => self.annotation_tool = AnnotationTool::Cursor,
-            "tool_pen" => self.annotation_tool = AnnotationTool::Draw,
-            "tool_highlight" => self.annotation_tool = AnnotationTool::Highlight,
-            "tool_tape" => self.annotation_tool = AnnotationTool::Tape,
-            "tool_laser" => self.annotation_tool = AnnotationTool::Laser,
-            "tool_snip" => self.annotation_tool = AnnotationTool::Snip,
-            "tool_eraser" => self.annotation_tool = AnnotationTool::Eraser,
-            "undo" => self.undo_annotation(self.current_page),
-            "redo" => self.redo_annotation(self.current_page),
-            "paste_screenshot" => {
-                let page = self.current_page;
-                self.shots.request_clipboard(
-                    ctx,
-                    ShotTarget::Pdf {
-                        page,
-                        center: (0.5, 0.5),
-                    },
-                );
-            }
-            _ => {}
         }
     }
 

@@ -708,3 +708,136 @@ fn leaving_waits_for_edits_made_after_the_pdf_snapshot() {
         "Edited while the PDF was saving"
     );
 }
+
+#[test]
+fn pdf_controls_and_focused_sketch_history_use_their_own_pages() {
+    use crate::test_support::isolated_dir;
+
+    let root = isolated_dir!(pdf_controls_and_focused_sketch_history_use_their_own_pages);
+    let pdf = root.join("history.pdf");
+    notes::tests::write_save_fixture_pdf(&pdf, 3, 0, false);
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(pdf),
+    );
+    app.note_page = 1;
+    app.lock_note_page = true;
+    app.show_notes = true;
+    app.note_mode = NoteMode::Sketch;
+    app.go_to_page(2, &ctx);
+    assert_eq!(app.current_page, 2);
+    assert_eq!(app.note_page, 1);
+
+    let annotation = notes::tests::sample_textbox("PDF annotation", vec![(0.1, 0.1), (0.3, 0.3)]);
+    app.push_undo_snapshot(2);
+    app.annotations.insert(2, vec![annotation.clone()]);
+    let sketch = app.sketches.entry(1).or_default();
+    sketch.strokes.push(annotation);
+    app.sketch.seed_undo_for_test(1);
+
+    app.apply_history_shortcut(false);
+    assert!(app.sketches[&1].strokes.is_empty());
+    assert!(app.can_undo_annotation(2));
+    assert_eq!(app.annotations[&2].len(), 1);
+    app.apply_history_shortcut(true);
+    assert_eq!(app.sketches[&1].strokes.len(), 1);
+
+    app.undo_annotation(2);
+    assert!(!app.annotations.contains_key(&2));
+    assert_eq!(app.sketches[&1].strokes.len(), 1);
+    assert!(!app.can_undo_annotation(2));
+    assert!(app.can_redo_annotation(2));
+    app.redo_annotation(2);
+
+    app.sketch.seed_undo_for_test(1);
+    app.lock_note_page = false;
+    app.go_to_page(3, &ctx);
+    app.apply_history_shortcut(false);
+    assert_eq!(app.sketches[&1].strokes.len(), 1);
+    assert_eq!(app.annotations[&2].len(), 1);
+}
+
+#[test]
+fn note_editors_keep_history_on_their_page_and_document() {
+    use crate::test_support::isolated_dir;
+
+    let root = isolated_dir!(note_editors_keep_history_on_their_page_and_document);
+    let first = root.join("two-pages.pdf");
+    let second = root.join("other.pdf");
+    notes::tests::write_save_fixture_pdf(&first, 2, 0, false);
+    notes::create_blank_study_notebook(&second).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(first),
+    );
+    let page_one = app.note_editor_id();
+    app.go_to_page(2, &ctx);
+    assert_ne!(app.note_editor_id(), page_one);
+    app.go_to_page(1, &ctx);
+    assert_eq!(app.note_editor_id(), page_one);
+    assert!(app.open_pdf(second, &ctx));
+    assert_ne!(app.note_editor_id(), page_one);
+}
+
+#[test]
+fn undo_in_a_focused_markdown_editor_leaves_pdf_history_alone() {
+    use crate::test_support::isolated_dir;
+
+    let root = isolated_dir!(undo_in_a_focused_markdown_editor_leaves_pdf_history_alone);
+    let pdf = root.join("editor.pdf");
+    notes::create_blank_study_notebook(&pdf).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(pdf),
+    );
+    app.show_notes = true;
+    app.note_mode = NoteMode::Edit;
+    app.focus_note_editor = true;
+    app.push_undo_snapshot(1);
+    app.annotations.insert(
+        1,
+        vec![notes::tests::sample_textbox(
+            "PDF",
+            vec![(0.1, 0.1), (0.4, 0.2)],
+        )],
+    );
+
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |app: &mut Lapis, events| {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 720.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ui| eframe::App::ui(app, ui, &mut frame));
+        output.textures_delta.clear();
+    };
+    draw(&mut app, vec![]);
+    assert!(ctx.memory(|m| m.has_focus(app.note_editor_id())));
+    draw(&mut app, vec![egui::Event::Text("Typed note".into())]);
+    assert_eq!(app.current_note, "Typed note");
+
+    let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::CTRL;
+    draw(
+        &mut app,
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ],
+    );
+    assert!(app.current_note.is_empty());
+    assert!(app.can_undo_annotation(1));
+    assert_eq!(app.annotations[&1].len(), 1);
+}

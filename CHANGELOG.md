@@ -5,12 +5,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Share annotation controls across the horizontal toolbar and vertical rail. Keep color swatches visible on the horizontal bar when they fit, with popups for controls that need more room.
+- Add Command Palette to the File menu and make Book View searchable from the palette.
+
 ### Fixed
 
 - Detect same-size external PDF edits using a content checksum. Keep untouched native annotations and acknowledge an external revision after its annotations have been imported and backed up. Validate page rewrites and check for competing changes before publication.
 - Discard pending image pastes after a document or page change. Preserve the previous export if the source changes during export.
 - Keep the previous recording, transcript, and index until a replacement audio import, trim, or silence removal is ready to publish. Save deletions to the index before removing the associated audio file.
 - Require confirmation before deleting a custom page with sketch or memo content. Clear PDF undo history when page numbering changes and recover interrupted audio-index remaps when reopening a PDF.
+- Use the latest query when confirming a Command Palette result. Keep PDF, Sketch, and text editor undo on their own pages and histories.
 
 ### Performance
 

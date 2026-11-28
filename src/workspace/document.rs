@@ -695,6 +695,8 @@ impl Lapis {
     }
 
     fn invalidate_page_jobs(&mut self) {
+        self.note_editor_epoch = self.note_editor_epoch.wrapping_add(1);
+        self.textbox_epoch = self.textbox_epoch.wrapping_add(1);
         self.shots.cancel_pending();
         self.undo_stack.clear();
         self.redo_stack.clear();

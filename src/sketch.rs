@@ -109,8 +109,8 @@ pub struct SketchState {
     pub new_paper: BlankPageStyle,
     /// The pointer is over the canvas (used to route Ctrl + wheel to the canvas zoom).
     pub hovered: bool,
-    /// The sketch is the last thing that was drawn on (Ctrl+Z then undoes the sketch).
-    pub focus: bool,
+    /// Page whose sketch canvas last received an interaction.
+    focused_page: Option<u32>,
     active: Option<PageAnnotation>,
     undo: HashMap<u32, Vec<Vec<PageAnnotation>>>,
     redo: HashMap<u32, Vec<Vec<PageAnnotation>>>,
@@ -132,7 +132,7 @@ impl Default for SketchState {
             zoom: 1.0,
             new_paper: BlankPageStyle::Blank,
             hovered: false,
-            focus: false,
+            focused_page: None,
             active: None,
             undo: HashMap::new(),
             redo: HashMap::new(),
@@ -163,7 +163,7 @@ impl SketchState {
         self.redo.clear();
         self.erase_snapshot_taken = false;
         self.hovered = false;
-        self.focus = false;
+        self.clear_focus();
         self.zoom_request = None;
         self.pending_scroll = None;
         self.scroll_offset = Vec2::ZERO;
@@ -173,8 +173,22 @@ impl SketchState {
         self.undo.get(&page).is_some_and(|s| !s.is_empty())
     }
 
+    pub(crate) fn has_focus(&self, page: u32) -> bool {
+        self.focused_page == Some(page)
+    }
+
+    pub(crate) fn clear_focus(&mut self) {
+        self.focused_page = None;
+    }
+
     fn can_redo(&self, page: u32) -> bool {
         self.redo.get(&page).is_some_and(|s| !s.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_undo_for_test(&mut self, page: u32) {
+        self.push_undo(page, Vec::new());
+        self.focused_page = Some(page);
     }
 
     fn push_undo(&mut self, page: u32, before: Vec<PageAnnotation>) {
@@ -293,7 +307,7 @@ pub fn show(
 
     if let Some(action) = action {
         changed |= st.commit_pending(sketches);
-        st.focus = true;
+        st.focused_page = Some(page);
         match action {
             Action::Undo => changed |= st.undo(page, sketches),
             Action::Redo => changed |= st.redo(page, sketches),
@@ -439,10 +453,10 @@ fn toolbar(
             ui.add_space(4.0);
         }
 
-        if icon_button(ui, "󰕌", false, st.can_undo(page), "Undo (Ctrl+Z)").clicked() {
+        if icon_button(ui, "󰕌", false, st.can_undo(page), "Undo Sketch [Ctrl+Z]").clicked() {
             action = Some(Action::Undo);
         }
-        if icon_button(ui, "󰑎", false, st.can_redo(page), "Redo").clicked() {
+        if icon_button(ui, "󰑎", false, st.can_redo(page), "Redo Sketch [Ctrl+Y]").clicked() {
             action = Some(Action::Redo);
         }
 
@@ -898,6 +912,13 @@ fn canvas_area(
                 let width = text_wrap_width(ann, zoom);
                 let box_rect = Rect::from_min_size(top_left, vec2(width, font.size * 1.4));
                 let id = ui.make_persistent_id(("sketch_text_edit", page, edit.index));
+                if edit.focus_requested {
+                    egui::TextEdit::store_state(
+                        ui.ctx(),
+                        id,
+                        egui::text_edit::TextEditState::default(),
+                    );
+                }
                 let te = egui::TextEdit::multiline(&mut edit.buf)
                     .id(id)
                     .font(font)
@@ -995,13 +1016,13 @@ fn handle_input(
     };
     let drawing = resp.dragged_by(primary) || (space_down && pos.is_some());
     if space_start {
-        st.focus = true;
+        st.focused_page = Some(page);
     }
 
     if (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.button_down(primary)))
         || resp.clicked_by(primary)
     {
-        st.focus = true;
+        st.focused_page = Some(page);
     }
 
     // Drawing near the edge of the panel scrolls the canvas along, so a stroke can go on.

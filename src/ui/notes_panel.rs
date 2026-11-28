@@ -7,7 +7,6 @@ impl Lapis {
     pub(in crate::workspace) fn render_notes_panel_contents(
         &mut self,
         ui: &mut egui::Ui,
-        text_edit_id: egui::Id,
         use_bottom: bool,
     ) {
         // A resizable side panel must keep using its full assigned width; otherwise its
@@ -391,6 +390,7 @@ impl Lapis {
                         return;
                     }
 
+                    let text_edit_id = self.note_editor_id();
                     let scroll_id = ui.make_persistent_id("notes_scroll");
                     let anim_scroll_id = ui.make_persistent_id("notes_anim_scroll_target");
 
@@ -1192,9 +1192,7 @@ impl Lapis {
                     } else {
                         Self::PREVIEW_BOTTOM_PAD
                     };
-                    let extra_pad_audio = if self.app_state.settings.audio_dock
-                        || self.app_state.settings.audio_dock
-                    {
+                    let extra_pad_audio = if self.app_state.settings.audio_dock {
                         Self::AUDIO_BTN_SIZE
                     } else {
                         0.0
