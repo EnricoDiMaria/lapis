@@ -6,7 +6,8 @@
 //! position of the panel: a wide bottom panel simply shows more of the same canvas than a narrow
 //! side panel. The scrollable area grows as you draw, so there is always room to continue.
 
-use crate::notes::{self, AnnotationKind, BlankPageStyle, PageAnnotation, SketchPage};
+use crate::annotations::{self, AnnotationKind, PageAnnotation};
+use crate::notes::{self, BlankPageStyle, SketchPage};
 use egui::{
     Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, vec2,
 };
@@ -276,7 +277,7 @@ pub fn show(
     st: &mut SketchState,
     page: u32,
     sketches: &mut HashMap<u32, SketchPage>,
-    draw_hold: &crate::state::ShortcutBinding,
+    draw_hold: &crate::shortcuts::ShortcutBinding,
 ) -> bool {
     let mut changed = false;
 
@@ -787,7 +788,7 @@ fn canvas_area(
     st: &mut SketchState,
     page: u32,
     sketches: &mut HashMap<u32, SketchPage>,
-    draw_hold: &crate::state::ShortcutBinding,
+    draw_hold: &crate::shortcuts::ShortcutBinding,
 ) -> bool {
     let paper = sketches.get(&page).map(|s| s.paper).unwrap_or(st.new_paper);
     let extent = sketches
@@ -971,7 +972,7 @@ fn handle_input(
     origin: Pos2,
     zoom: f32,
     painter: &egui::Painter,
-    draw_hold: &crate::state::ShortcutBinding,
+    draw_hold: &crate::shortcuts::ShortcutBinding,
 ) -> bool {
     let mut changed = false;
     let primary = PointerButton::Primary;
@@ -1174,7 +1175,7 @@ fn handle_input(
 fn smooth(points: &[(f32, f32)], zoom: f32) -> Vec<(f32, f32)> {
     let k = (zoom / 450.0).max(1e-4);
     let scaled: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x * k, y * k)).collect();
-    notes::smooth_freehand_points(&scaled)
+    annotations::smooth_freehand_points(&scaled)
         .into_iter()
         .map(|(x, y)| (x / k, y / k))
         .collect()
@@ -1252,7 +1253,7 @@ mod tests {
             };
             self.time += 0.05;
             let (st, sketches, changed) = (&mut self.st, &mut self.sketches, &mut self.changed);
-            let draw_hold = crate::state::ShortcutsConfig::default().trackpad_draw_hold;
+            let draw_hold = crate::shortcuts::ShortcutsConfig::default().trackpad_draw_hold;
             let mut out = self.ctx.run_ui(raw, |ui| {
                 *changed |= show(ui, st, 1, sketches, &draw_hold);
             });

@@ -296,12 +296,19 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | Application state, UI, viewing modes, annotation tools, search, flashcards |
-| `src/notes.rs` | Notes and annotation data model, storage inside the PDF, local backups, page operations |
-| `src/save_intent.rs` | Pure rules of the background PDF save: queueing, close/switch ordering, follow-up commits |
+| `src/main.rs` | Desktop entry point, window configuration, and crash logging |
+| `src/workspace/` | Application state, frame coordination, document lifecycle, navigation, search, and save execution |
+| `src/viewer/` | PDF inspection, render workers, viewport requests, texture caches, selectable text, and links |
+| `src/annotations/` | Annotation data, drawing and editing tools, and undo history |
+| `src/markdown/` | Shared code and math scanning, Markdown preprocessing, and preview rendering |
+| `src/flashcards/` | Card parsing, note preview formatting, trainer, and Anki export |
+| `src/ui/` | Settings, storage controls, toolbars, notes panels, and shared widgets |
+| `src/shortcuts.rs` | Shortcut defaults, keybinding migration, chord capture, and input tracking |
+| `src/persistence.rs` | Save request ordering and decisions about when to repeat a PDF commit |
+| `src/notes.rs` | Study data stored in PDFs, native annotation import and export, local backups, and page operations |
 | `src/export.rs` | PDF export (vector pipeline and rasterised fallback) and note layout |
 | `src/docid.rs` | Stable document identity and migration of legacy data |
-| `src/audio.rs` | Audio workspace, recording, voice memos, transcription |
+| `src/audio.rs` | Audio recording, playback, media files, and transcription |
 | `src/state.rs`, `src/theme.rs` | Persistent settings, recent files, themes |
 | `src/paths.rs`, `src/sysproc.rs` | Per-OS data locations and helper processes (ffmpeg) |
 | `src/screenshots.rs`, `src/clipboard.rs`, `src/dialogs.rs`, `src/spellcheck.rs`, `src/doc_lock.rs` | Snipping and clipboard, file dialogs, spellchecking, one-process-per-document lock |

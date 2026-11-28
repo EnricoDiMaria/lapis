@@ -15,6 +15,28 @@ use parakeet_rs::{ExecutionConfig, ParakeetTDT, TimedToken, TimestampMode, Trans
 use rodio::Source;
 use serde::{Deserialize, Serialize};
 
+pub(crate) fn resolve_media_file(dir: &Path, name: &str) -> PathBuf {
+    let p = PathBuf::from(name);
+    if p.is_absolute() { p } else { dir.join(p) }
+}
+
+/// Removes an audio file only if in the media folder of the file
+pub(crate) fn remove_media_file(dir: &Path, name: &str) -> std::io::Result<()> {
+    let full = resolve_media_file(dir, name);
+    if !full.strip_prefix(dir).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    }) {
+        return Ok(());
+    }
+    match std::fs::remove_file(&full) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
     pub start_ms: u64,

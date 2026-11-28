@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Isolated disk-backed tests from installed app data and other tests on Linux and Windows.
 - Added regression coverage for document switching, audio-index retry, raw recording recovery, and native PDF annotations. Extended qpdf validation to page changes and both PDF export paths.
 - Added a repeatable persistence benchmark and manual release checklist. Documented the Rust 1.95 dependency minimum.
+- Moved PDF workers, viewport requests, and texture caching into a per-document viewer module. Added coverage for worker retirement, request order, cache eviction, and thumbnail fallback.
+- Split the app into workspace, viewer, annotations, Markdown, flashcards, and UI modules. Moved shortcut handling and save decisions into dedicated files.
 
 ## [1.5.0] - 2026/11/27
 

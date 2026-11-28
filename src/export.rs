@@ -8,9 +8,8 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Document as LoDocument, Object, ObjectId, Stream, dictionary};
 use mupdf::{Colorspace, Document as MuDocument, Matrix, Page as MuPage, TextPageFlags};
 
-use crate::notes::{
-    AnnotationKind, BlankPageStyle, PageAnnotation, SketchPage, prepare_image_xobjects,
-};
+use crate::annotations::{AnnotationKind, PageAnnotation};
+use crate::notes::{BlankPageStyle, SketchPage, prepare_image_xobjects};
 use crate::state::ExportSettings;
 
 pub const CANVAS_W: f64 = 960.0;
@@ -204,7 +203,7 @@ fn export_rasterized(
             );
 
             // Preprocess $LaTeX$ and $$LaTeX$$ expressions before laying out lines
-            let processed_md = crate::notes::preprocess_markdown_math(raw_note);
+            let processed_md = crate::markdown::preprocess_markdown_math(raw_note);
             let note_images = prepare_note_images(&mut pdf, &processed_md, &mut img_cache);
             let layout_lines =
                 layout_note_lines(&processed_md, avail_text_w, font_scale, &note_images);
@@ -2572,7 +2571,7 @@ fn build_notes_pages(
     let k = geo.dh / h_c; // canvas units -> points: the slide is drawn at exactly its original size
     let parent_id = page_parent(pdf, page_id)?;
 
-    let processed_md = crate::notes::preprocess_markdown_math(raw_note);
+    let processed_md = crate::markdown::preprocess_markdown_math(raw_note);
     let note_images = prepare_note_images(pdf, &processed_md, img_cache);
     let layout_lines = layout_note_lines(&processed_md, avail_text_w, font_scale, &note_images);
     let mut chunks = paginate_note_lines(&layout_lines, h_c - MARGIN * 2.4);
