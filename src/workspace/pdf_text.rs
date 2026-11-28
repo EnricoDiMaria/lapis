@@ -2,20 +2,84 @@
 
 use super::*;
 
-/// Text of every PDF page prepared for the global search. The characters keep their
-/// positions, so a hit can be highlighted on the page.
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::TryRecvError;
+
+/// Text and character positions used to search the PDF and highlight hits on the page.
 #[derive(Default)]
-pub(super) struct PdfSearchIndex {
-    built: bool,
+struct PdfSearchResults {
     pages: HashMap<u32, search::SearchPage>,
     texts: HashMap<u32, Arc<PageText>>,
 }
 
+struct SearchIndexJob {
+    results: Receiver<PdfSearchResults>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for SearchIndexJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+pub(super) struct PdfSearchIndex {
+    results: Option<PdfSearchResults>,
+    pending: Option<SearchIndexJob>,
+}
+
 impl PdfSearchIndex {
     pub(super) fn clear(&mut self) {
-        self.built = false;
-        self.pages.clear();
-        self.texts.clear();
+        *self = Self::default();
+    }
+
+    fn start(&mut self, path: PathBuf, total: u32, ctx: &egui::Context) {
+        if self.results.is_some() || self.pending.is_some() {
+            return;
+        }
+        let (sender, results) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let ctx = ctx.clone();
+        match thread::Builder::new()
+            .name("lapis-pdf-search".into())
+            .spawn(move || {
+                let index = build_pdf_search_index(&path, total, &worker_cancel);
+                if !worker_cancel.load(Ordering::Relaxed) {
+                    let _ = sender.send(index);
+                    ctx.request_repaint();
+                }
+            }) {
+            Ok(_) => self.pending = Some(SearchIndexJob { results, cancel }),
+            Err(err) => {
+                eprintln!("Lapis: could not start PDF search: {err}");
+                self.results = Some(PdfSearchResults::default());
+            }
+        }
+    }
+
+    fn poll(&mut self) -> bool {
+        let Some(job) = &self.pending else {
+            return false;
+        };
+        match job.results.try_recv() {
+            Ok(results) => self.results = Some(results),
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => self.results = Some(PdfSearchResults::default()),
+        }
+        self.pending = None;
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn wait_for_result(&mut self) {
+        let job = self.pending.take().expect("PDF search worker was started");
+        self.results = Some(
+            job.results
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap(),
+        );
     }
 }
 
@@ -136,7 +200,12 @@ impl Lapis {
         if !self.show_search || self.search_hits.is_empty() {
             return;
         }
-        let Some(text) = self.pdf_search_index.texts.get(&page) else {
+        let Some(text) = self
+            .pdf_search_index
+            .results
+            .as_ref()
+            .and_then(|index| index.texts.get(&page))
+        else {
             return;
         };
         let warn = rgb(self.theme.accent);
@@ -300,18 +369,20 @@ impl Lapis {
         self.total_pages.hash(&mut h);
         self.audio_index.segments.len().hash(&mut h);
         self.audio_index.page_memos.len().hash(&mut h);
-        self.pdf_search_index.built.hash(&mut h);
+        self.study_revision.hash(&mut h);
+        self.pdf_search_index.results.is_some().hash(&mut h);
         h.finish()
     }
 
-    fn recompute_search_hits(&mut self) {
+    fn recompute_search_hits(&mut self, ctx: &egui::Context) {
         let needle = search::fold_query(&self.search_query);
         let mut hits: Vec<search::Hit> = Vec::new();
         if needle.is_empty() {
             self.search_hits = hits;
             return;
         }
-        self.ensure_pdf_search_index();
+        self.ensure_pdf_search_index(ctx);
+        let pdf = self.pdf_search_index.results.as_ref();
 
         'pages: for p in 1..=self.total_pages {
             // The note being edited lives in `current_note`, not in `notes`, until it is saved.
@@ -337,7 +408,7 @@ impl Lapis {
                     }
                 }
             }
-            if let Some(pg) = self.pdf_search_index.pages.get(&p) {
+            if let Some(pg) = pdf.and_then(|index| index.pages.get(&p)) {
                 for m in pg.find(&needle, search::MAX_HITS) {
                     hits.push(search::Hit {
                         page: p,
@@ -457,6 +528,7 @@ impl Lapis {
             return;
         }
         let ctx = ui.ctx().clone();
+        let index_ready = self.pdf_search_index.poll();
         let input_id = ui.make_persistent_id("global_search_input");
         let input_had_focus = ctx.memory(|m| m.has_focus(input_id));
 
@@ -637,6 +709,11 @@ impl Lapis {
                             );
                         }
 
+                        if self.pdf_search_index.pending.is_some()
+                            && !self.search_query.trim().is_empty()
+                        {
+                            ui.weak("Indexing PDF…");
+                        }
                         if n > 0 {
                             ui.add_space(4.0);
                             let list_max_h =
@@ -685,14 +762,15 @@ impl Lapis {
 
         // Results follow the query (and the notes) live.
         let key = self.search_state_key();
-        if key != self.search_key {
+        if key != self.search_key || index_ready {
             self.search_key = key;
             let query_changed = self.search_query != self.search_last_query;
             let previous = self
                 .search_hits
                 .get(self.search_sel)
                 .map(|h| (h.page, h.source, h.start));
-            self.recompute_search_hits();
+            self.recompute_search_hits(&ctx);
+            ctx.request_repaint();
             if query_changed {
                 self.search_last_query = self.search_query.clone();
                 self.search_sel = 0;
@@ -708,6 +786,9 @@ impl Lapis {
                     })
                     .unwrap_or(self.search_sel)
                     .min(self.search_hits.len().saturating_sub(1));
+                if index_ready && previous.is_none() {
+                    self.search_goto_selected(&ctx);
+                }
             }
         }
 
@@ -724,35 +805,74 @@ impl Lapis {
         }
     }
 
-    fn ensure_pdf_search_index(&mut self) {
-        if self.pdf_search_index.built || !self.has_pdf() {
-            return;
-        }
-        self.pdf_search_index.built = true;
-        let Ok(doc) = Document::open(self.pdf_path.to_str().unwrap_or_default()) else {
-            return;
-        };
-        for idx in 0..(self.total_pages as i32) {
-            let Some(text) = extract_text(&doc, idx) else {
-                continue;
-            };
-            if text.chars.is_empty() {
-                continue;
-            }
-            // Lines are joined with a space so a phrase can match across a line break.
-            let mut items: Vec<(char, usize)> =
-                Vec::with_capacity(text.chars.len() + text.lines.len());
-            for l in &text.lines {
-                for i in l.start..l.end {
-                    items.push((text.chars[i].ch, i));
-                }
-                items.push((' ', search::SYNTHETIC));
-            }
-            let page = (idx + 1) as u32;
+    pub(super) fn ensure_pdf_search_index(&mut self, ctx: &egui::Context) {
+        if self.has_pdf() {
             self.pdf_search_index
-                .pages
-                .insert(page, search::SearchPage::new(items));
-            self.pdf_search_index.texts.insert(page, Arc::new(text));
+                .start(self.pdf_path.clone(), self.total_pages, ctx);
         }
+    }
+}
+
+fn build_pdf_search_index(path: &Path, total: u32, cancel: &AtomicBool) -> PdfSearchResults {
+    let mut index = PdfSearchResults::default();
+    let Ok(doc) = Document::open(path.to_str().unwrap_or_default()) else {
+        return index;
+    };
+    for idx in 0..(total as i32) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(text) = extract_text(&doc, idx) else {
+            continue;
+        };
+        if text.chars.is_empty() {
+            continue;
+        }
+        // Lines are joined with a space so a phrase can match across a line break.
+        let mut items: Vec<(char, usize)> = Vec::with_capacity(text.chars.len() + text.lines.len());
+        for line in &text.lines {
+            for i in line.start..line.end {
+                items.push((text.chars[i].ch, i));
+            }
+            items.push((' ', search::SYNTHETIC));
+        }
+        let page = (idx + 1) as u32;
+        index.pages.insert(page, search::SearchPage::new(items));
+        index.texts.insert(page, Arc::new(text));
+    }
+    index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::isolated_dir;
+
+    #[test]
+    fn retired_pdf_search_results_cannot_reach_the_next_index() {
+        let root = isolated_dir!(retired_pdf_search_results_cannot_reach_the_next_index);
+        let second = root.join("new.pdf");
+        notes::create_blank_study_notebook(&second).unwrap();
+
+        let (sender, results) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut index = PdfSearchIndex {
+            results: None,
+            pending: Some(SearchIndexJob {
+                results,
+                cancel: Arc::clone(&cancel),
+            }),
+        };
+        let mut old = PdfSearchResults::default();
+        old.pages
+            .insert(10, search::SearchPage::from_text("Old document"));
+        assert!(sender.send(old).is_ok());
+        index.clear();
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(sender.send(PdfSearchResults::default()).is_err());
+
+        index.start(second, 1, &egui::Context::default());
+        index.wait_for_result();
+        assert!(!index.results.as_ref().unwrap().pages.contains_key(&10));
     }
 }

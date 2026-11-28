@@ -318,7 +318,7 @@ A short tour of the technology and the design decisions behind Lapis, for contri
 - **Hybrid PDF & standard annotation storage:** While you work, periodic autosaves update a fast **local backup** without bloating the PDF file. When you explicitly save (`Ctrl + S`), switch documents, or close the app, Lapis commits a single **PDF Incremental Update** containing both standard PDF annotations (`/Ink`, `/Highlight`, `/FreeText` with appearance streams for external viewers) and Lapis's own metadata stream (notes, sketches, flashcards, and custom properties).
 - **Two-way external viewer compatibility:** Annotations added or edited in external PDF readers (such as Microsoft Edge) are preserved and imported into Lapis's vector canvas on open (or merged before the next save if they appear while the document is open), without truncating external PDF revisions.
 - **Portable Lapis metadata is stored inside a PDF stream object**, delimited by `%LAPIS_CUSTOM_START` and `%LAPIS_CUSTOM_END`, rather than appended after `%%EOF`. Standard PDF annotations are stored separately as native annotation objects. Both travel with the PDF.
-- **Per-document view state** (page, zoom, view mode, notes-panel size) is kept in `state.json` in the settings folder, not in the PDF.
+- **Per-document view state** (page, zoom, view mode, notes-panel size) is kept in `state.json` in the settings folder. Rapid updates share a 250 ms write window. Pending view state is flushed when switching documents or closing.
 - **Autosaves update the local backup** without modifying the PDF. Explicit Save (`Ctrl + S`), document switches and exit commit document changes to the PDF on a background worker; the workspace remains editable and save feedback appears as a toast. Closing or switching waits for any newer edits to be committed. The local backup also protects against an interrupted or unavailable PDF write.
 - Every saved document has a random **document ID** stored in its metadata. Local data (note backup, audio folder, original-PDF copy) is keyed by the ID rather than by the file path, so moving or renaming a PDF, or opening it on another computer, keeps everything connected. A copy of a file made on the same computer gets its own ID.
 - Each save records a **revision**. When the PDF and the local backup disagree, the newest revision wins as a whole (so deletions propagate too) and the discarded version is kept as `notes/<id>.conflict-<timestamp>.bak` (the latest five).
@@ -399,6 +399,25 @@ The initial baseline below uses the v1.5.0 persistence code, Linux x86-64, a Ryz
 | Reopen with study data | 7.57 | 10.83 | 70.26 |
 
 With revision verification in the open and save paths, five runs of the dense fixture on the same system measured medians of 62.31 ms to open, 93.04 ms to reopen, 27.81 ms for a changed checkpoint, 405.56 ms for a changed PDF commit, and 4.50 ms for an unchanged commit.
+
+### Workspace benchmark
+
+```bash
+cargo test --release --locked workspace::tests::workspace_performance_fixture -- --ignored --exact --nocapture
+```
+
+The headless workspace fixture loads a 420-page PDF with 8,400 strokes and 60 sketches. It times 120 unchanged checkpoint checks, 30 reading-position updates followed by a flush, and the first PDF search index request and completion. It uses the normal workspace save and search paths. Its timings cover those operations only.
+
+Five paired release runs compared Milestone 4 with commit `443d177` on the Linux and Btrfs setup above. The session benchmark flushes immediately after the update burst. The search request returns after launching the worker, and the index-ready measurement includes the worker's extraction time.
+
+| Operation | Before (ms) | After (ms) |
+|---|---:|---:|
+| 120 idle checkpoint checks | 2,070.92 | 0.00455 |
+| 30 reading-position updates and flush | 237.79 | 7.87 |
+| First PDF search index request | 79.55 | 0.049 |
+| First PDF search index ready | 79.55 | 79.56 |
+
+In the paired persistence runs, the dense fixture's median open time went from 65.32 to 64.72 ms, the first CPU raster from 2.66 to 2.60 ms, and a changed PDF commit from 406.50 to 401.56 ms.
 
 ### Manual release checks
 

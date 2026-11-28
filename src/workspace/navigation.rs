@@ -193,7 +193,7 @@ impl Lapis {
 
         self.current_page = page;
         // Reading position belongs to state.json, not to the PDF's annotation payload.
-        // Persist it on navigation, including when no notes were edited.
+        // Queue it on navigation, including when no notes were edited.
         self.save_session_state();
         if !self.audio_engine.is_recording()
             && !self.audio_engine.is_playing()
@@ -209,7 +209,6 @@ impl Lapis {
         if !self.lock_note_page {
             self.note_page = page;
             self.current_note = self.notes.get(&page).cloned().unwrap_or_default();
-            self.note_is_dirty = false;
         }
 
         self.selected_textbox = None;

@@ -60,10 +60,10 @@ fn retiring_workers_disconnects_both_queues_and_discards_pending_results() {
     assert!(old_results.send(image(view.current_page, false)).is_err());
 
     let (_, _, new_results) = connect_workers(&mut viewer);
-    assert!(viewer.upload_ready(&ctx, view).is_none());
+    assert!(viewer.upload_ready(&ctx, view, false).is_none());
     assert!(viewer.page(view.current_page).is_none());
     new_results.send(image(view.current_page, false)).unwrap();
-    assert!(viewer.upload_ready(&ctx, view).is_some());
+    assert!(viewer.upload_ready(&ctx, view, false).is_some());
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn requests_prioritize_visible_pages_and_deduplicate_unchanged_state() {
         ..test_view()
     };
     results.send(image(5, false)).unwrap();
-    viewer.upload_ready(&ctx, view);
+    viewer.upload_ready(&ctx, view, false);
 
     viewer.request_pages(view, 1.0, false);
     let request = pages.try_recv().unwrap();
@@ -120,7 +120,7 @@ fn upload_limits_images_per_frame_and_falls_back_to_the_same_page_thumbnail() {
     results.send(image(5, true)).unwrap();
     results.send(image(5, false)).unwrap();
 
-    assert!(viewer.upload_ready(&ctx, view).is_none());
+    assert!(viewer.upload_ready(&ctx, view, false).is_none());
     assert!(viewer.text(5).is_some());
     assert!(viewer.page(4).is_some());
     assert!(viewer.page(5).is_none());
@@ -128,7 +128,7 @@ fn upload_limits_images_per_frame_and_falls_back_to_the_same_page_thumbnail() {
     let thumbnail = viewer.thumbnail(5).unwrap().0.id();
     assert_eq!(viewer.page_or_thumbnail(5).unwrap().0.id(), thumbnail);
 
-    let render = viewer.upload_ready(&ctx, view).unwrap();
+    let render = viewer.upload_ready(&ctx, view, false).unwrap();
     assert_eq!(render.page_pt, (2.0, 2.0));
     assert_eq!(
         viewer.page_or_thumbnail(5).unwrap().0.id(),
@@ -146,14 +146,45 @@ fn render_cache_keeps_requested_pages_and_evicts_the_oldest_other_texture() {
     for page in [1, 2, 4, 5] {
         results.send(image(page, false)).unwrap();
     }
-    viewer.upload_ready(&ctx, view);
-    viewer.upload_ready(&ctx, view);
+    viewer.upload_ready(&ctx, view, false);
+    viewer.upload_ready(&ctx, view, false);
     viewer.touch_page(1);
     viewer.evict_pages(view, 3 * 16);
     assert!(viewer.page(1).is_some());
     assert!(viewer.page(2).is_none());
     assert!(viewer.page(4).is_some());
     assert!(viewer.page(5).is_some());
+    assert_eq!(viewer.pages.bytes, 3 * 16);
+    results.send(image(5, false)).unwrap();
+    viewer.upload_ready(&ctx, view, false);
+    assert_eq!(viewer.pages.bytes, 3 * 16);
+    viewer.invalidate_images();
+    assert_eq!(viewer.pages.bytes, 0);
+}
+
+#[test]
+fn thumbnails_respect_the_byte_budget_and_keep_the_current_page_when_possible() {
+    let ctx = egui::Context::default();
+    let mut viewer = Viewer::default();
+    let (_, _, results) = connect_workers(&mut viewer);
+    let view = test_view();
+    for page in [5, 1, 2, 6] {
+        results.send(image(page, true)).unwrap();
+    }
+    viewer.upload_ready(&ctx, view, false);
+    viewer.upload_ready(&ctx, view, false);
+    viewer.evict_thumbnails(view, 2 * 16);
+    assert_eq!(viewer.thumbnails.bytes, 2 * 16);
+    assert!(viewer.thumbnail(5).is_some());
+    assert!(viewer.thumbnail(6).is_some());
+    assert!(viewer.thumbnail(1).is_none());
+    assert!(viewer.thumbnail(2).is_none());
+
+    viewer.invalidate_images();
+    results.send(image(5, true)).unwrap();
+    viewer.upload_ready(&ctx, view, true);
+    assert_eq!(viewer.thumbnails.bytes, 0);
+    assert!(viewer.thumbnail(5).is_none());
 }
 
 #[test]
@@ -205,6 +236,17 @@ fn render_workers_send_the_page_image_before_text_and_render_thumbnails_separate
     assert_eq!(thumbnail.image.size, [240, 135]);
     assert!(!thumbnail.dark_mode);
     assert!(thumbnail.is_thumb);
+    thumbs
+        .send(RenderRequest {
+            scale: 1.0,
+            pages: vec![0],
+            dark_mode: false,
+        })
+        .unwrap();
+    let WorkerMsg::Page(capped) = results.recv_timeout(timeout).unwrap() else {
+        panic!("The thumbnail worker should return an image");
+    };
+    assert_eq!(capped.image.size, [512, 288]);
     drop((pages, thumbs));
     assert!(matches!(
         results.recv_timeout(timeout),

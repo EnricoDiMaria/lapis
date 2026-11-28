@@ -1,10 +1,14 @@
 use super::*;
 use crate::persistence::Completion;
+use std::time::{Duration, Instant};
+
+const SESSION_SAVE_INTERVAL: Duration = Duration::from_millis(250);
+const SAVE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(super) struct PdfSaveJob {
     pub(super) worker: thread::JoinHandle<std::io::Result<()>>,
     pub(super) after: AfterPdfSave,
-    pub(super) snapshot_hash: Option<u64>,
+    pub(super) snapshot_revision: u64,
 }
 
 pub(super) struct PdfSaveFailure {
@@ -20,7 +24,7 @@ impl Lapis {
         }
         let view_mode = self.reading_view_mode();
         self.saved_view_mode = view_mode;
-        self.app_state.upsert_recent(RecentFileEntry {
+        let changed = self.app_state.upsert_recent(RecentFileEntry {
             path: self.pdf_path.clone(),
             name: self.pdf_name.clone(),
             last_page: self.current_page,
@@ -35,28 +39,72 @@ impl Lapis {
             pdf_dark_mode: self.pdf_dark_mode,
             panel_sizes: self.panel_sizes,
         });
+        if changed {
+            self.session_save_due
+                .get_or_insert_with(|| Instant::now() + SESSION_SAVE_INTERVAL);
+        }
     }
 
-    /// Compute a content-only fingerprint every UI frame. This catches edits made by any
-    /// annotation/sketch action, undo/redo, cut/paste or note control even if that action
-    /// did not explicitly call save_doc_data. The PDF itself is never written here.
-    pub(super) fn local_checkpoint_hash(&self) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        let bytes = serde_json::to_vec(&(
-            &self.notes,
-            &self.annotations,
-            &self.blank_pages,
-            &self.sketches,
-            self.note_page,
-            &self.current_note,
-        ))
-        .ok()?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        Some(hasher.finish())
+    pub(super) fn flush_session_state(&mut self) {
+        if self.session_save_due.take().is_some()
+            && let Err(err) = self.app_state.try_save()
+        {
+            eprintln!("Lapis: could not save session state: {err}");
+            self.session_save_due = Some(Instant::now() + SAVE_RETRY_INTERVAL);
+        }
+    }
+
+    pub(super) fn service_session_state(&mut self, ctx: &egui::Context) {
+        if self
+            .session_save_due
+            .is_some_and(|due| due <= Instant::now())
+        {
+            self.flush_session_state();
+        }
+        if let Some(due) = self.session_save_due {
+            ctx.request_repaint_after(due.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    pub(super) fn mark_study_changed(&mut self) {
+        self.study_revision = self.study_revision.wrapping_add(1);
+    }
+
+    pub(super) fn save_study_edit(&mut self) {
+        self.mark_study_changed();
+        self.sync_and_save();
+    }
+
+    fn editor_has_changes(&self) -> bool {
+        match self.notes.get(&self.note_page) {
+            Some(saved) => *saved != self.current_note,
+            None => !self.current_note.trim().is_empty(),
+        }
+    }
+
+    pub(super) fn has_uncheckpointed_edits(&self) -> bool {
+        self.checkpointed_revision != Some(self.study_revision) || self.editor_has_changes()
+    }
+
+    pub(super) fn checkpoint_after_frame(&mut self, ctx: &egui::Context) {
+        if !self.has_pdf() || !self.has_uncheckpointed_edits() {
+            return;
+        }
+        // Completed edits reach the local backup before the next frame.
+        if let Some(left) = self
+            .checkpoint_failed_at
+            .and_then(|at| SAVE_RETRY_INTERVAL.checked_sub(at.elapsed()))
+        {
+            ctx.request_repaint_after(left);
+        } else {
+            self.sync_and_save();
+        }
     }
 
     pub(super) fn sync_and_save(&mut self) {
+        if !self.has_pdf() || !self.has_uncheckpointed_edits() {
+            return;
+        }
         match self.sync_local_checkpoint() {
             Ok(()) => self.checkpoint_failed_at = None,
             Err(err) => {
@@ -92,6 +140,7 @@ impl Lapis {
     /// Checkpoint the imported annotations before acknowledging the source revision.
     pub(super) fn merge_external_into_model(&mut self) -> std::io::Result<()> {
         self.finish_sketch_edit();
+        self.mark_study_changed();
         let observed = notes::merge_external_annotations(&self.pdf_path, &mut self.annotations)?;
         self.sync_local_checkpoint()?;
         notes::mark_pdf_observed(&self.pdf_path, observed)?;
@@ -104,10 +153,13 @@ impl Lapis {
         if !self.has_pdf() {
             return Ok(());
         }
-        if self.current_note.trim().is_empty() {
-            self.notes.remove(&self.note_page);
-        } else {
-            self.notes.insert(self.note_page, self.current_note.clone());
+        if self.editor_has_changes() {
+            if self.current_note.trim().is_empty() {
+                self.notes.remove(&self.note_page);
+            } else {
+                self.notes.insert(self.note_page, self.current_note.clone());
+            }
+            self.mark_study_changed();
         }
         notes::save_doc_data(
             &self.pdf_path,
@@ -116,8 +168,8 @@ impl Lapis {
             self.blank_pages.clone(),
             &self.sketches,
         )?;
-        self.note_is_dirty = false;
-        self.last_local_checkpoint_hash = self.local_checkpoint_hash();
+        self.checkpointed_revision = Some(self.study_revision);
+        self.checkpoint_failed_at = None;
         Ok(())
     }
 
@@ -138,11 +190,14 @@ impl Lapis {
 
     fn start_pdf_save(&mut self, after: AfterPdfSave, ctx: &egui::Context) {
         self.finish_sketch_edit();
-        if let Err(err) = self.sync_local_checkpoint() {
+        if self.has_uncheckpointed_edits()
+            && let Err(err) = self.sync_local_checkpoint()
+        {
             self.pdf_save_failed(after, err.to_string(), false);
             return;
         }
         self.save_session_state();
+        self.flush_session_state();
         if let Err(err) = AudioDocIndex::recover_page_change(&self.pdf_path) {
             self.pdf_save_failed(
                 after,
@@ -165,7 +220,7 @@ impl Lapis {
                 return;
             }
         };
-        let snapshot_hash = self.local_checkpoint_hash();
+        let snapshot_revision = self.study_revision;
         let repaint = ctx.clone();
         match thread::Builder::new()
             .name("lapis-pdf-save".into())
@@ -178,7 +233,7 @@ impl Lapis {
                 self.pdf_save_job = Some(PdfSaveJob {
                     worker,
                     after,
-                    snapshot_hash,
+                    snapshot_revision,
                 });
                 self.toast_message = Some(("Saving PDF…".into(), std::time::Instant::now()));
             }
@@ -221,6 +276,8 @@ impl Lapis {
                 return self.open_pdf(path, ctx);
             }
             AfterPdfSave::Exit => {
+                self.save_session_state();
+                self.flush_session_state();
                 // Send Close in the next frame, separate from any CancelClose command.
                 self.allow_window_close = true;
             }
@@ -256,12 +313,13 @@ impl Lapis {
                     if !matches!(&job.after, AfterPdfSave::Stay) || queued {
                         self.finish_sketch_edit();
                     }
-                    let current_hash = self.local_checkpoint_hash();
+                    let current_revision =
+                        (!self.editor_has_changes()).then_some(self.study_revision);
                     match persistence::on_commit_success(
                         &job.after,
                         queued,
-                        job.snapshot_hash,
-                        current_hash,
+                        Some(job.snapshot_revision),
+                        current_revision,
                     ) {
                         Completion::Followup => self.request_pdf_save(job.after, &ctx),
                         Completion::Done { newer_edits } => {

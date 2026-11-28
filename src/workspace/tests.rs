@@ -508,3 +508,203 @@ mod release_correctness_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[test]
+#[ignore = "manual benchmark using a dense document"]
+fn workspace_performance_fixture() {
+    use crate::test_support::isolated_dir;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let root = isolated_dir!(workspace_performance_fixture);
+    let pdf = root.join("workspace.pdf");
+    notes::tests::write_save_fixture_pdf(&pdf, 420, 1500, true);
+    let mut data = notes::DocData::default();
+    let mut stroke = notes::tests::sample_textbox(
+        "",
+        (0..40)
+            .map(|i| (0.05 + 0.02 * i as f32, 0.4 + 0.01 * (i % 5) as f32))
+            .collect(),
+    );
+    stroke.kind = AnnotationKind::Freehand;
+    for page in 1..=420 {
+        data.notes.insert(page, "Example study notes.\n".repeat(48));
+        data.annotations.insert(page, vec![stroke.clone(); 20]);
+        if page % 7 == 1 {
+            let mut sketch = notes::SketchPage::new(notes::BlankPageStyle::Grid);
+            sketch.strokes.push(stroke.clone());
+            data.sketches.insert(page, sketch);
+        }
+    }
+    notes::save_doc_data(
+        &pdf,
+        &data.notes,
+        &data.annotations,
+        data.blank_pages,
+        &data.sketches,
+    )
+    .unwrap();
+
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(pdf.clone()),
+    );
+    app.sync_local_checkpoint().unwrap();
+    fn timed(label: &str, work: impl FnOnce()) {
+        let start = Instant::now();
+        work();
+        println!(
+            "workspace,{label},{:.6}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    timed("120 idle checkpoint checks", || {
+        for _ in 0..120 {
+            black_box(&mut app).checkpoint_after_frame(black_box(&ctx));
+        }
+    });
+    timed("30 reading position updates and flush", || {
+        for page in 2..=31 {
+            app.current_page = page;
+            app.save_session_state();
+        }
+        app.flush_session_state();
+    });
+    assert_eq!(AppState::load().find_entry(&pdf).unwrap().last_page, 31);
+    let search_started = Instant::now();
+    timed("first PDF search index request", || {
+        app.ensure_pdf_search_index(&ctx)
+    });
+    app.pdf_search_index.wait_for_result();
+    println!(
+        "workspace,first PDF search index ready,{:.6}",
+        search_started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+#[test]
+fn checkpoint_tracks_completed_edits_and_retries_a_failed_write() {
+    use crate::test_support::isolated_dir;
+    use std::time::{Duration, Instant};
+
+    let root = isolated_dir!(checkpoint_tracks_completed_edits_and_retries_a_failed_write);
+    let pdf = root.join("checkpoint.pdf");
+    notes::create_blank_study_notebook(&pdf).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(pdf.clone()),
+    );
+    app.current_note = "Before the failed write".into();
+    app.checkpoint_after_frame(&ctx);
+    assert!(!app.has_uncheckpointed_edits());
+
+    let backup = notes::get_backup_path(&pdf);
+    let blocked = backup.with_extension("json.tmp");
+    std::fs::create_dir(&blocked).unwrap();
+    app.current_note = "Edited before leaving this note".into();
+    app.checkpoint_after_frame(&ctx);
+    assert!(app.checkpoint_failed_at.is_some());
+    assert!(app.has_uncheckpointed_edits());
+    assert_eq!(
+        notes::load_doc_data(&pdf).notes[&1],
+        "Before the failed write"
+    );
+
+    std::fs::remove_dir(&blocked).unwrap();
+    app.checkpoint_failed_at = Some(Instant::now() - Duration::from_secs(3));
+    app.checkpoint_after_frame(&ctx);
+    assert!(!app.has_uncheckpointed_edits());
+    assert_eq!(
+        notes::load_doc_data(&pdf).notes[&1],
+        "Edited before leaving this note"
+    );
+
+    app.push_undo_snapshot(1);
+    let stroke = notes::tests::sample_textbox("Annotation", vec![(0.1, 0.1), (0.3, 0.3)]);
+    app.annotations.insert(1, vec![stroke]);
+    app.mark_study_changed();
+    app.checkpoint_after_frame(&ctx);
+    assert_eq!(notes::load_doc_data(&pdf).annotations[&1].len(), 1);
+    app.undo_annotation(1);
+    assert!(!app.has_uncheckpointed_edits());
+    assert!(notes::load_doc_data(&pdf).annotations.is_empty());
+}
+
+#[test]
+fn reading_position_updates_coalesce_and_flush_before_document_switch() {
+    use crate::test_support::isolated_dir;
+
+    let root = isolated_dir!(reading_position_updates_coalesce_and_flush_before_document_switch);
+    let first = root.join("first.pdf");
+    let second = root.join("second.pdf");
+    notes::tests::write_save_fixture_pdf(&first, 8, 0, false);
+    notes::create_blank_study_notebook(&second).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(first.clone()),
+    );
+    assert!(app.session_save_due.is_none());
+
+    for page in 2..=7 {
+        app.go_to_page(page, &ctx);
+    }
+    assert_eq!(AppState::load().find_entry(&first).unwrap().last_page, 1);
+    assert_eq!(app.app_state.find_entry(&first).unwrap().last_page, 7);
+    assert!(app.session_save_due.is_some());
+    assert!(app.open_pdf(second.clone(), &ctx));
+    let state = AppState::load();
+    assert_eq!(state.find_entry(&first).unwrap().last_page, 7);
+    assert_eq!(
+        state.recent_files.front().unwrap().path,
+        dunce::canonicalize(&second).unwrap()
+    );
+    assert!(app.session_save_due.is_none());
+    app.save_session_state();
+    assert!(app.session_save_due.is_none());
+}
+
+#[test]
+fn leaving_waits_for_edits_made_after_the_pdf_snapshot() {
+    use crate::test_support::isolated_dir;
+    use std::time::{Duration, Instant};
+
+    let root = isolated_dir!(leaving_waits_for_edits_made_after_the_pdf_snapshot);
+    let pdf = root.join("leave.pdf");
+    notes::create_blank_study_notebook(&pdf).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = Lapis::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Some(pdf.clone()),
+    );
+    let service = |app: &mut Lapis| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.service_pdf_save(ui);
+        });
+        output.textures_delta.clear();
+    };
+
+    app.current_note = "First snapshot".into();
+    app.request_pdf_save(AfterPdfSave::Home, &ctx);
+    service(&mut app);
+    assert!(app.pdf_save_job.is_some());
+    app.current_note = "Edited while the PDF was saving".into();
+    app.checkpoint_after_frame(&ctx);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.has_pdf() && app.pdf_save_failure.is_none() && Instant::now() < deadline {
+        service(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !app.has_pdf(),
+        "The newest snapshot must be committed before leaving"
+    );
+    std::fs::remove_file(notes::get_backup_path(&pdf)).unwrap();
+    assert_eq!(
+        notes::load_doc_data(&pdf).notes[&1],
+        "Edited while the PDF was saving"
+    );
+}

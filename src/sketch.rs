@@ -292,7 +292,7 @@ pub fn show(
         .inner;
 
     if let Some(action) = action {
-        st.commit_pending(sketches);
+        changed |= st.commit_pending(sketches);
         st.focus = true;
         match action {
             Action::Undo => changed |= st.undo(page, sketches),

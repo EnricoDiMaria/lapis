@@ -155,6 +155,8 @@ impl Lapis {
             ctx.request_repaint();
             return false;
         }
+        self.save_session_state();
+        self.flush_session_state();
         // Only release the old lock after the candidate has been validated.
         if !same_doc {
             self.doc_lock = new_lock;
@@ -228,7 +230,7 @@ impl Lapis {
         self.pending_delete_page = None;
         self.last_layout = (0.0, 0.0, 0.0, 0.0);
         self.visible_pages = (0, 0);
-        self.last_local_checkpoint_hash = None;
+        self.checkpointed_revision = None;
         self.checkpoint_failed_at = None;
         self.last_external_merge = None;
         self.pending_signed_page_op = None;
@@ -239,7 +241,6 @@ impl Lapis {
         self.current_page = start_page;
         self.target_page = start_page;
         self.current_note = self.notes.get(&start_page).cloned().unwrap_or_default();
-        self.note_is_dirty = false;
         self.slide_rects.clear();
         self.last_slide_rects.clear();
         self.pdf_selection = None;
@@ -268,6 +269,7 @@ impl Lapis {
         self.flashcard_idx = 0;
 
         self.save_session_state();
+        self.flush_session_state();
         ctx.request_repaint();
         true
     }
@@ -293,6 +295,8 @@ impl Lapis {
         if !self.has_pdf() {
             return;
         }
+        self.save_session_state();
+        self.flush_session_state();
         // Release the per-document lock, otherwise the file stays marked as open
         // (other windows get "already open" and the storage cleanup stays disabled).
         self.doc_lock = None;
@@ -394,33 +398,9 @@ impl Lapis {
                 }
 
                 // Keep the current note aligned with the updated PDF.
-                self.note_is_dirty = false;
                 self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
 
-                // Save page data before restarting workers.
-                let updated_notes = self.notes.clone();
-                let updated_annotations = self.annotations.clone();
-                let updated_blank_pages = self.blank_pages.clone();
-
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &updated_notes,
-                    &updated_annotations,
-                    updated_blank_pages.clone(),
-                    &self.sketches,
-                );
-                self.save_session_state();
-
-                self.notes = updated_notes;
-                self.annotations = updated_annotations;
-                self.blank_pages = updated_blank_pages;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
+                self.save_study_edit();
                 if self.current_page >= new_page_num {
                     self.current_page += 1;
                 }
@@ -438,7 +418,6 @@ impl Lapis {
                 }
                 self.reanchor_page = self.continuous_anchor_page;
                 self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
-                self.note_is_dirty = false;
                 self.refresh_pdf_after_page_structure_change(ctx);
                 self.current_page = new_page_num;
                 self.target_page = new_page_num;
@@ -592,19 +571,12 @@ impl Lapis {
                 self.note_page = keep_page(old_note_page);
                 self.split_secondary_page = keep_page(old_split_secondary);
                 self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
-                self.note_is_dirty = false;
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 self.revealed_tapes.clear();
                 self.selected_image = None;
                 self.pending_delete_page = None;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
+                self.save_study_edit();
                 self.refresh_pdf_after_page_structure_change(ctx);
                 self.finish_audio_page_change(
                     notes::PageChange::Delete(page_to_del),
@@ -696,14 +668,7 @@ impl Lapis {
                     .map(|(p, i)| (remap(p), i))
                     .collect();
                 self.current_note = self.notes.get(&self.note_page).cloned().unwrap_or_default();
-                self.note_is_dirty = false;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
+                self.save_study_edit();
                 self.save_session_state();
                 self.refresh_pdf_after_page_structure_change(ctx);
                 self.finish_audio_page_change(

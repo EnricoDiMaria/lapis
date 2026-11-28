@@ -1325,13 +1325,7 @@ impl Lapis {
         ui.data_mut(|d| d.insert_temp(over_id, over));
 
         if dirty {
-            let _ = notes::save_doc_data(
-                &self.pdf_path,
-                &self.notes,
-                &self.annotations,
-                self.blank_pages.clone(),
-                &self.sketches,
-            );
+            self.save_study_edit();
         }
     }
 
@@ -1678,13 +1672,7 @@ impl Lapis {
                             self.redo_stack.remove(&page_num);
                             self.selected_textbox = None;
 
-                            let _ = notes::save_doc_data(
-                                &self.pdf_path,
-                                &self.notes,
-                                &self.annotations,
-                                self.blank_pages.clone(),
-                                &self.sketches,
-                            );
+                            self.save_study_edit();
                         }
                     }
                 }
@@ -1740,7 +1728,6 @@ impl Lapis {
                                 paths::file_uri(&png_path)
                             );
                             self.current_note.push_str(&md_link);
-                            self.note_is_dirty = true;
                             self.sync_and_save();
                             self.show_notes = true;
                             self.toast_message = Some((
@@ -1818,8 +1805,7 @@ impl Lapis {
                     self.push_undo_snapshot(page_num);
                     self.commit_annotation_color(stroke.kind, stroke.color);
                     self.annotations.entry(page_num).or_default().push(stroke);
-                    // Update the checkpoint so the end of the frame does not save again.
-                    self.sync_and_save();
+                    self.save_study_edit();
                 }
             }
         }
@@ -1986,7 +1972,7 @@ impl Lapis {
     pub(super) fn undo_annotation(&mut self, page: u32) {
         if self.sketch_receives_undo() {
             if self.sketch.undo(self.note_page, &mut self.sketches) {
-                self.save_sketch_data();
+                self.save_study_edit();
                 self.toast_message = Some(("󰕌 Undo sketch".to_string(), std::time::Instant::now()));
             }
             return;
@@ -2002,13 +1988,7 @@ impl Lapis {
                 self.annotations.insert(page, prev_state);
             }
             self.selected_textbox = None;
-            let _ = notes::save_doc_data(
-                &self.pdf_path,
-                &self.notes,
-                &self.annotations,
-                self.blank_pages.clone(),
-                &self.sketches,
-            );
+            self.save_study_edit();
             self.toast_message = Some(("󰕌 Undo annotation".to_string(), std::time::Instant::now()));
         }
     }
@@ -2016,7 +1996,7 @@ impl Lapis {
     pub(super) fn redo_annotation(&mut self, page: u32) {
         if self.sketch_receives_undo() {
             if self.sketch.redo(self.note_page, &mut self.sketches) {
-                self.save_sketch_data();
+                self.save_study_edit();
                 self.toast_message = Some(("󰑎 Redo sketch".to_string(), std::time::Instant::now()));
             }
             return;
@@ -2028,13 +2008,7 @@ impl Lapis {
             self.undo_stack.entry(page).or_default().push(current_state);
             self.annotations.insert(page, next_state);
             self.selected_textbox = None;
-            let _ = notes::save_doc_data(
-                &self.pdf_path,
-                &self.notes,
-                &self.annotations,
-                self.blank_pages.clone(),
-                &self.sketches,
-            );
+            self.save_study_edit();
             self.toast_message = Some(("󰑎 Redo annotation".to_string(), std::time::Instant::now()));
         }
     }
@@ -2306,11 +2280,11 @@ impl Lapis {
                     let (x0, x1) = (a0.0.min(a1.0), a0.0.max(a1.0));
                     let (y0, y1) = (a0.1.min(a1.1), a0.1.max(a1.1));
                     let (w, h) = (x1 - x0, y1 - y0);
-                    match d.mode {
+                    let points = match d.mode {
                         ImageDragMode::Move { grab } => {
                             let nx = (px - grab.0).clamp(0.0, (1.0 - w).max(0.0));
                             let ny = (py - grab.1).clamp(0.0, (1.0 - h).max(0.0));
-                            ann.points = vec![(nx, ny), (nx + w, ny + h)];
+                            [(nx, ny), (nx + w, ny + h)]
                         }
                         ImageDragMode::Resize { anchor } => {
                             let aspect = (w * sw) / (h * sh).max(1.0); // Pixel aspect ratio.
@@ -2326,23 +2300,20 @@ impl Lapis {
                                 .clamp(min_w.min(max_w), max_w.max(0.001));
                             let new_h = new_w * sw / aspect / sh;
                             let c = (anchor.0 + sx * new_w, anchor.1 + sy * new_h);
-                            ann.points = vec![
+                            [
                                 (anchor.0.min(c.0), anchor.1.min(c.1)),
                                 (anchor.0.max(c.0), anchor.1.max(c.1)),
-                            ];
+                            ]
                         }
+                    };
+                    if ann.points != points {
+                        ann.points = points.to_vec();
+                        self.mark_study_changed();
                     }
                 }
                 ui.ctx().request_repaint();
             } else {
                 self.image_drag = None;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
             }
         }
 
@@ -2382,13 +2353,7 @@ impl Lapis {
                     list.remove(si);
                 }
                 self.selected_image = None;
-                let _ = notes::save_doc_data(
-                    &self.pdf_path,
-                    &self.notes,
-                    &self.annotations,
-                    self.blank_pages.clone(),
-                    &self.sketches,
-                );
+                self.save_study_edit();
             }
         }
     }

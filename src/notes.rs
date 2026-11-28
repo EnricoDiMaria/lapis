@@ -3423,7 +3423,7 @@ pub fn prepare_image_xobjects(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::test_support::{check_pdf_with_qpdf, isolated_dir};
     use std::fs::OpenOptions;
 
@@ -3510,7 +3510,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    fn sample_textbox(text: &str, points: Vec<(f32, f32)>) -> PageAnnotation {
+    pub(crate) fn sample_textbox(text: &str, points: Vec<(f32, f32)>) -> PageAnnotation {
         PageAnnotation {
             kind: AnnotationKind::TextBox, color: [10, 20, 30], points,
             text: text.to_owned(), font_size: 20.0, bold: true, italic: true, stroke_width: 3.0,
@@ -3733,7 +3733,12 @@ mod tests {
         write_save_fixture_pdf(path, count, 320, false);
     }
 
-    fn write_save_fixture_pdf(path: &Path, count: u32, payload_repeats: usize, mixed_sizes: bool) {
+    pub(crate) fn write_save_fixture_pdf(
+        path: &Path,
+        count: u32,
+        payload_repeats: usize,
+        mixed_sizes: bool,
+    ) {
         use lopdf::{Object, Stream, dictionary};
         let mut doc = lopdf::Document::with_version("1.5");
         let pages_id = doc.new_object_id();

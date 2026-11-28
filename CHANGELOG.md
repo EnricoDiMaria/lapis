@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the previous recording, transcript, and index until a replacement audio import, trim, or silence removal is ready to publish. Save deletions to the index before removing the associated audio file.
 - Require confirmation before deleting a custom page with sketch or memo content. Clear PDF undo history when page numbering changes and recover interrupted audio-index remaps when reopening a PDF.
 
+### Performance
+
+- Skip local checkpoint work on idle frames. Keep completed study edits backed up and batch rapid reading-position updates before writing session state.
+- Reuse render requests for an unchanged viewport. Count cached texture bytes as entries change and limit the thumbnail cache to 32 MiB.
+- Build the PDF search index in the background so notes and audio results can appear while pages are indexed.
+
 ### Development
 
 - Isolated disk-backed tests from installed app data and other tests on Linux and Windows.

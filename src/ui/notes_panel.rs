@@ -386,7 +386,7 @@ impl Lapis {
                             &mut self.sketches,
                             &self.app_state.shortcuts.trackpad_draw_hold,
                         ) {
-                            self.save_sketch_data();
+                            self.save_study_edit();
                         }
                         return;
                     }
@@ -741,7 +741,6 @@ impl Lapis {
                             ui.add_space(edit_bottom_pad);
 
                             if output.response.changed() {
-                                self.note_is_dirty = true;
                                 self.sync_and_save();
                             }
 
@@ -1004,7 +1003,6 @@ impl Lapis {
                                             ),
                                         ));
                                         state.store(ui.ctx(), text_edit_id);
-                                        self.note_is_dirty = true;
                                         self.sync_and_save();
                                     }
                                 }
@@ -1017,7 +1015,6 @@ impl Lapis {
                                 match act {
                                     SpellAction::Replace(new_word) => {
                                         replace_char_range(&mut self.current_note, s, e, &new_word);
-                                        self.note_is_dirty = true;
                                         self.sync_and_save();
 
                                         let mut st = egui::text_edit::TextEditState::load(

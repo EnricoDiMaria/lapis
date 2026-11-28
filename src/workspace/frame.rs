@@ -32,6 +32,7 @@ impl eframe::App for Lapis {
             }
         }
         self.save_session_state();
+        self.flush_session_state();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -184,7 +185,10 @@ impl eframe::App for Lapis {
             }
         }
 
-        if let Some(render) = self.viewer.upload_ready(ui.ctx(), self.render_view()) {
+        if let Some(render) =
+            self.viewer
+                .upload_ready(ui.ctx(), self.render_view(), self.pdf_dark_mode)
+        {
             let (handle, dims) = render.texture;
             self.texture_handle = Some(handle);
             self.page_dims = dims;
@@ -3587,7 +3591,6 @@ impl eframe::App for Lapis {
                 if !self.lock_note_page {
                     self.note_page = vis_p;
                     self.current_note = self.notes.get(&vis_p).cloned().unwrap_or_default();
-                    self.note_is_dirty = false;
                 }
                 self.selected_textbox = None;
             }
@@ -3700,7 +3703,6 @@ impl eframe::App for Lapis {
                                             self.note_page = p;
                                             self.current_note =
                                                 self.notes.get(&p).cloned().unwrap_or_default();
-                                            self.note_is_dirty = false;
                                         }
                                     }
 
@@ -4089,20 +4091,7 @@ impl eframe::App for Lapis {
             self.render_radial_tools_menu(ui);
         }
         self.paint_annotation_cursor(&ctx);
-        // End-of-frame local-only checkpoint. A SIGKILL/pkill -9 cannot invoke
-        // on_exit, so the most recent completed UI action must already be on disk.
-        if self.has_pdf() {
-            let snapshot = self.local_checkpoint_hash();
-            if snapshot.is_some() && snapshot != self.last_local_checkpoint_hash {
-                let backing_off = self
-                    .checkpoint_failed_at
-                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
-                if backing_off {
-                    ctx.request_repaint_after(std::time::Duration::from_secs(2));
-                } else {
-                    self.sync_and_save();
-                }
-            }
-        }
+        self.checkpoint_after_frame(&ctx);
+        self.service_session_state(&ctx);
     }
 }

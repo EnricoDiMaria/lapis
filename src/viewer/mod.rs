@@ -19,9 +19,10 @@ use render::{RenderRequest, RenderWorkers, WorkerMsg, scale_key};
 
 const THUMB_SCALE: f32 = 0.22;
 const PAGE_CACHE_BYTES: usize = 384 * 1024 * 1024;
+const THUMBNAIL_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const IMAGES_PER_FRAME: usize = 2;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RenderView {
     pub(crate) current_page: u32,
     pub(crate) total_pages: u32,
@@ -65,9 +66,56 @@ impl RenderView {
 
 type PageTexture = (egui::TextureHandle, (u32, u32));
 
-struct RenderedPage {
+struct CachedTexture {
     texture: PageTexture,
     key: u32,
+}
+
+fn texture_bytes((w, h): (u32, u32)) -> usize {
+    w as usize * h as usize * 4
+}
+
+#[derive(Default)]
+struct TextureCache {
+    entries: HashMap<u32, CachedTexture>,
+    order: VecDeque<u32>,
+    bytes: usize,
+}
+
+impl TextureCache {
+    fn touch(&mut self, page: u32) {
+        self.order.retain(|&cached| cached != page);
+        self.order.push_back(page);
+    }
+
+    fn insert(&mut self, page: u32, texture: PageTexture, key: u32) {
+        self.bytes += texture_bytes(texture.1);
+        if let Some(previous) = self.entries.insert(page, CachedTexture { texture, key }) {
+            self.bytes -= texture_bytes(previous.texture.1);
+        }
+        self.touch(page);
+    }
+
+    fn evict(&mut self, budget: usize, protected: impl Fn(u32) -> bool) {
+        let mut i = 0;
+        while self.bytes > budget && i < self.order.len() {
+            let page = self.order[i];
+            if protected(page) {
+                i += 1;
+                continue;
+            }
+            self.order.remove(i);
+            if let Some(entry) = self.entries.remove(&page) {
+                self.bytes -= texture_bytes(entry.texture.1);
+            }
+        }
+    }
+}
+
+struct PageRequest {
+    view: RenderView,
+    key: u32,
+    wanted: Vec<u32>,
 }
 
 pub(crate) struct CurrentPageRender {
@@ -79,13 +127,12 @@ pub(crate) struct CurrentPageRender {
 #[derive(Default)]
 pub(crate) struct Viewer {
     workers: Option<RenderWorkers>,
-    pages: HashMap<u32, RenderedPage>,
-    thumbnails: HashMap<u32, PageTexture>,
-    cache_order: VecDeque<u32>,
+    pages: TextureCache,
+    thumbnails: TextureCache,
     text: HashMap<u32, Arc<PageText>>,
     links: HashMap<u32, Vec<PdfLinkZone>>,
-    last_page_request: Option<(u32, Vec<u32>)>,
-    last_thumbnail_range: Option<(usize, usize)>,
+    last_page_request: Option<PageRequest>,
+    last_thumbnail_request: Option<(usize, usize, bool)>,
 }
 
 impl Viewer {
@@ -104,11 +151,14 @@ impl Viewer {
     }
 
     pub(crate) fn page(&self, page: u32) -> Option<&PageTexture> {
-        self.pages.get(&page).map(|entry| &entry.texture)
+        self.pages.entries.get(&page).map(|entry| &entry.texture)
     }
 
     pub(crate) fn thumbnail(&self, page: u32) -> Option<&PageTexture> {
-        self.thumbnails.get(&page)
+        self.thumbnails
+            .entries
+            .get(&page)
+            .map(|entry| &entry.texture)
     }
 
     pub(crate) fn page_or_thumbnail(&self, page: u32) -> Option<&PageTexture> {
@@ -123,50 +173,50 @@ impl Viewer {
         self.links.get(&page).map(Vec::as_slice)
     }
 
-    pub(crate) fn clear_textures(&mut self) {
-        self.pages.clear();
-        self.thumbnails.clear();
-    }
-
     pub(crate) fn invalidate_images(&mut self) {
-        self.clear_textures();
+        self.pages = TextureCache::default();
+        self.thumbnails = TextureCache::default();
         self.last_page_request = None;
-        self.last_thumbnail_range = None;
+        self.last_thumbnail_request = None;
     }
 
     pub(crate) fn touch_page(&mut self, page: u32) {
-        self.cache_order.retain(|&cached| cached != page);
-        self.cache_order.push_back(page);
+        self.pages.touch(page);
     }
 
     fn evict_pages(&mut self, view: RenderView, budget: usize) {
-        let protected = view.wanted_pages();
-        let mut bytes: usize = self
-            .pages
-            .values()
-            .map(|entry| {
-                let (_, (w, h)) = &entry.texture;
-                *w as usize * *h as usize * 4
-            })
-            .sum();
-        let mut i = 0;
-        while bytes > budget && i < self.cache_order.len() {
-            let page = self.cache_order[i];
-            if protected.contains(&page) {
-                i += 1;
-                continue;
-            }
-            self.cache_order.remove(i);
-            if let Some(entry) = self.pages.remove(&page) {
-                let (_, (w, h)) = entry.texture;
-                bytes = bytes.saturating_sub(w as usize * h as usize * 4);
+        if self.pages.bytes > budget {
+            if let Some(last) = &self.last_page_request
+                && last.view == view
+            {
+                self.pages.evict(budget, |page| last.wanted.contains(&page));
+            } else {
+                let protected = view.wanted_pages();
+                self.pages.evict(budget, |page| protected.contains(&page));
+                // A page from the previous request may have been evicted.
+                self.last_page_request = None;
             }
         }
     }
 
+    fn evict_thumbnails(&mut self, view: RenderView, budget: usize) {
+        if self.thumbnails.bytes <= budget {
+            return;
+        }
+        let sidebar = self.last_thumbnail_request;
+        self.thumbnails.evict(budget, |page| {
+            page == view.current_page
+                || Some(page) == view.split_page
+                || sidebar.is_some_and(|(lo, hi, _)| (lo..hi).contains(&((page - 1) as usize)))
+        });
+        // A large sidebar range can itself exceed the budget. Keep the active page's fallback.
+        self.thumbnails
+            .evict(budget, |page| page == view.current_page);
+    }
+
     /// Match the color mode and keep at most 2x the requested scale for linear filtering.
     fn page_is_adequate(&self, page: u32, key: u32) -> bool {
-        self.pages.get(&page).is_some_and(|entry| {
+        self.pages.entries.get(&page).is_some_and(|entry| {
             let cached = entry.key;
             cached % 2 == key % 2 && cached >= key && cached <= key * 2
         })
@@ -174,12 +224,23 @@ impl Viewer {
 
     pub(crate) fn request_pages(&mut self, view: RenderView, scale: f32, dark_mode: bool) {
         let key = scale_key(scale) * 2 + u32::from(dark_mode);
-        let wanted = view.wanted_pages();
         if self
             .last_page_request
             .as_ref()
-            .is_some_and(|(last_key, last_pages)| *last_key == key && *last_pages == wanted)
+            .is_some_and(|last| last.key == key && last.view == view)
         {
+            return;
+        }
+        let wanted = view.wanted_pages();
+        if self.pages.bytes > PAGE_CACHE_BYTES {
+            self.pages
+                .evict(PAGE_CACHE_BYTES, |page| wanted.contains(&page));
+        }
+        if let Some(last) = &mut self.last_page_request
+            && last.key == key
+            && last.wanted == wanted
+        {
+            last.view = view;
             return;
         }
         let pages: Vec<i32> = wanted
@@ -188,7 +249,7 @@ impl Viewer {
             .filter(|&page| !self.page_is_adequate(page, key))
             .map(|page| (page - 1) as i32)
             .collect();
-        self.last_page_request = Some((key, wanted));
+        self.last_page_request = Some(PageRequest { view, key, wanted });
         if !pages.is_empty()
             && let Some(workers) = &self.workers
         {
@@ -210,15 +271,25 @@ impl Viewer {
     ) {
         let lo = first_row.saturating_sub(3);
         let hi = (end_row + 3).min(total_pages as usize);
-        if self.last_thumbnail_range == Some((lo, hi)) {
+        if self.last_thumbnail_request == Some((lo, hi, dark_mode)) {
             return;
         }
-        self.last_thumbnail_range = Some((lo, hi));
+        self.last_thumbnail_request = Some((lo, hi, dark_mode));
         let mid = ((first_row + end_row) / 2) as i32;
-        let mut pages: Vec<i32> = (lo..hi)
-            .filter(|i| !self.thumbnails.contains_key(&((*i + 1) as u32)))
-            .map(|i| i as i32)
-            .collect();
+        let mut pages = Vec::new();
+        for index in lo..hi {
+            let page = (index + 1) as u32;
+            if self
+                .thumbnails
+                .entries
+                .get(&page)
+                .is_some_and(|entry| entry.key == u32::from(dark_mode))
+            {
+                self.thumbnails.touch(page);
+            } else {
+                pages.push(index as i32);
+            }
+        }
         if !pages.is_empty()
             && let Some(workers) = &self.workers
         {
@@ -236,6 +307,7 @@ impl Viewer {
         &mut self,
         ctx: &egui::Context,
         view: RenderView,
+        dark_mode: bool,
     ) -> Option<CurrentPageRender> {
         let mut current = None;
         let mut images = 0;
@@ -257,21 +329,26 @@ impl Viewer {
             self.links.insert(page, result.links);
 
             if result.is_thumb {
+                if result.dark_mode != dark_mode || texture_bytes(dims) > THUMBNAIL_CACHE_BYTES {
+                    continue;
+                }
                 let handle = ctx.load_texture(
                     format!("pdf_thumb_{page}"),
                     result.image,
                     egui::TextureOptions::LINEAR,
                 );
-                self.thumbnails.insert(page, (handle, dims));
+                self.thumbnails
+                    .insert(page, (handle, dims), u32::from(result.dark_mode));
+                self.evict_thumbnails(view, THUMBNAIL_CACHE_BYTES);
                 continue;
             }
 
             let result_key = result.scale_key * 2 + u32::from(result.dark_mode);
             // A superseded request may finish after the viewport changes.
-            if let Some((key, wanted)) = &self.last_page_request
-                && wanted.contains(&page)
-                && result_key != *key
-                && self.page_is_adequate(page, *key)
+            if let Some(last) = &self.last_page_request
+                && last.wanted.contains(&page)
+                && result_key != last.key
+                && self.page_is_adequate(page, last.key)
             {
                 continue;
             }
@@ -286,14 +363,7 @@ impl Viewer {
                     page_pt: result.page_pt,
                 });
             }
-            self.pages.insert(
-                page,
-                RenderedPage {
-                    texture: (handle, dims),
-                    key: result_key,
-                },
-            );
-            self.touch_page(page);
+            self.pages.insert(page, (handle, dims), result_key);
             self.evict_pages(view, PAGE_CACHE_BYTES);
         }
         if images == IMAGES_PER_FRAME {

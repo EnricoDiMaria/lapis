@@ -13,6 +13,7 @@ const MIN_RENDER_SCALE: f32 = 0.5;
 const MAX_RENDER_SCALE: f32 = 4.0;
 const MAX_PAGE_PIXELS: f32 = 12_000_000.0;
 const MAX_TEXTURE_SIDE: f32 = 8192.0;
+const MAX_THUMBNAIL_SIDE: f32 = 512.0;
 
 /// MuPDF scale for the on-screen width, quantized upwards and capped by texture limits.
 pub(crate) fn render_scale(
@@ -136,10 +137,25 @@ pub(crate) fn render_to_image(
     scale: f32,
     dark_mode: bool,
 ) -> Option<((f32, f32), egui::ColorImage, Vec<PdfLinkZone>)> {
+    render_page(doc, idx, scale, dark_mode, false)
+}
+
+fn render_page(
+    doc: &Document,
+    idx: i32,
+    scale: f32,
+    dark_mode: bool,
+    thumbnail: bool,
+) -> Option<((f32, f32), egui::ColorImage, Vec<PdfLinkZone>)> {
     let page = doc.load_page(idx).ok()?;
     let b = page.bounds().ok()?;
     let pw = b.x1 - b.x0;
     let ph = b.y1 - b.y0;
+    let scale = if thumbnail {
+        scale.min(MAX_THUMBNAIL_SIDE / pw.max(ph))
+    } else {
+        scale
+    };
 
     let pix = page
         .to_pixmap(
@@ -213,7 +229,7 @@ fn spawn_worker(
                     continue 'outer;
                 }
                 if let Some((page_pt, image, links)) =
-                    render_to_image(&doc, idx, req.scale, req.dark_mode)
+                    render_page(&doc, idx, req.scale, req.dark_mode, is_thumb)
                 {
                     let res = RenderResult {
                         page_idx: idx,

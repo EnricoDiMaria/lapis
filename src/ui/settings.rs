@@ -660,7 +660,7 @@ impl Lapis {
                                                             )
                                                             .changed()
                                                             {
-                                                                self.viewer.clear_textures();
+                                                                self.viewer.invalidate_images();
                                                                 ui.ctx().request_repaint();
                                                             }
 

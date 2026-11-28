@@ -110,7 +110,7 @@ impl ExportSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookmarkItem {
     pub title: String,
     pub page: u32,
@@ -125,7 +125,7 @@ pub enum PanelSlot {
 }
 
 /// Saved panel sizes in points. `None` keeps the default size.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanelSizes {
     pub right: Option<f32>,
@@ -151,7 +151,7 @@ impl PanelSizes {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentFileEntry {
     pub path: PathBuf,
     pub name: String,
@@ -494,10 +494,13 @@ impl AppState {
     }
 
     pub fn save(&self) {
+        let _ = self.try_save();
+    }
+
+    pub(crate) fn try_save(&self) -> std::io::Result<()> {
         let path = Self::config_path();
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = crate::paths::write_atomic(&path, json.as_bytes());
-        }
+        let json = serde_json::to_vec_pretty(self)?;
+        crate::paths::write_atomic(&path, &json)
     }
 
     pub fn find_entry(&self, pdf_path: &Path) -> Option<&RecentFileEntry> {
@@ -507,17 +510,20 @@ impl AppState {
             .find(|e| e.path == canonical || e.path == pdf_path)
     }
 
-    pub fn upsert_recent(&mut self, mut entry: RecentFileEntry) {
+    pub fn upsert_recent(&mut self, mut entry: RecentFileEntry) -> bool {
         if entry.path.as_os_str().is_empty() {
-            return;
+            return false;
         }
         if let Ok(canon) = dunce::canonicalize(&entry.path) {
             entry.path = canon;
         }
+        if self.recent_files.front() == Some(&entry) {
+            return false;
+        }
         self.recent_files.retain(|e| e.path != entry.path);
         self.recent_files.push_front(entry);
         self.recent_files.truncate(MAX_RECENT_FILES);
-        self.save();
+        true
     }
 
     pub fn remove_recent(&mut self, path: &Path) {

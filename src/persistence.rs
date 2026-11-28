@@ -62,7 +62,7 @@ pub enum Completion {
     Done { newer_edits: bool },
 }
 
-/// Decides what follows a successful commit. `saved` is the content hash of the committed
+/// Decides what follows a successful commit. `saved` is the edit revision of the committed
 /// snapshot, `current` that of the live document.
 pub fn on_commit_success(
     after: &AfterPdfSave,

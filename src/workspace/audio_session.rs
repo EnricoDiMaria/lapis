@@ -1765,7 +1765,6 @@ impl Lapis {
                                 }
                                 self.current_note.push_str("### 󰗊 Lecture Transcript\n");
                                 self.current_note.push_str(&lines.join("\n"));
-                                self.note_is_dirty = true;
                                 self.sync_and_save();
                                 self.audio_toast("󰄬 Transcription added to the notes");
                             }

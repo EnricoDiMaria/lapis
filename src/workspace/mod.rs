@@ -217,9 +217,9 @@ pub(crate) struct Lapis {
     total_pages: u32,
     current_note: String,
     notes: HashMap<u32, String>,
-    note_is_dirty: bool,
-    /// Last successful local checkpoint; detects edits from every UI tool, not just notes.
-    last_local_checkpoint_hash: Option<u64>,
+    study_revision: u64,
+    checkpointed_revision: Option<u64>,
+    session_save_due: Option<std::time::Instant>,
     pending_signed_page_op: Option<SignedPageOp>,
     /// True only while a confirmed page change is replayed on a signed PDF.
     allow_signature_loss: bool,
@@ -452,8 +452,9 @@ impl Lapis {
             total_pages: 1,
             current_note: String::new(),
             notes: HashMap::new(),
-            note_is_dirty: false,
-            last_local_checkpoint_hash: None,
+            study_revision: 0,
+            checkpointed_revision: None,
+            session_save_due: None,
             pending_signed_page_op: None,
             allow_signature_loss: false,
             checkpoint_failed_at: None,
@@ -775,22 +776,11 @@ impl Lapis {
         self.panel_seen[idx] = Some(size);
     }
 
-    /// Persist notes, annotations and sketches (after a change made in the Sketch tab).
-    fn save_sketch_data(&self) {
-        let _ = notes::save_doc_data(
-            &self.pdf_path,
-            &self.notes,
-            &self.annotations,
-            self.blank_pages.clone(),
-            &self.sketches,
-        );
-    }
-
     /// Finish a text box that is still being typed in the Sketch tab (before the page
     /// structure changes, the document is closed, ...).
     fn finish_sketch_edit(&mut self) {
         if self.sketch.commit_pending(&mut self.sketches) {
-            self.save_sketch_data();
+            self.save_study_edit();
         }
     }
 
@@ -919,7 +909,7 @@ impl Lapis {
                 }
 
                 self.current_note = merge_imported_notes(&mut self.notes, imported, self.note_page);
-                self.note_is_dirty = true;
+                self.mark_study_changed();
                 self.show_notes = true;
                 if let Err(err) = self.sync_local_checkpoint() {
                     self.audio_toast(format!("Notes imported, but local backup failed: {err}"));
@@ -1453,7 +1443,7 @@ impl Lapis {
             }
             "toggle_dark" => {
                 self.pdf_dark_mode = !self.pdf_dark_mode;
-                self.viewer.clear_textures();
+                self.viewer.invalidate_images();
                 ctx.request_repaint();
             }
             "insert_blank" => self.insert_blank_page_after(
@@ -1559,7 +1549,6 @@ impl Lapis {
         self.sync_and_save();
         self.note_page = p;
         self.current_note = self.notes.get(&p).cloned().unwrap_or_default();
-        self.note_is_dirty = false;
     }
     fn apply_custom_font(&self, ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
@@ -1917,13 +1906,7 @@ impl Lapis {
             native_source: None,
         });
         self.selected_image = Some((page, list.len() - 1));
-        let _ = notes::save_doc_data(
-            &self.pdf_path,
-            &self.notes,
-            &self.annotations,
-            self.blank_pages.clone(),
-            &self.sketches,
-        );
+        self.save_study_edit();
         self.toast_message = Some((
             format!("Screenshot added to page {page}"),
             std::time::Instant::now(),
@@ -1946,9 +1929,9 @@ impl Lapis {
                         .map(|(i, _)| i)
                         .unwrap_or(self.current_note.len());
                     self.current_note.insert_str(at, &md);
-                    self.note_is_dirty = true;
                 } else {
                     self.notes.entry(page).or_default().push_str(&md);
+                    self.mark_study_changed();
                     self.sync_and_save();
                 }
                 "Screenshot added to the note".to_string()
